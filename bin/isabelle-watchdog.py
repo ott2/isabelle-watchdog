@@ -266,26 +266,43 @@ def _print_summary_ok(lines: list[str], log_path: Path) -> None:
 
 
 def _print_summary_fail(lines: list[str], log_path: Path) -> None:
-    # Find first *** error line
-    first_error = ""
+    """Print FAIL summary including the first error block.
+
+    The first line is `FAIL  <first *** line>`; up to FAIL_BLOCK_LINES
+    additional contiguous `***` lines are shown indented, capturing the
+    goal display / location info that follows.  Saves a follow-up
+    grep on `t/logs/last-build.log` for the typical diagnose-the-failure
+    workflow.
+    """
+    FAIL_BLOCK_LINES = 6  # total *** lines including the first
+    block: list[str] = []
+    in_block = False
     for l in lines:
         m = ERROR_RE.match(l)
         if m:
-            first_error = m.group(1).strip()
+            if not in_block:
+                in_block = True
+            block.append(m.group(1).rstrip())
+            if len(block) >= FAIL_BLOCK_LINES:
+                break
+        elif in_block:
+            # First non-*** line after entering the block; stop.
             break
-    if first_error:
-        # Truncate to ~100 chars
-        if len(first_error) > 100:
-            first_error = first_error[:97] + "..."
-        print(f"FAIL  {first_error}")
+
+    def _trunc(s: str, n: int = 100) -> str:
+        return s if len(s) <= n else s[: n - 3] + "..."
+
+    if block:
+        print(f"FAIL  {_trunc(block[0])}")
+        for cont in block[1:]:
+            # Strip the leading whitespace that `***   ...` has, but
+            # keep meaningful indentation (goal body, etc.).
+            print(f"      {_trunc(cont.lstrip())}")
     else:
         # No *** line found; show last non-empty line
         for l in reversed(lines):
             if l.strip():
-                msg = l.strip()
-                if len(msg) > 100:
-                    msg = msg[:97] + "..."
-                print(f"FAIL  {msg}")
+                print(f"FAIL  {_trunc(l.strip())}")
                 break
         else:
             print("FAIL  (no output)")
