@@ -5,10 +5,16 @@ isabelle-watchdog.py — Build wrapper for Isabelle with terse output.
 Runs an Isabelle build, saves full output to logs/$LOG_NAME
 (default last-build.log), and prints a one-line summary to the terminal.
 
-Usage: isabelle-watchdog.py [TIMEOUT] command [args...]
+Usage: isabelle-watchdog.py command [args...]
 
 Environment:
-    WALL_TIMEOUT          Absolute wall-clock limit (default: 60)
+    WATCHDOG_TIMEOUT      Kill after N seconds of stalled stdout (default: 20).
+    WALL_TIMEOUT          Absolute wall-clock limit (default: 40).  The 40 s
+                          ceiling is project policy: a build hitting the wall
+                          is a cost-regression signal (.claude/memory/
+                          feedback_no_buildclean_reflex.md), not a tunable.
+                          Override via env var only when investigating that
+                          regression.
     REPETITION_THRESHOLD  Kill after N identical lines (default: 3)
     LOG_NAME              Log file basename under logs/ (default: last-build.log).
                           Override per-stage so parallel or sequential stages
@@ -106,18 +112,8 @@ def main() -> int:
         print(__doc__.strip(), file=sys.stderr)
         return 1
 
-    # First arg may be the activity timeout (bare integer)
-    if args[0].isdigit():
-        activity_timeout = int(args[0])
-        args = args[1:]
-    else:
-        activity_timeout = 40
-
-    if not args:
-        print("Error: no command given", file=sys.stderr)
-        return 1
-
-    wall_timeout = int(os.environ.get("WALL_TIMEOUT", "60"))
+    activity_timeout = int(os.environ.get("WATCHDOG_TIMEOUT", "20"))
+    wall_timeout = int(os.environ.get("WALL_TIMEOUT", "40"))
     rep_threshold = int(os.environ.get("REPETITION_THRESHOLD", "3"))
     startup_timeout = activity_timeout + 20
 
