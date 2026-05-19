@@ -261,18 +261,22 @@ def _print_summary_ok(lines: list[str], log_path: Path) -> None:
         parts.append(elapsed)
     if cpu:
         parts.append(cpu)
+    # No `log:` line on success — the log path matters only for
+    # diagnosis, and printing it after `OK` invites the eye to look
+    # for something to do.
     print("  ".join(parts))
-    print(f"  log: {log_path}")
 
 
 def _print_summary_fail(lines: list[str], log_path: Path) -> None:
     """Print FAIL summary including the first error block.
 
-    The first line is `FAIL  <first *** line>`; up to FAIL_BLOCK_LINES
-    additional contiguous `***` lines are shown indented, capturing the
-    goal display / location info that follows.  Saves a follow-up
-    grep on `t/logs/last-build.log` for the typical diagnose-the-failure
-    workflow.
+    The first line is `log: <path>` so a `make build | head -N`
+    invocation always captures the log path even when the error
+    block is long.  Then `FAIL <first *** line>` followed by up to
+    FAIL_BLOCK_LINES - 1 additional contiguous `***` lines,
+    capturing the goal display / location info that follows.
+    Together this saves a follow-up grep on `t/logs/last-build.log`
+    for the typical diagnose-the-failure workflow.
     """
     FAIL_BLOCK_LINES = 6  # total *** lines including the first
     block: list[str] = []
@@ -292,6 +296,7 @@ def _print_summary_fail(lines: list[str], log_path: Path) -> None:
     def _trunc(s: str, n: int = 100) -> str:
         return s if len(s) <= n else s[: n - 3] + "..."
 
+    print(f"log: {log_path}")
     if block:
         print(f"FAIL  {_trunc(block[0])}")
         for cont in block[1:]:
@@ -306,8 +311,6 @@ def _print_summary_fail(lines: list[str], log_path: Path) -> None:
                 break
         else:
             print("FAIL  (no output)")
-    print(f"  log: {log_path}")
-    print(f"  session details: isabelle build_log -v NDTHT")
 
 
 def _print_summary_timeout(
@@ -321,6 +324,9 @@ def _print_summary_timeout(
     progress_pct: str,
     log_path: Path,
 ) -> None:
+    # log: first so `head -N` captures it even if the diagnostic
+    # line ends up wrapped.
+    print(f"log: {log_path}")
     if reason == "wall":
         print(f"TIMEOUT  {wall_timeout}s wall clock exceeded")
     elif reason == "repetition":
@@ -332,7 +338,6 @@ def _print_summary_timeout(
             print(f"STUCK  {short} {progress_pct}%  no output for {activity_timeout}s")
         else:
             print(f"STUCK  no output for {activity_timeout}s")
-    print(f"  log: {log_path}")
 
 
 # ---------------------------------------------------------------------------
