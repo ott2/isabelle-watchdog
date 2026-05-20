@@ -286,7 +286,14 @@ def _print_summary_fail(lines: list[str], log_path: Path) -> None:
         if m:
             if not in_block:
                 in_block = True
-            block.append(m.group(1).rstrip())
+            content = m.group(1).rstrip()
+            # Skip blank `*** ` lines — they waste the head -N budget
+            # without adding signal.  The error block's structure
+            # (location / cause / goal display) is readable without
+            # them.
+            if not content:
+                continue
+            block.append(content)
             if len(block) >= FAIL_BLOCK_LINES:
                 break
         elif in_block:
