@@ -8,17 +8,25 @@ Runs an Isabelle build, saves full output to logs/$LOG_NAME
 Usage: isabelle-watchdog.py command [args...]
 
 Environment:
-    WATCHDOG_TIMEOUT      Kill after N seconds of stalled stdout (default: 20).
-    WALL_TIMEOUT          Absolute wall-clock limit (default: 40).  The 40 s
-                          ceiling is project policy: a build hitting the wall
-                          is a cost-regression signal (.claude/memory/
-                          feedback_no_buildclean_reflex.md), not a tunable.
-                          Override via env var only when investigating that
-                          regression.
-    REPETITION_THRESHOLD  Kill after N identical lines (default: 3)
-    LOG_NAME              Log file basename under logs/ (default: last-build.log).
-                          Override per-stage so parallel or sequential stages
-                          don't clobber each other's output.
+    WATCHDOG_TIMEOUT          Kill after N seconds of stalled stdout (default: 20).
+    WALL_TIMEOUT              Absolute wall-clock limit (default: 40).  The 40 s
+                              ceiling is project policy: a build hitting the wall
+                              is a cost-regression signal (.claude/memory/
+                              feedback_no_buildclean_reflex.md), not a tunable.
+                              Override via env var only when investigating that
+                              regression.
+    REPETITION_THRESHOLD      Kill after N identical lines (default: 3).
+    LOOP_PROGRESS_THRESHOLD   Kill after N consecutive Isabelle
+                              `command "X" running for ...s (line Y of theory Z)`
+                              warnings on the same (theory, line, command) triple
+                              (default: 3).  This catches a tactic stuck in a
+                              search loop on a single line; the warnings have
+                              monotonically-increasing elapsed times so the
+                              identical-line repetition detector doesn't fire on
+                              them.
+    LOG_NAME                  Log file basename under logs/ (default: last-build.log).
+                              Override per-stage so parallel or sequential stages
+                              don't clobber each other's output.
 
 Exit codes: 0 = success, 124 = watchdog kill, other = child's code.
 """
@@ -49,6 +57,21 @@ THEORY_DONE_RE = re.compile(r":\s+theory\s+\S+\s+100%")
 ERROR_RE = re.compile(r"^\*\*\*\s+(.*)")
 THEORY_PROGRESS_RE = re.compile(r"^(\S+):\s+theory\s+(\S+?)(?:\s+(\d+)%)?")
 BUILD_PHASE_RE = re.compile(r"^(Session |Running )")
+
+# Isabelle's long-running-command warning, emitted periodically while
+# a single command (typically `by ...` or `apply ...`) is still
+# searching for a proof.  Lines look like:
+#
+#     NDTHT: command "by" running for 25.674s (line 1488 of theory "NDTHT.AlphabetReduction")
+#
+# These are not picked up by the identical-line repetition detector
+# (the elapsed-time field changes per emission), but consecutive
+# matches on the same (theory, line, command) triple are the
+# definitive signature of a single tactic stuck in a search loop.
+LOOP_RE = re.compile(
+    r'^\S+:\s+command\s+"(\S+)"\s+running\s+for\s+([\d.]+)s\s+'
+    r'\(line\s+(\d+)\s+of\s+theory\s+"([^"]+)"\)'
+)
 
 
 def strip_ansi(line: str) -> str:
@@ -115,6 +138,13 @@ def main() -> int:
     activity_timeout = int(os.environ.get("WATCHDOG_TIMEOUT", "20"))
     wall_timeout = int(os.environ.get("WALL_TIMEOUT", "40"))
     rep_threshold = int(os.environ.get("REPETITION_THRESHOLD", "3"))
+    # N consecutive `command "X" running for ...s (line Y...)` warnings
+    # on the same (theory, line, command) triple = a tactic in a
+    # search loop on a single line.  Threshold 3 kills ~4s after
+    # Isabelle's first warning (which itself fires at ~20s of elapsed
+    # tactic time), well under the 40s wall budget, with a more
+    # informative LOOP-on-line message than the bare wall timeout.
+    loop_progress_threshold = int(os.environ.get("LOOP_PROGRESS_THRESHOLD", "3"))
     startup_timeout = activity_timeout + 20
 
     # --- Log file setup ---
@@ -142,9 +172,15 @@ def main() -> int:
     build_started = False
     last_line = ""
     rep_count = 0
-    timeout_reason = ""  # "", "activity", "wall", "repetition"
+    timeout_reason = ""  # "", "activity", "wall", "repetition", "loop_progress"
     last_progress_theory = ""
     last_progress_pct = ""
+    # Stuck-command tracking: (theory, line, command, count, last_elapsed).
+    # Incremented on each consecutive LOOP_RE match with the same
+    # (theory, line, command) triple; reset when the triple changes.
+    loop_key: tuple[str, str, str] | None = None
+    loop_count = 0
+    loop_elapsed = ""
 
     # Write log header
     with open(log_path, "w") as log_f:
@@ -189,6 +225,24 @@ def main() -> int:
                     rep_count = 0
                     if stripped:
                         last_line = stripped
+
+                # Long-running-command (loop-on-line) detection.
+                # Isabelle's per-command warning fires every ~2s
+                # while a tactic is still searching.  N+ consecutive
+                # matches on the same (theory, line, command) triple
+                # = the tactic is in a search loop on that line; we
+                # surface the line in the timeout summary so the
+                # culprit doesn't have to be grepped out of the log.
+                mloop = LOOP_RE.match(stripped)
+                if mloop:
+                    cmd, elapsed, lineno, theory = mloop.groups()
+                    key = (theory, lineno, cmd)
+                    if key == loop_key:
+                        loop_count += 1
+                    else:
+                        loop_key = key
+                        loop_count = 1
+                    loop_elapsed = elapsed
             else:
                 # No data — check timeouts
                 now = time.monotonic()
@@ -201,6 +255,13 @@ def main() -> int:
                 # Repetition
                 if rep_count >= rep_threshold:
                     timeout_reason = "repetition"
+                    break
+
+                # Loop-on-line: a single tactic emitted N+ consecutive
+                # progress warnings on the same line — it's searching
+                # in a loop, not making progress.
+                if loop_count >= loop_progress_threshold:
+                    timeout_reason = "loop_progress"
                     break
 
                 # Activity
@@ -220,6 +281,7 @@ def main() -> int:
         _print_summary_timeout(timeout_reason, lines, wall_timeout,
                                activity_timeout, rep_count, last_line,
                                last_progress_theory, last_progress_pct,
+                               loop_key, loop_count, loop_elapsed,
                                log_path)
         return 124
 
@@ -329,13 +391,31 @@ def _print_summary_timeout(
     last_line: str,
     progress_theory: str,
     progress_pct: str,
+    loop_key: tuple[str, str, str] | None,
+    loop_count: int,
+    loop_elapsed: str,
     log_path: Path,
 ) -> None:
     # log: first so `head -N` captures it even if the diagnostic
     # line ends up wrapped.
     print(f"log: {log_path}")
-    if reason == "wall":
-        print(f"TIMEOUT  {wall_timeout}s wall clock exceeded")
+    if reason == "loop_progress" and loop_key is not None:
+        theory, lineno, cmd = loop_key
+        short_theory = theory.split(".")[-1]
+        print(f'LOOP  {short_theory}: "{cmd}" looping on line {lineno} '
+              f'({loop_count}x same line, last {loop_elapsed}s elapsed)')
+    elif reason == "wall":
+        # Even on a bare wall timeout, surface the looping line if
+        # we have one — Isabelle's per-command warnings make the
+        # culprit obvious, no reason to make the user grep for it.
+        if loop_key is not None:
+            theory, lineno, cmd = loop_key
+            short_theory = theory.split(".")[-1]
+            print(f"TIMEOUT  {wall_timeout}s wall clock exceeded "
+                  f'(looping on {short_theory} line {lineno} — '
+                  f'"{cmd}" running for {loop_elapsed}s)')
+        else:
+            print(f"TIMEOUT  {wall_timeout}s wall clock exceeded")
     elif reason == "repetition":
         short = last_line[:60] + "..." if len(last_line) > 60 else last_line
         print(f'LOOP  repeated {rep_count}x: "{short}"')
