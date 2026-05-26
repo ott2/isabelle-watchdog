@@ -15,15 +15,12 @@ Environment:
                               feedback_no_buildclean_reflex.md), not a tunable.
                               Override via env var only when investigating that
                               regression.
-    REPETITION_THRESHOLD      Kill after N identical lines (default: 3).
     LOOP_PROGRESS_THRESHOLD   Kill after N consecutive Isabelle
                               `command "X" running for ...s (line Y of theory Z)`
                               warnings on the same (theory, line, command) triple
-                              (default: 3).  This catches a tactic stuck in a
-                              search loop on a single line; the warnings have
-                              monotonically-increasing elapsed times so the
-                              identical-line repetition detector doesn't fire on
-                              them.
+                              (default: 3).  Surfaces a tactic stuck in a search
+                              loop on a single line before the wall timeout
+                              fires, and the timeout summary names the line.
     LOG_NAME                  Log file basename under logs/ (default: last-build.log).
                               Override per-stage so parallel or sequential stages
                               don't clobber each other's output.
@@ -64,10 +61,10 @@ BUILD_PHASE_RE = re.compile(r"^(Session |Running )")
 #
 #     NDTHT: command "by" running for 25.674s (line 1488 of theory "NDTHT.AlphabetReduction")
 #
-# These are not picked up by the identical-line repetition detector
-# (the elapsed-time field changes per emission), but consecutive
-# matches on the same (theory, line, command) triple are the
-# definitive signature of a single tactic stuck in a search loop.
+# Consecutive matches on the same (theory, line, command) triple
+# are the definitive signature of a single tactic stuck in a
+# search loop; the elapsed-time field changes per emission but
+# the triple stays constant.
 LOOP_RE = re.compile(
     r'^\S+:\s+command\s+"(\S+)"\s+running\s+for\s+([\d.]+)s\s+'
     r'\(line\s+(\d+)\s+of\s+theory\s+"([^"]+)"\)'
@@ -137,7 +134,6 @@ def main() -> int:
 
     activity_timeout = int(os.environ.get("WATCHDOG_TIMEOUT", "20"))
     wall_timeout = int(os.environ.get("WALL_TIMEOUT", "40"))
-    rep_threshold = int(os.environ.get("REPETITION_THRESHOLD", "3"))
     # N consecutive `command "X" running for ...s (line Y...)` warnings
     # on the same (theory, line, command) triple = a tactic in a
     # search loop on a single line.  Threshold 3 kills ~4s after
@@ -170,9 +166,7 @@ def main() -> int:
     last_activity = time.monotonic()
     wall_start = time.monotonic()
     build_started = False
-    last_line = ""
-    rep_count = 0
-    timeout_reason = ""  # "", "activity", "wall", "repetition", "loop_progress"
+    timeout_reason = ""  # "", "activity", "wall", "loop_progress"
     last_progress_theory = ""
     last_progress_pct = ""
     # Stuck-command tracking: (theory, line, command, count, last_elapsed).
@@ -218,14 +212,6 @@ def main() -> int:
                     last_progress_theory = m.group(2)
                     last_progress_pct = m.group(3)
 
-                # Repetition detection
-                if stripped and stripped == last_line:
-                    rep_count += 1
-                else:
-                    rep_count = 0
-                    if stripped:
-                        last_line = stripped
-
                 # Long-running-command (loop-on-line) detection.
                 # Isabelle's per-command warning fires every ~2s
                 # while a tactic is still searching.  N+ consecutive
@@ -252,11 +238,6 @@ def main() -> int:
                     timeout_reason = "wall"
                     break
 
-                # Repetition
-                if rep_count >= rep_threshold:
-                    timeout_reason = "repetition"
-                    break
-
                 # Loop-on-line: a single tactic emitted N+ consecutive
                 # progress warnings on the same line — it's searching
                 # in a loop, not making progress.
@@ -279,7 +260,7 @@ def main() -> int:
         kill_tree(proc.pid)
         proc.wait()
         _print_summary_timeout(timeout_reason, lines, wall_timeout,
-                               activity_timeout, rep_count, last_line,
+                               activity_timeout,
                                last_progress_theory, last_progress_pct,
                                loop_key, loop_count, loop_elapsed,
                                log_path)
@@ -387,8 +368,6 @@ def _print_summary_timeout(
     lines: list[str],
     wall_timeout: int,
     activity_timeout: int,
-    rep_count: int,
-    last_line: str,
     progress_theory: str,
     progress_pct: str,
     loop_key: tuple[str, str, str] | None,
@@ -416,9 +395,6 @@ def _print_summary_timeout(
                   f'"{cmd}" running for {loop_elapsed}s)')
         else:
             print(f"TIMEOUT  {wall_timeout}s wall clock exceeded")
-    elif reason == "repetition":
-        short = last_line[:60] + "..." if len(last_line) > 60 else last_line
-        print(f'LOOP  repeated {rep_count}x: "{short}"')
     elif reason == "activity":
         if progress_theory:
             short = progress_theory.split(".")[-1]  # drop session prefix
