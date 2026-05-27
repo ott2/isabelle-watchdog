@@ -7,8 +7,13 @@ Reads the records written by bin/build_record.py (t/logs/builds.jsonl
   attempts.py list [-n N]        recent attempts, one line each
   attempts.py show BUILD_ID [--full]
                                  full record + the diff this attempt made
-  attempts.py episodes [-n N]    segment into episodes: runs of failing
-                                 attempts closed by a success (§12.4)
+  attempts.py episodes [-n N] [--diffs] [--full]
+                                 segment into episodes: runs of failing
+                                 attempts closed by a success (§12.4).
+                                 --diffs interleaves each attempt's diff
+                                 with its outcome (--full = full diff,
+                                 else --stat) — associate change with
+                                 outcome across a whole fail→fix run.
 
 This is the read side of the §14 MVP — deliberately thin, so we learn
 what views are worth having from early use rather than guessing now.
@@ -61,6 +66,17 @@ def cmd_list(recs: list[dict], n: int) -> None:
         print(_fmt_line(rec))
 
 
+def _print_attempt_diff(rec: dict, full: bool, indent: str = "  ") -> None:
+    """Print the diff this attempt introduced (its snapshot vs parent)."""
+    parent, snap = rec.get("parent_snapshot"), rec.get("snapshot")
+    if not (parent and snap):
+        return
+    print(f"{indent}--- diff {parent[:9]}..{snap[:9]} (this attempt's change) ---")
+    diff_args = ["diff"] + ([] if full else ["--stat"]) + [parent, snap]
+    out = _git(diff_args)
+    print(out if out else f"{indent}(no tracked-file change vs parent snapshot)")
+
+
 def cmd_show(recs: list[dict], build_id: str, full: bool) -> None:
     match = [r for r in recs if r["build_id"].startswith(build_id)]
     if not match:
@@ -69,17 +85,16 @@ def cmd_show(recs: list[dict], build_id: str, full: bool) -> None:
     rec = match[-1]
     for k, v in rec.items():
         print(f"  {k:16} {v}")
-    parent, snap = rec.get("parent_snapshot"), rec.get("snapshot")
-    if parent and snap:
-        print(f"\n  --- diff {parent[:9]}..{snap[:9]} (this attempt's change) ---")
-        diff_args = ["diff"] + ([] if full else ["--stat"]) + [parent, snap]
-        out = _git(diff_args)
-        print(out if out else "  (no tracked-file change vs parent snapshot)")
+    print()
+    _print_attempt_diff(rec, full)
 
 
-def cmd_episodes(recs: list[dict], n: int) -> None:
+def cmd_episodes(recs: list[dict], n: int,
+                 diffs: bool = False, full: bool = False) -> None:
     """Segment into episodes: a maximal run of non-ok attempts ended by
-    an ok (§12.4).  A trailing run with no closing ok is shown as open."""
+    an ok (§12.4).  A trailing run with no closing ok is shown as open.
+    With diffs, interleave each attempt's introduced diff under its
+    outcome line, so a whole fail→fix run reads as change-then-verdict."""
     episodes: list[list[dict]] = []
     cur: list[dict] = []
     for rec in recs:
@@ -98,6 +113,8 @@ def cmd_episodes(recs: list[dict], n: int) -> None:
         print(f"episode  {span}  [{len(ep)} attempts, {fails} fail, {status}]")
         for r in ep:
             print(f"    {_fmt_line(r)}")
+            if diffs:
+                _print_attempt_diff(r, full, indent="      ")
         print()
 
 
@@ -116,6 +133,10 @@ def main() -> int:
 
     pe = sub.add_parser("episodes", help="fail-runs closed by a success")
     pe.add_argument("-n", type=int, default=10)
+    pe.add_argument("--diffs", action="store_true",
+                    help="interleave each attempt's diff under its outcome")
+    pe.add_argument("--full", action="store_true",
+                    help="with --diffs, full diff instead of --stat")
 
     ns = p.parse_args()
     recs = _load()
@@ -125,7 +146,7 @@ def main() -> int:
     if ns.cmd == "show":
         cmd_show(recs, ns.build_id, ns.full)
     elif ns.cmd == "episodes":
-        cmd_episodes(recs, ns.n)
+        cmd_episodes(recs, ns.n, diffs=ns.diffs, full=ns.full)
     else:  # list (default)
         cmd_list(recs, getattr(ns, "n", 30))
     return 0
