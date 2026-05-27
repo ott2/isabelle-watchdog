@@ -1,8 +1,10 @@
 # Build-record design: cost + trajectory logging
 
-**Status:** Design sketch.  Cost axis 2026-05-18; trajectory axis
-merged in 2026-05-27 from the former `attempt-capture-design.md`.
-Not yet implemented; review before coding.
+**Status:** Trajectory-axis MVP implemented 2026-05-27
+(`bin/build_record.py` + the `bin/isabelle-watchdog.py` hook, read by
+`bin/attempts.py`); see §14.  Cost axis (§§2–11) designed 2026-05-18,
+not yet implemented.  Trajectory axis merged in 2026-05-27 from the
+former `attempt-capture-design.md`.
 
 ## 1. Context
 
@@ -780,6 +782,19 @@ reconstruct episodes:
 MVP: the snapshot ref + outcome alone stops the bleeding; the
 extractor and per-lemma attribution are a later analysis layer over
 accumulated data.
+
+**Implemented (2026-05-27).**  The MVP is `bin/build_record.py`,
+called from `bin/isabelle-watchdog.py` after every build: it snapshots
+tracked-file deltas (`git add -u`, seeded from HEAD — §12.6 phantom-
+deletion note) to a chained `refs/attempts/<branch>` and appends an
+outcome record to `t/logs/builds.jsonl` (build_id, outcome, elapsed,
+error head, snapshot id, the HEAD it sits on, `head_dirty`).  Capture
+is fully guarded — it can never change a build's exit code.
+`bin/attempts.py` is the reader (`list` / `show ID [--full]` /
+`episodes`); its `episodes` view is the flat fail-run-closed-by-success
+segmentation, *without* the per-lemma `bin/query` attribution or
+diff-scope field §14 calls for — those, plus the §12.5-#6 export step,
+are the remaining analysis layer (tracked under `[attempt-capture]`).
 
 ## 15. Payoff
 

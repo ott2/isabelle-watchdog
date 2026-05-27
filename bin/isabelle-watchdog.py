@@ -255,27 +255,86 @@ def main() -> int:
         log_f.write(f"=== finished {datetime.now():%Y-%m-%d %H:%M:%S}"
                     f"  timeout={timeout_reason or 'none'}\n")
 
-    # --- Handle timeout ---
+    # --- Determine outcome, capture the attempt, then summarise ---
+    elapsed_s = time.monotonic() - wall_start
+
     if timeout_reason:
         kill_tree(proc.pid)
         proc.wait()
+        exit_code = 124
+        outcome = "timeout"
+        error_head = _timeout_head(timeout_reason, loop_key,
+                                   loop_elapsed, wall_timeout)
+    else:
+        proc.wait()
+        exit_code = proc.returncode
+        outcome = "ok" if exit_code == 0 else "fail"
+        error_head = "" if exit_code == 0 else _first_error(lines)
+
+    # Trajectory capture (bin/build_record.py): snapshot the working tree
+    # to refs/attempts + a builds.jsonl record.  Guarded so it never
+    # affects the build's exit code.
+    _record_attempt(args, outcome, exit_code, timeout_reason,
+                    elapsed_s, error_head)
+
+    if outcome == "timeout":
         _print_summary_timeout(timeout_reason, lines, wall_timeout,
                                activity_timeout,
                                last_progress_theory, last_progress_pct,
                                loop_key, loop_count, loop_elapsed,
                                log_path)
-        return 124
-
-    # --- Normal exit ---
-    proc.wait()
-    exit_code = proc.returncode
-
-    if exit_code == 0:
+    elif outcome == "ok":
         _print_summary_ok(lines, log_path)
     else:
         _print_summary_fail(lines, log_path)
 
     return exit_code
+
+
+# ---------------------------------------------------------------------------
+# Attempt capture (trajectory axis — see bin/build_record.py)
+# ---------------------------------------------------------------------------
+
+def _first_error(lines: list[str]) -> str:
+    """First one or two non-empty `***` error lines, joined — the error
+    head folded into the attempt record (logging-design.md §12.3.2)."""
+    heads: list[str] = []
+    for l in lines:
+        m = ERROR_RE.match(l)
+        if m and m.group(1).strip():
+            heads.append(m.group(1).strip())
+            if len(heads) >= 2:
+                break
+    return " | ".join(heads)
+
+
+def _timeout_head(reason: str, loop_key: tuple[str, str, str] | None,
+                  loop_elapsed: str, wall_timeout: int) -> str:
+    """One-line timeout description for the attempt record."""
+    if loop_key is not None:
+        theory, lineno, cmd = loop_key
+        return (f'{reason}: "{cmd}" line {lineno} of '
+                f'{theory.split(".")[-1]} ({loop_elapsed}s)')
+    return f"{reason} timeout ({wall_timeout}s wall)"
+
+
+def _record_attempt(args: list[str], outcome: str, exit_code: int,
+                    timeout_reason: str, elapsed_s: float,
+                    error_head: str) -> None:
+    """Hand the attempt to build_record.  build_record itself never
+    raises; this guard additionally covers an import failure, so a
+    missing/broken capture module can never cost a build."""
+    try:
+        import build_record
+        build_record.record(
+            argv=args, outcome=outcome, exit_code=exit_code,
+            timeout_reason=timeout_reason, elapsed_s=elapsed_s,
+            error_head=error_head,
+            log_name=os.environ.get("LOG_NAME", "last-build.log"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"build-record: skipped ({type(exc).__name__}: {exc})",
+              file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
