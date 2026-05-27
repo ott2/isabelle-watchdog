@@ -1,9 +1,30 @@
-# Logging design for `isabelle-build.py`
+# Build-record design: cost + trajectory logging
 
-**Status:** Design sketch, 2026-05-18.  Not yet implemented; review
-before coding.
+**Status:** Design sketch.  Cost axis 2026-05-18; trajectory axis
+merged in 2026-05-27 from the former `attempt-capture-design.md`.
+Not yet implemented; review before coding.
 
 ## 1. Context
+
+This is the design for what the build wrapper records on **every**
+`make build` invocation, keyed by a `build_id`.  There are two axes,
+and the pipeline is one:
+
+- **Trajectory** (§§12–15) — *which formulations were tried, which
+  failed and how, which finally worked.*  The proof-search
+  progression.  This is the higher-resolution, more principled view
+  of "what is being logged," and the reason the pipeline is worth
+  building; it also yields a dataset of independent research interest
+  (§12.1).
+- **Cost** (§§2–11, below) — *how slow is what worked* (per-build /
+  per-theory / per-`by` timing, kill diagnosis, regime-change
+  detection).  Valuable for diagnosis and regression-watching, but on
+  its own it was never quite worth pursuing — it resolves cost, not
+  trajectory.
+
+Both come from the same per-invocation wrapper and share `build_id`;
+the cost-axis sections that follow stand, reframed as one axis of the
+unified record.  The original cost-axis context follows.
 
 The existing `bin/isabelle-watchdog.py` has been invoked thousands of
 times in this project across attempts 2 and 3.  Each invocation
@@ -556,7 +577,126 @@ is earned.
   rows per build).  Gzip-rotate per quarter if/when needed; not
   pre-engineered.
 
-## 12. References
+## 12. Trajectory axis — the proof-search progression
+
+Merged 2026-05-27 from the former `attempt-capture-design.md`.  The
+cost axis above answers "how slow is what worked"; this axis answers
+"what was tried, what failed and how, what finally worked" — the
+resolution the cost-only design lacked.  Both are recorded by the
+same per-invocation wrapper, keyed by `build_id`: two axes of one
+pipeline, not two pipelines.
+
+### 12.1 Why
+
+A committed proof is survivorship-biased — only what worked survives.
+Per the AE author (2026-05-27), the effort went into *switching
+between formulations* until one went through without taking too long;
+`metis` was usually tried-and-failed, then replaced by a restructured
+case analysis.  None of that trajectory survives: git keeps only
+build-passing states (failures are edited away before any commit),
+memory is lossy, and the Claude Code session transcripts that held
+the edit sequence rotate out of `~/.claude`.
+
+Capturing it has standalone value: an observational record of how a
+large formal proof actually develops under Claude Code is of interest
+in its own right — to proof-engineering researchers, tool builders,
+and anyone studying human+AI formalisation — *before* any use of the
+data to improve proof search.  The suggester payoff (§15) is a bonus
+on top of a dataset that is interesting simply as a record.
+
+### 12.2 Unit of capture
+
+An *attempt* = one **build**: a prover invocation on changed proof
+text that returns a real verdict.  Editing below the build (trying
+phrasings before running it) is scratchpad thinking, not an attempt —
+nothing is known until a build runs.
+
+### 12.3 Mechanism
+
+1. **Snapshot-on-build to a parallel git ref.**  The wrapper commits
+   the working tree to `refs/attempts/<branch>` per invocation —
+   failures included — tagged with the Layer-1 `build_id`, outcome,
+   elapsed, sorry-count, and the watchdog's error/timeout summary.
+   Main history stays clean; the ref is never pushed; git blob-dedup
+   keeps thousands of snapshots cheap.  The `builds.jsonl` record
+   (§5.1) gains an `attempt_tree` field = the snapshot's git object
+   id, linking the cost and trajectory axes by `build_id`.
+2. **Semantic label is free.**  The watchdog already summarises each
+   failure (error head / `timeout_reason`, §6); fold that into the
+   record.  An episode then reads as a run of *(diff, error)* failing
+   attempts closed by a *(diff, builds OK)* success — no manual
+   annotation, which never reliably happens anyway.
+3. **Attribution to lemma.**  Diff consecutive snapshots and
+   attribute the changed span to the enclosing entry via `bin/query`
+   entry-spans, joining outcomes from `builds.jsonl` → per-lemma
+   attempt sequences.
+
+### 12.4 Episode shape
+
+The target record is the development episode:
+
+    new code added → build fails → local fix → build fails →
+    local fix → build succeeds → commitl
+
+a run of failing attempts on one goal, each a small diff with its
+error, terminated by the success that closes the goal and the
+`commitl` that lands it on `main`.  §14 specifies the extractor.
+
+## 13. Change locality (data quality)
+
+Episodes are most informative when each attempt is one attributable
+change: a hyperlocal repair (a few lines at one site until the
+failure clears) gives a clean cause→effect signal.  A sweeping edit
+— `linarith`→`simp` at a dozen sites plus `metis`→`auto` elsewhere in
+the same build — folds many hypotheses into one pass/fail, so that
+episode says little about which change mattered.
+
+This is *noise, not poisoning*: imperfect locality lowers one
+episode's signal density; it does not corrupt the dataset, and
+chasing perfect locality is not worth the cost.  Two cheap responses
+keep the data honest without demanding perfection:
+
+- **Discipline (soft).**  Prefer one hyperlocal single-hypothesis
+  change per build; auto-loaded as
+  `.claude/memory/feedback_hyperlocal_repair.md` so it is actually
+  remembered.  A preference, not a purity rule.
+- **Tooling.**  Record each attempt's *diff scope* (files / hunks /
+  lines touched).  Analysis can down-weight or filter low-locality
+  episodes, so the occasional sweep costs only itself.
+
+## 14. Episode-extraction tool
+
+`bin/episodes.py` (sibling of the cost-axis `bin/build-stats.py`,
+§8) walks `refs/attempts/...` and the `builds.jsonl` outcomes to
+reconstruct episodes:
+
+- Segment the snapshot sequence into episodes: a maximal run of
+  failing builds ended by a success, bounded by the `commitl` that
+  lands the result on `main` (joined via `git_sha`).
+- Per attempt in an episode: the diff from the previous snapshot, its
+  outcome + error summary, and its diff scope (§13).
+- Attribute the episode to the lemma(s) whose entry-span the diffs
+  touch (via `bin/query`), so episodes are queryable per lemma.
+- Emit per-episode JSON (the dataset record) plus a human summary
+  ("lemma L: 5 attempts, 4 metis/linarith failures, closed by case
+  split; 12 min wall").
+
+MVP: the snapshot ref + outcome alone stops the bleeding; the
+extractor and per-lemma attribution are a later analysis layer over
+accumulated data.
+
+## 15. Payoff
+
+Attributable *(goal context, change, verdict)* episodes are the
+substrate for next-step heuristics or a trained suggester: given a
+failing goal and its error, propose the change most likely to clear
+it — replacing today's expensive pattern of trying a few approaches
+then falling back to a big case analysis (almost always works, but
+verbose, higher-effort, error-prone).  Per §12.1, the dataset is
+valuable as an observational record even if the suggester is never
+built.
+
+## 16. References
 
 - `bin/isabelle-watchdog.py` — existing watchdog, frozen during
   parallel development.
@@ -567,6 +707,17 @@ is earned.
 - `.claude/memory/feedback_no_buildclean_reflex.md` — `make build`
   TIMEOUT treated as cost-regression signal; this design makes the
   signal first-class.
+- `insights/104.md` — committed proofs are survivorship-biased;
+  capture the trajectory at the prover-invocation layer (trajectory
+  axis, §12).
+- `.claude/memory/feedback_hyperlocal_repair.md` — change-locality
+  discipline that keeps episodes attributable (§13).
+- `bin/query` entry-spans — the trajectory attribution primitive
+  (§12.3, §14).
+- `proving-loop-design.md` — the warm-session discovery loop that
+  will also feed this per-invocation pipeline.
+- Provenance: this document absorbs the former
+  `attempt-capture-design.md` (merged 2026-05-27).
 - `feedback_small_increments.md` — the sorry-skeleton dance that
   per-`by` data aims to make less often necessary.
 - Josef Urban, `isa_algtop1` — source of the `by100` ML snippet
