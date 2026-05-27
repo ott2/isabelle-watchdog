@@ -642,6 +642,102 @@ a run of failing attempts on one goal, each a small diff with its
 error, terminated by the success that closes the goal and the
 `commitl` that lands it on `main`.  §14 specifies the extractor.
 
+### 12.5 What the git-only mechanism does not capture
+
+Snapshotting source-on-build is attractive because it has no moving
+parts beyond a ref and a wrapper — but git is a *state* store, not an
+*event* store, and that boundary fixes what is recoverable.
+
+Structural losses (the mechanism cannot recover these):
+
+- **Intent.**  The diff records *what* changed, not the *hypothesis*
+  it tested.  The watchdog summary (§12.3.2) labels the outcome, not
+  the rationale; a post-hoc git walk infers "after error E, change X"
+  but never "X *because* the author believed Y".
+- **Ordering within one inter-build diff.**  Several conceptually
+  distinct edits between two builds collapse to a single diff with no
+  sequence.  §13's locality discipline is the workaround: keep each
+  inter-build diff to one hypothesis so the collapse stays lossless.
+- **Attribution on failing snapshots.**  §12.3.3 attributes a span
+  via the `bin/query` tokeniser, but failing builds often snapshot
+  syntactically broken source the tokeniser cannot parse — so
+  lemma-attribution is least reliable on exactly the failure states
+  that carry the diagnostic value.
+
+Default losses, cheaply closable by capturing a little more alongside
+the source snapshot:
+
+- **Non-source determinants.**  Heap warmth, Isabelle version,
+  ROOT/session config and environment can decide a verdict the source
+  text alone cannot explain or reproduce.  Stamp version + config into
+  the `builds.jsonl` record (or the ref).
+- **Rich tool feedback.**  Folding in only the error *head* (§12.3.2)
+  drops the failed goal state, sledgehammer suggestion list and
+  per-command timing — the most useful "why a method failed" detail,
+  which lives in the build log, not the tree.  Persist the log if that
+  detail is wanted.
+- **Portability.**  `refs/attempts/...` is local-only, never pushed
+  (§12.3.1) and `git gc`-prunable, so a normal clone/push carries none
+  of the dataset.  The standalone-value motivation in §12.1 therefore
+  requires an explicit ref push or export step — the dataset does not
+  travel with the repository by default.
+
+Ergonomic, not an information loss: raw refs are not a queryable
+index, so every analysis re-walks and re-diffs (`bin/episodes.py`'s
+reason to exist, §14) until episodes are materialised.
+
+### 12.6 Event-native capture: a reason-carrying edit gate
+
+The §12.5 structural losses (intent, ordering, broken-state
+attribution) are unrecoverable *because* git records state, not
+events.  The fix is to capture the event where it happens.  Route
+every theory edit through a tool — the analogue of Claude Code's
+`Edit`, with a **required `reason` field** — that appends a
+structured record to an in-repo append-only log
+(`history/edits.jsonl` or similar): file, target span, old→new text,
+the reason, timestamp, and the `build_id` the edit precedes.  The
+build verdict still attaches at build time, so the edit log and the
+build outcome join by `build_id` exactly as the two axes already do.
+
+This recovers, by construction, the losses the git-only mechanism
+forfeits:
+
+- **Intent** (#1) — the `reason` field is the rationale, captured at
+  the moment of the edit rather than inferred from a diff later.
+- **Ordering** (#2) — each edit is its own record, so the sequence
+  within an inter-build interval survives instead of collapsing into
+  one diff.
+- **Failing-state attribution** (#3) — the tool knows the target span
+  as it writes, so no re-parse of (possibly broken) source is needed
+  to attribute the change to a lemma.
+- **Portability** (#6) — an in-repo log travels with a normal clone,
+  unlike a never-pushed `refs/attempts/` ref.
+
+It is more robust as well as more informative: an append-only log is
+not `git gc`-prunable and does not depend on ref machinery.
+
+What it costs, and why it does not replace the snapshot:
+
+- **Bypass / authorship.**  The git-snapshot mechanism is
+  authorship-agnostic — it captures a human's external-editor edits
+  too.  A gate only sees edits routed through it; edits made outside
+  the tool are invisible.  So the gate needs a discipline (or a
+  pre-build reconciliation that diffs the tree against the last
+  snapshot and emits a synthetic "unattributed" edit record) to stay
+  honest.
+- **The build is still the unit of truth.**  An edit record is a
+  *proposed* change; only a build assigns a verdict.  The gate
+  supplies the event stream *between* snapshots; the snapshot (or at
+  minimum `builds.jsonl`) still anchors the verdict.
+
+So the two mechanisms are **complementary, not alternatives**: the
+snapshot is the verdict-bearing state record at each build, the edit
+gate is the intent-bearing event stream between builds.  Together
+they close the state-vs-event gap §12.5 identifies — which is why the
+recommended direction is to keep snapshot-on-build as the durable
+verdict spine and add the reason-carrying gate as the event layer,
+rather than hardening the fragile ref mechanism in isolation.
+
 ## 13. Change locality (data quality)
 
 Episodes are most informative when each attempt is one attributable
