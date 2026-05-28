@@ -50,6 +50,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import common  # bin/common.py — run_guarded (best-effort capture guard)
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -378,10 +380,11 @@ def _record_attempt(args: list[str], outcome: str, exit_code: int,
                     timeout_reason: str, elapsed_s: float,
                     error_head: str, power: str = "unknown",
                     battery_factor: float = 1.0) -> None:
-    """Hand the attempt to build_record.  build_record itself never
-    raises; this guard additionally covers an import failure, so a
-    missing/broken capture module can never cost a build."""
-    try:
+    """Hand the attempt to build_record under the shared best-effort
+    guard, which here additionally covers an `import build_record`
+    failure (a guard inside build_record cannot catch its own import),
+    so a missing/broken capture module can never cost a build."""
+    def go() -> None:
         import build_record
         build_record.record(
             argv=args, outcome=outcome, exit_code=exit_code,
@@ -389,9 +392,7 @@ def _record_attempt(args: list[str], outcome: str, exit_code: int,
             error_head=error_head, power=power, battery_factor=battery_factor,
             log_name=os.environ.get("LOG_NAME", "last-build.log"),
         )
-    except Exception as exc:  # noqa: BLE001
-        print(f"build-record: skipped ({type(exc).__name__}: {exc})",
-              file=sys.stderr)
+    common.run_guarded("build-record", go)
 
 
 # ---------------------------------------------------------------------------

@@ -33,9 +33,10 @@ Inspect captured data with `bin/attempts.py`.
 import json
 import os
 import subprocess
-import sys
 from datetime import datetime
 from pathlib import Path
+
+from common import run_guarded
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 LOG_DIR = PROJECT_DIR / "t" / "logs"
@@ -78,13 +79,11 @@ def record(*, argv: list[str], outcome: str, exit_code: int,
            timeout_reason: str, elapsed_s: float, error_head: str,
            log_name: str, power: str = "unknown",
            battery_factor: float = 1.0) -> None:
-    """Capture one build attempt.  Never raises into the caller."""
-    try:
-        _record(argv, outcome, exit_code, timeout_reason,
-                elapsed_s, error_head, log_name, power, battery_factor)
-    except Exception as exc:  # noqa: BLE001 — capture must never break a build
-        print(f"build-record: skipped ({type(exc).__name__}: {exc})",
-              file=sys.stderr)
+    """Capture one build attempt.  Never raises into the caller (the
+    shared `run_guarded` swallows and warns on any failure)."""
+    run_guarded("build-record", lambda: _record(
+        argv, outcome, exit_code, timeout_reason,
+        elapsed_s, error_head, log_name, power, battery_factor))
 
 
 def _record(argv, outcome, exit_code, timeout_reason,
