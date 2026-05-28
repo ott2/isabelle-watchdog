@@ -300,6 +300,19 @@ Always-derived:
 - `cache_burn_risk`: `wall_elapsed_s > 270`.  5-minute prompt-cache
   TTL threshold; flags successful-but-expensive builds too.
 
+Power normalisation (always present, from `bin/isabelle-watchdog.py`):
+
+- `power`: `"battery" | "ac" | "unknown"` (battery detected via
+  `pmset -g ps`, macOS only; `"unknown"` elsewhere).
+- `battery_factor`: the factor the watchdog multiplied its activity and
+  wall budgets by — `> 1.0` only when on battery (default `2.0`, env
+  `BATTERY_FACTOR`).
+- `elapsed_s_ac`: `elapsed_s / battery_factor`, i.e. the wall time
+  normalised to AC-equivalent seconds.  Equals `elapsed_s` on AC /
+  unknown.  Compare *this* field across runs so battery throttling
+  (~2x) does not masquerade as a cost regression; raw `elapsed_s`
+  stays for the true wall time.
+
 ### 5.2 `timings.jsonl`
 
 ```json

@@ -76,18 +76,20 @@ def _snapshot_tree() -> str:
 
 def record(*, argv: list[str], outcome: str, exit_code: int,
            timeout_reason: str, elapsed_s: float, error_head: str,
-           log_name: str) -> None:
+           log_name: str, power: str = "unknown",
+           battery_factor: float = 1.0) -> None:
     """Capture one build attempt.  Never raises into the caller."""
     try:
         _record(argv, outcome, exit_code, timeout_reason,
-                elapsed_s, error_head, log_name)
+                elapsed_s, error_head, log_name, power, battery_factor)
     except Exception as exc:  # noqa: BLE001 — capture must never break a build
         print(f"build-record: skipped ({type(exc).__name__}: {exc})",
               file=sys.stderr)
 
 
 def _record(argv, outcome, exit_code, timeout_reason,
-            elapsed_s, error_head, log_name) -> None:
+            elapsed_s, error_head, log_name,
+            power="unknown", battery_factor=1.0) -> None:
     LOG_DIR.mkdir(exist_ok=True)
     branch = _git(["rev-parse", "--abbrev-ref", "HEAD"]) or "DETACHED"
     head = _git(["rev-parse", "HEAD"])
@@ -120,6 +122,15 @@ def _record(argv, outcome, exit_code, timeout_reason,
         "exit_code": exit_code,
         "timeout_reason": timeout_reason or None,
         "elapsed_s": round(elapsed_s, 1),
+        # Power state and the scaling factor the watchdog applied to its
+        # timeouts (battery runs ~factor times slower).  elapsed_s_ac is
+        # elapsed_s normalised to AC-equivalent seconds so timings compare
+        # across power states; on AC / unknown the factor is 1.0 and
+        # elapsed_s_ac == elapsed_s.
+        "power": power,                      # battery | ac | unknown
+        "battery_factor": battery_factor,
+        "elapsed_s_ac": round(elapsed_s / battery_factor, 1)
+                        if battery_factor else round(elapsed_s, 1),
         "error_head": error_head or None,
         "git_head": head,                    # committed checkpoint this sits on
         "head_dirty": tree != head_tree,     # False = rebuild of an unchanged tree

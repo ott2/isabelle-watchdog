@@ -15,6 +15,17 @@ Environment:
                               feedback_no_buildclean_reflex.md), not a tunable.
                               Override via env var only when investigating that
                               regression.
+    BATTERY_FACTOR            On a laptop running on battery (detected via
+                              `pmset -g ps`, macOS only) the machine runs
+                              ~this-many times slower, so both WATCHDOG_TIMEOUT
+                              and WALL_TIMEOUT are multiplied by this factor
+                              (default: 2.0).  This *normalises* the budgets to
+                              AC-equivalent time rather than bypassing them — a
+                              build that is slow in AC-equivalent terms still
+                              trips, so the cost-regression signal stays
+                              meaningful, while a battery-throttled-but-fine
+                              build no longer spuriously trips the activity
+                              timeout.  Set to 1.0 to disable scaling.
     LOOP_PROGRESS_THRESHOLD   Kill after N consecutive Isabelle
                               `command "X" running for ...s (line Y of theory Z)`
                               warnings on the same (theory, line, command) triple
@@ -122,6 +133,33 @@ def kill_tree(pid: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Power source (battery vs AC)
+# ---------------------------------------------------------------------------
+
+def on_battery() -> "bool | None":
+    """True on battery, False on AC, None if undetermined.
+
+    macOS only (via `pmset -g ps`); returns None on other platforms or
+    on any error, so the caller treats power state as unknown and applies
+    no scaling.  `pmset -g ps` reports e.g.
+    `Now drawing from 'Battery Power'` / `'AC Power'`."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        out = subprocess.check_output(
+            ["pmset", "-g", "ps"],
+            stderr=subprocess.DEVNULL, text=True, timeout=5,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return None
+    if "Battery Power" in out:
+        return True
+    if "AC Power" in out:
+        return False
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -141,6 +179,24 @@ def main() -> int:
     # tactic time), well under the 40s wall budget, with a more
     # informative LOOP-on-line message than the bare wall timeout.
     loop_progress_threshold = int(os.environ.get("LOOP_PROGRESS_THRESHOLD", "3"))
+
+    # Battery throttling: a laptop on battery runs ~BATTERY_FACTOR times
+    # slower, so scale both time budgets to keep them in AC-equivalent
+    # units (see the module docstring).  Detection failure / non-macOS =>
+    # no scaling.
+    battery = on_battery()
+    battery_factor = float(os.environ.get("BATTERY_FACTOR", "2.0"))
+    power = "battery" if battery else ("ac" if battery is False else "unknown")
+    # Factor actually applied (1.0 = no scaling).  Also handed to the
+    # build record so the captured elapsed time can be normalised to
+    # AC-equivalent seconds (elapsed_s / applied_factor).
+    applied_factor = battery_factor if (battery and battery_factor != 1.0) else 1.0
+    if applied_factor != 1.0:
+        activity_timeout = int(activity_timeout * applied_factor)
+        wall_timeout = int(wall_timeout * applied_factor)
+        print(f"watchdog: on battery — budgets scaled x{applied_factor:g} "
+              f"(activity {activity_timeout}s, wall {wall_timeout}s)")
+
     startup_timeout = activity_timeout + 20
 
     # --- Log file setup ---
@@ -275,14 +331,14 @@ def main() -> int:
     # to refs/attempts + a builds.jsonl record.  Guarded so it never
     # affects the build's exit code.
     _record_attempt(args, outcome, exit_code, timeout_reason,
-                    elapsed_s, error_head)
+                    elapsed_s, error_head, power, applied_factor)
 
     if outcome == "timeout":
         _print_summary_timeout(timeout_reason, lines, wall_timeout,
                                activity_timeout,
                                last_progress_theory, last_progress_pct,
                                loop_key, loop_count, loop_elapsed,
-                               log_path)
+                               log_path, battery)
     elif outcome == "ok":
         _print_summary_ok(lines, log_path)
     else:
@@ -320,7 +376,8 @@ def _timeout_head(reason: str, loop_key: tuple[str, str, str] | None,
 
 def _record_attempt(args: list[str], outcome: str, exit_code: int,
                     timeout_reason: str, elapsed_s: float,
-                    error_head: str) -> None:
+                    error_head: str, power: str = "unknown",
+                    battery_factor: float = 1.0) -> None:
     """Hand the attempt to build_record.  build_record itself never
     raises; this guard additionally covers an import failure, so a
     missing/broken capture module can never cost a build."""
@@ -329,7 +386,7 @@ def _record_attempt(args: list[str], outcome: str, exit_code: int,
         build_record.record(
             argv=args, outcome=outcome, exit_code=exit_code,
             timeout_reason=timeout_reason, elapsed_s=elapsed_s,
-            error_head=error_head,
+            error_head=error_head, power=power, battery_factor=battery_factor,
             log_name=os.environ.get("LOG_NAME", "last-build.log"),
         )
     except Exception as exc:  # noqa: BLE001
@@ -433,10 +490,14 @@ def _print_summary_timeout(
     loop_count: int,
     loop_elapsed: str,
     log_path: Path,
+    battery: "bool | None" = None,
 ) -> None:
     # log: first so `head -N` captures it even if the diagnostic
     # line ends up wrapped.
     print(f"log: {log_path}")
+    # On battery the budgets are already scaled (see main); still flag it
+    # on any timeout, since slowness — not a hang — is the likely cause.
+    batt = "  (on battery — likely slowness, not a hang)" if battery else ""
     if reason == "loop_progress" and loop_key is not None:
         theory, lineno, cmd = loop_key
         short_theory = theory.split(".")[-1]
@@ -451,15 +512,15 @@ def _print_summary_timeout(
             short_theory = theory.split(".")[-1]
             print(f"TIMEOUT  {wall_timeout}s wall clock exceeded "
                   f'(looping on {short_theory} line {lineno} — '
-                  f'"{cmd}" running for {loop_elapsed}s)')
+                  f'"{cmd}" running for {loop_elapsed}s){batt}')
         else:
-            print(f"TIMEOUT  {wall_timeout}s wall clock exceeded")
+            print(f"TIMEOUT  {wall_timeout}s wall clock exceeded{batt}")
     elif reason == "activity":
         if progress_theory:
             short = progress_theory.split(".")[-1]  # drop session prefix
-            print(f"STUCK  {short} {progress_pct}%  no output for {activity_timeout}s")
+            print(f"STUCK  {short} {progress_pct}%  no output for {activity_timeout}s{batt}")
         else:
-            print(f"STUCK  no output for {activity_timeout}s")
+            print(f"STUCK  no output for {activity_timeout}s{batt}")
 
 
 # ---------------------------------------------------------------------------
