@@ -84,7 +84,7 @@ source_line, command_kind, tactic_head, elapsed_ms)`.  Mechanism gate
 in §9.1: either parse Isabelle's `command_timing=true` output if it
 produces source-annotated per-`by` records at acceptable overhead, or
 fall back to ML-level tactic decorators (`timed_by`) defined in a
-small `t/generic/Timing.thy` and applied at proof sites that need
+small `t/base/Timing.thy` and applied at proof sites that need
 diagnosis.  Listed first because it pays off in active diagnosis —
 the case where the project burns the most session time today.
 
@@ -153,7 +153,7 @@ and stays deferred (Urban's ML snippet is preserved verbatim in §11).
   `command_timing=true`.
 - **New:** `bin/build-stats.py` — analyser (§8).
 - **New (if §9.1's mechanism gate picks ML decorators):**
-  `t/generic/Timing.thy` — Isabelle theory defining `timed_by` and
+  `t/base/Timing.thy` — Isabelle theory defining `timed_by` and
   related method decorators (§4.4).
 - **Existing:** `bin/isabelle-watchdog.py` — frozen during parallel
   development.  Same path, same behaviour, no changes.
@@ -210,7 +210,7 @@ be tolerable given the leverage).  If yes,
 into `commands.jsonl`.  *Source code unchanged.*
 
 **Option (b) — ML tactic decorators.**  Define in
-`t/generic/Timing.thy`:
+`t/base/Timing.thy`:
 
 ```isabelle
 method_setup timed_by =
@@ -486,12 +486,12 @@ against Isabelle docs).  ≥5 runs each.  Verify:
 This spike is short (≤30 minutes) and should run before any
 implementation work on Layer 2; the choice between (a) and (b)
 determines whether `bin/isabelle-build.py` does stdout parsing or
-whether a new `t/generic/Timing.thy` is needed.
+whether a new `t/base/Timing.thy` is needed.
 
 ### 9.2 Layer-2 ML-decorator spike (only if §9.1 picks (b))
 
 If §9.1 says (a) doesn't work: write the minimal `timed_by`
-method_setup in `t/generic/Timing.thy`, apply at one proof site
+method_setup in `t/base/Timing.thy`, apply at one proof site
 (e.g. one `by` in `AlphabetEnlargement_Classical.thy`), verify the
 sidecar log captures per-step elapsed_ms.  No overhead test needed
 (the decorator is opt-in per call site).
@@ -575,7 +575,7 @@ is earned.
   proofs that exercise method alternatives.
 
   Foundation overlap with Layer 2's ML-decorator path: if mechanism
-  (b) wins at §9.1, the same `t/generic/Timing.thy` is the natural
+  (b) wins at §9.1, the same `t/base/Timing.thy` is the natural
   home for both `timed_by` (observation) and `by100` (enforcement);
   the two methods share most of their plumbing, so Layer-3
   implementation is mostly already in scope by the end of Layer-2
