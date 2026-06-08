@@ -642,7 +642,7 @@ nothing is known until a build runs.
    attempts closed by a *(diff, builds OK)* success — no manual
    annotation, which never reliably happens anyway.
 3. **Attribution to lemma.**  Diff consecutive snapshots and
-   attribute the changed span to the enclosing entry via `bin/query`
+   attribute the changed span to the enclosing entry via `query`
    entry-spans, joining outcomes from `builds.jsonl` → per-lemma
    attempt sequences.
 
@@ -674,7 +674,7 @@ Structural losses (the mechanism cannot recover these):
   sequence.  §13's locality discipline is the workaround: keep each
   inter-build diff to one hypothesis so the collapse stays lossless.
 - **Attribution on failing snapshots.**  §12.3.3 attributes a span
-  via the `bin/query` tokeniser, but failing builds often snapshot
+  via the `query` tokeniser, but failing builds often snapshot
   syntactically broken source the tokeniser cannot parse — so
   lemma-attribution is least reliable on exactly the failure states
   that carry the diagnostic value.
@@ -787,7 +787,7 @@ reconstruct episodes:
 - Per attempt in an episode: the diff from the previous snapshot, its
   outcome + error summary, and its diff scope (§13).
 - Attribute the episode to the lemma(s) whose entry-span the diffs
-  touch (via `bin/query`), so episodes are queryable per lemma.
+  touch (via `query`), so episodes are queryable per lemma.
 - Emit per-episode JSON (the dataset record) plus a human summary
   ("lemma L: 5 attempts, 4 metis/linarith failures, closed by case
   split; 12 min wall").
@@ -805,7 +805,7 @@ error head, snapshot id, the HEAD it sits on, `head_dirty`).  Capture
 is fully guarded — it can never change a build's exit code.
 `bin/attempts.py` is the reader (`list` / `show ID [--full]` /
 `episodes`); its `episodes` view is the flat fail-run-closed-by-success
-segmentation, *without* the per-lemma `bin/query` attribution or
+segmentation, *without* the per-lemma `query` attribution or
 diff-scope field §14 calls for — those, plus the §12.5-#6 export step,
 are the remaining analysis layer (tracked under `[attempt-capture]`).
 
@@ -836,7 +836,7 @@ built.
   axis, §12).
 - `.claude/memory/feedback_hyperlocal_repair.md` — change-locality
   discipline that keeps episodes attributable (§13).
-- `bin/query` entry-spans — the trajectory attribution primitive
+- `query` entry-spans — the trajectory attribution primitive
   (§12.3, §14).
 - `proving-loop-design.md` — the warm-session discovery loop that
   will also feed this per-invocation pipeline.
