@@ -50,7 +50,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-import common  # bin/common.py — run_guarded (best-effort capture guard)
+from isabelle_query import common  # run_guarded (best-effort capture guard)
 
 # ---------------------------------------------------------------------------
 # Config

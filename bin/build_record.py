@@ -36,7 +36,7 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from common import run_guarded
+from isabelle_query.common import run_guarded
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 LOG_DIR = PROJECT_DIR / "t" / "logs"
