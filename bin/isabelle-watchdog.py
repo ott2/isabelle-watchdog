@@ -65,6 +65,16 @@ TIMING_RE = re.compile(
 TOTAL_ELAPSED_RE = re.compile(r"^(\d+):(\d\d):(\d\d) elapsed time")
 THEORY_DONE_RE = re.compile(r":\s+theory\s+\S+\s+100%")
 ERROR_RE = re.compile(r"^\*\*\*\s+(.*)")
+# Each Isabelle error block closes with a location marker of the form
+#     *** At command "by" (line 3721 of "~/.../AlphabetEnlargement_Setup.thy")
+# The parallel checker elaborates every reachable obligation, so a single
+# failed build can carry several of these — but the FAIL/timeout summary
+# only shows the first error block.  Counting these markers (deduped by
+# theory+line) tells the reader how many distinct loci are already in the
+# log, replacing the discover-one-locus-per-rebuild tax.
+AT_COMMAND_RE = re.compile(
+    r'^\*\*\*\s+At command\s+"[^"]*"\s+\(line\s+(\d+)\s+of\s+"([^"]+)"\)'
+)
 THEORY_PROGRESS_RE = re.compile(r"^(\S+):\s+theory\s+(\S+?)(?:\s+(\d+)%)?")
 BUILD_PHASE_RE = re.compile(r"^(Session |Running )")
 
@@ -399,6 +409,33 @@ def _record_attempt(args: list[str], outcome: str, exit_code: int,
 # Summary formatters
 # ---------------------------------------------------------------------------
 
+def _count_error_loci(lines: list[str]) -> int:
+    """Number of distinct error loci in the log — each Isabelle error
+    block closes with a `*** At command "X" (line N of "T")` marker.
+    Deduped by (theory, line) so a locus reported twice counts once."""
+    loci: set[tuple[str, str]] = set()
+    for l in lines:
+        m = AT_COMMAND_RE.match(l)
+        if m:
+            lineno, theory = m.groups()
+            loci.add((theory, lineno))
+    return len(loci)
+
+
+def _log_line(log_path: Path, lines: list[str]) -> str:
+    """The `log: <path>` summary line, annotated with the distinct-locus
+    count when the parallel checker surfaced more than the one error the
+    FAIL/timeout block displays.  Singular/plural so the line reads
+    naturally; no annotation when there are zero loci (e.g. a pure
+    loop/wall timeout with no proof failure)."""
+    n = _count_error_loci(lines)
+    if n == 1:
+        return f"log: {log_path} (1 error locus)"
+    if n > 1:
+        return f"log: {log_path} ({n} error loci)"
+    return f"log: {log_path}"
+
+
 def _print_summary_ok(lines: list[str], log_path: Path) -> None:
     n_theories = sum(1 for l in lines if THEORY_DONE_RE.search(l))
     elapsed = cpu = ""
@@ -463,7 +500,7 @@ def _print_summary_fail(lines: list[str], log_path: Path) -> None:
     def _trunc(s: str, n: int = 100) -> str:
         return s if len(s) <= n else s[: n - 3] + "..."
 
-    print(f"log: {log_path}")
+    print(_log_line(log_path, lines))
     if block:
         print(f"FAIL  {_trunc(block[0])}")
         for cont in block[1:]:
@@ -494,8 +531,10 @@ def _print_summary_timeout(
     battery: "bool | None" = None,
 ) -> None:
     # log: first so `head -N` captures it even if the diagnostic
-    # line ends up wrapped.
-    print(f"log: {log_path}")
+    # line ends up wrapped.  A timeout can still carry already-elaborated
+    # error loci (the checker failed some obligations before the slow one
+    # tripped the budget), so annotate the count here too.
+    print(_log_line(log_path, lines))
     # On battery the budgets are already scaled (see main); still flag it
     # on any timeout, since slowness — not a hang — is the likely cause.
     batt = "  (on battery — likely slowness, not a hang)" if battery else ""
