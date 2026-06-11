@@ -413,13 +413,27 @@ def _count_error_loci(lines: list[str]) -> int:
     """Number of distinct error loci in the log — each Isabelle error
     block closes with a `*** At command "X" (line N of "T")` marker.
     Deduped by (theory, line) so a locus reported twice counts once."""
-    loci: set[tuple[str, str]] = set()
+    return len(_error_loci(lines))
+
+
+def _error_loci(lines: list[str]) -> list[tuple[str, str]]:
+    """Ordered, deduped `(short-theory, line)` error loci from the
+    `*** At command "X" (line N of "T")` markers.  These are the jump
+    targets a reader wants *first* — the failing command's line beats
+    the goal-display context, which is often the same shape every
+    iteration of a multi-site fix.  Order = first appearance in the log."""
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[str, str]] = []
     for l in lines:
         m = AT_COMMAND_RE.match(l)
         if m:
             lineno, theory = m.groups()
-            loci.add((theory, lineno))
-    return len(loci)
+            short = theory.rsplit("/", 1)[-1]
+            key = (short, lineno)
+            if key not in seen:
+                seen.add(key)
+                out.append(key)
+    return out
 
 
 def _log_line(log_path: Path, lines: list[str]) -> str:
@@ -501,7 +515,15 @@ def _print_summary_fail(lines: list[str], log_path: Path) -> None:
         return s if len(s) <= n else s[: n - 3] + "..."
 
     print(_log_line(log_path, lines))
-    if block:
+    loci = _error_loci(lines)
+    if loci:
+        # Line numbers first — the jump targets — then the goal-display
+        # context (indented).  Priority order per the diagnose workflow:
+        # you want `file:line` before re-reading the same goal shape.
+        print("FAIL  " + ", ".join(f"{thy}:{ln}" for thy, ln in loci))
+        for cont in block:
+            print(f"      {_trunc(cont.lstrip())}")
+    elif block:
         print(f"FAIL  {_trunc(block[0])}")
         for cont in block[1:]:
             # Strip the leading whitespace that `***   ...` has, but
