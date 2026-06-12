@@ -32,6 +32,22 @@ Environment:
                               (default: 3).  Surfaces a tactic stuck in a search
                               loop on a single line before the wall timeout
                               fires, and the timeout summary names the line.
+    BUILD_PROGRESS_THRESHOLD  Seconds a single command must run before Isabelle
+                              emits its `command running for ...s (line Y)`
+                              warning (default: 15).  Injected as
+                              `-o build_progress_threshold=N` into `isabelle
+                              build` invocations.  Isabelle's own default is 20s
+                              — the SAME as WATCHDOG_TIMEOUT, so a hang trips the
+                              activity timeout (no output for 20s) at the exact
+                              moment the line-bearing warning would fire, and the
+                              stuck line is lost.  At 15s, with the 2s re-emit
+                              (build_progress_delay), the warnings land at
+                              15/17/19s — three consecutive (LOOP_PROGRESS_
+                              THRESHOLD) just under the 20s activity kill, so the
+                              loop is caught and its line named.  Kept close to
+                              20 deliberately: a lower value would risk
+                              false-tripping a legit single command that runs a
+                              few seconds long on one line.
     LOG_NAME                  Log file basename under logs/ (default: last-build.log).
                               Override per-stage so parallel or sequential stages
                               don't clobber each other's output.
@@ -96,6 +112,24 @@ LOOP_RE = re.compile(
 
 def strip_ansi(line: str) -> str:
     return ANSI_RE.sub("", line)
+
+
+def inject_progress_threshold(args: list[str], threshold: float) -> list[str]:
+    """Insert `-o build_progress_threshold=<threshold>` right after the
+    `build` subcommand of an `isabelle build` invocation.
+
+    Isabelle emits its `command "X" running for Ns (line Y of theory Z)`
+    warning — the only output that names the stuck line — once a single
+    command has run for `build_progress_threshold` seconds (Isabelle
+    default 20s).  That default coincides with the activity timeout, so a
+    hang trips the bare activity kill before the line-bearing warning
+    fires.  Lowering the threshold lands the warning early enough that
+    loop_key (hence the stuck line) is captured.  No-op for non-build
+    commands."""
+    if len(args) >= 2 and Path(args[0]).name == "isabelle" and args[1] == "build":
+        opt = f"build_progress_threshold={threshold:g}"
+        return args[:2] + ["-o", opt] + args[2:]
+    return args
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +225,10 @@ def main() -> int:
     # tactic time), well under the 40s wall budget, with a more
     # informative LOOP-on-line message than the bare wall timeout.
     loop_progress_threshold = int(os.environ.get("LOOP_PROGRESS_THRESHOLD", "3"))
+    # Land Isabelle's line-bearing "running for Ns" warning before the
+    # activity timeout (see inject_progress_threshold / the docstring).
+    build_progress_threshold = float(os.environ.get("BUILD_PROGRESS_THRESHOLD", "15"))
+    args = inject_progress_threshold(args, build_progress_threshold)
 
     # Battery throttling: a laptop on battery runs ~BATTERY_FACTOR times
     # slower, so scale both time budgets to keep them in AC-equivalent
@@ -436,12 +474,28 @@ def _error_loci(lines: list[str]) -> list[tuple[str, str]]:
     return out
 
 
-def _log_line(log_path: Path, lines: list[str]) -> str:
-    """The `log: <path>` summary line, annotated with the distinct-locus
-    count when the parallel checker surfaced more than the one error the
-    FAIL/timeout block displays.  Singular/plural so the line reads
-    naturally; no annotation when there are zero loci (e.g. a pure
-    loop/wall timeout with no proof failure)."""
+def _stuck_locus(loop_key: "tuple[str, str, str] | None") -> str:
+    """`<short-theory> line <N>` for the stuck command, or "" if unknown.
+    Derived from the last `command running for ...s (line N of theory T)`
+    warning the watchdog saw before the kill."""
+    if loop_key is None:
+        return ""
+    theory, lineno, _cmd = loop_key
+    return f"{theory.split('.')[-1]} line {lineno}"
+
+
+def _log_line(log_path: Path, lines: list[str],
+              loop_key: "tuple[str, str, str] | None" = None) -> str:
+    """The `log: <path>` summary line.  When the build was killed with a
+    known stuck command, name it (`stuck at <theory> line <N>`) — this is
+    the jump target a reader wants first on a hang.  Otherwise annotate
+    with the distinct error-locus count when the parallel checker
+    surfaced more than the one error the FAIL/timeout block displays.
+    Singular/plural so the line reads naturally; no annotation when there
+    is nothing to point at."""
+    stuck = _stuck_locus(loop_key)
+    if stuck:
+        return f"log: {log_path} (stuck at {stuck})"
     n = _count_error_loci(lines)
     if n == 1:
         return f"log: {log_path} (1 error locus)"
@@ -553,10 +607,12 @@ def _print_summary_timeout(
     battery: "bool | None" = None,
 ) -> None:
     # log: first so `head -N` captures it even if the diagnostic
-    # line ends up wrapped.  A timeout can still carry already-elaborated
-    # error loci (the checker failed some obligations before the slow one
-    # tripped the budget), so annotate the count here too.
-    print(_log_line(log_path, lines))
+    # line ends up wrapped.  Name the stuck command's line when we have
+    # it (any reason — activity/loop/wall); otherwise a timeout can still
+    # carry already-elaborated error loci (the checker failed some
+    # obligations before the slow one tripped the budget), so annotate the
+    # count.
+    print(_log_line(log_path, lines, loop_key))
     # On battery the budgets are already scaled (see main); still flag it
     # on any timeout, since slowness — not a hang — is the likely cause.
     batt = "  (on battery — likely slowness, not a hang)" if battery else ""
@@ -578,11 +634,21 @@ def _print_summary_timeout(
         else:
             print(f"TIMEOUT  {wall_timeout}s wall clock exceeded{batt}")
     elif reason == "activity":
+        # If a `running for Ns` warning landed before the silence (e.g.
+        # the command crossed build_progress_threshold, emitted one
+        # warning, then went quiet), name its line — the activity kill is
+        # otherwise the one timeout path with no locus.
+        loc = ""
+        if loop_key is not None:
+            theory, lineno, cmd = loop_key
+            loc = (f' (last: "{cmd}" at {theory.split(".")[-1]} '
+                   f'line {lineno}, {loop_elapsed}s)')
         if progress_theory:
             short = progress_theory.split(".")[-1]  # drop session prefix
-            print(f"STUCK  {short} {progress_pct}%  no output for {activity_timeout}s{batt}")
+            print(f"STUCK  {short} {progress_pct}%  "
+                  f"no output for {activity_timeout}s{loc}{batt}")
         else:
-            print(f"STUCK  no output for {activity_timeout}s{batt}")
+            print(f"STUCK  no output for {activity_timeout}s{loc}{batt}")
 
 
 # ---------------------------------------------------------------------------
