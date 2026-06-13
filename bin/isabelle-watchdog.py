@@ -364,6 +364,12 @@ def main() -> int:
     # --- Determine outcome, capture the attempt, then summarise ---
     elapsed_s = time.monotonic() - wall_start
 
+    # The reported error is sourced from the build database, not the elided
+    # console stream (see _fetch_db_error): err_lines drives the FAIL summary
+    # and the attempt record, falling back to the console scrape only when the
+    # database fetch yields nothing.
+    db_error = ""
+    err_lines = lines
     if timeout_reason:
         kill_tree(proc.pid)
         proc.wait()
@@ -375,7 +381,15 @@ def main() -> int:
         proc.wait()
         exit_code = proc.returncode
         outcome = "ok" if exit_code == 0 else "fail"
-        error_head = "" if exit_code == 0 else _first_error(lines)
+        if outcome == "fail":
+            db_error = common.run_guarded(
+                "db-error", lambda: _fetch_db_error(args)) or ""
+            if db_error:
+                common.run_guarded(
+                    "db-error-log",
+                    lambda: _append_full_error(log_path, db_error))
+                err_lines = db_error.splitlines()
+        error_head = "" if exit_code == 0 else _first_error(err_lines)
 
     # Trajectory capture (bin/build_record.py): snapshot the working tree
     # to refs/attempts + a builds.jsonl record.  Guarded so it never
@@ -392,7 +406,7 @@ def main() -> int:
     elif outcome == "ok":
         _print_summary_ok(lines, log_path)
     else:
-        _print_summary_fail(lines, log_path)
+        _print_summary_fail(err_lines, log_path)
 
     return exit_code
 
@@ -412,6 +426,66 @@ def _first_error(lines: list[str]) -> str:
             if len(heads) >= 2:
                 break
     return " | ".join(heads)
+
+
+# isabelle-build flags that consume the following token as their value;
+# everything else after `build` that is not a flag is a session name.
+_BUILD_VALUE_FLAGS = {"-d", "-o", "-j", "-D", "-x", "-X", "-B", "-R",
+                      "-A", "-P", "-N", "-Z", "-n_jobs"}
+
+
+def _session_names(args: list[str]) -> list[str]:
+    """Positional session names in an `isabelle build ...` command line."""
+    try:
+        i = args.index("build") + 1
+    except ValueError:
+        return []
+    out: list[str] = []
+    while i < len(args):
+        a = args[i]
+        if a in _BUILD_VALUE_FLAGS:
+            i += 2
+        elif a.startswith("-"):
+            i += 1
+        else:
+            out.append(a)
+            i += 1
+    return out
+
+
+def _fetch_db_error(args: list[str]) -> str:
+    """The full, un-elided build error from isabelle's build database.
+
+    Isabelle's build *console* elides long error messages -- the lone
+    `...` line that swallows the `*** Failed to ...` verb and the head of
+    the goal -- so the streamed output the watchdog captures is not a
+    reliable error source.  The complete text survives in the build
+    database; `isabelle build_log -H Error <session>` returns it verbatim.
+    This is the authoritative source the FAIL summary, attempt record, and
+    log should report from -- the live stream is for monitoring (progress,
+    stuck/loop detection, timing), the database is for the error.  Returns
+    "" when there is nothing to fetch.  Best-effort: callers wrap this so a
+    fetch failure falls back to the (elided) console scrape and never
+    affects the build's exit code."""
+    sessions = _session_names(args)
+    if not sessions:
+        return ""
+    iso = args[0] if args else "isabelle"
+    chunks: list[str] = []
+    for s in sessions:
+        r = subprocess.run([iso, "build_log", "-H", "Error", s],
+                           capture_output=True, text=True, timeout=60)
+        body = (r.stdout or "").strip()
+        if body and "***" in body:
+            chunks.append(body)
+    return "\n\n".join(chunks)
+
+
+def _append_full_error(log_path: Path, db_error: str) -> None:
+    """Append the un-elided database error to the log under a banner."""
+    with open(log_path, "a") as f:
+        f.write("\n=== full error (isabelle build_log -H Error) ===\n")
+        f.write(db_error + "\n")
 
 
 def _timeout_head(reason: str, loop_key: tuple[str, str, str] | None,
