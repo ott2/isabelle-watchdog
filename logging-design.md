@@ -2,9 +2,13 @@
 
 **Status:** Trajectory-axis MVP implemented 2026-05-27
 (`bin/build_record.py` + the `bin/isabelle-watchdog.py` hook, read by
-`bin/attempts.py`); see §14.  Cost axis (§§2–11) designed 2026-05-18,
-not yet implemented.  Trajectory axis merged in 2026-05-27 from the
-former `attempt-capture-design.md`.
+`bin/attempts.py`); see §14.  Multi-instance record format (per-copy
+`instance_id` + host/contributor/origin provenance + instance-keyed
+ref) added 2026-06-18 so trajectories from parallel worktrees and
+remote clones pool and federate into one dataset; design and
+pooling/federation plan in §16.  Cost axis (§§2–11) designed
+2026-05-18, not yet implemented.  Trajectory axis merged in 2026-05-27
+from the former `attempt-capture-design.md`.
 
 ## 1. Context
 
@@ -796,18 +800,21 @@ MVP: the snapshot ref + outcome alone stops the bleeding; the
 extractor and per-lemma attribution are a later analysis layer over
 accumulated data.
 
-**Implemented (2026-05-27).**  The MVP is `bin/build_record.py`,
-called from `bin/isabelle-watchdog.py` after every build: it snapshots
-tracked-file deltas (`git add -u`, seeded from HEAD — §12.6 phantom-
-deletion note) to a chained `refs/attempts/<branch>` and appends an
-outcome record to `t/logs/builds.jsonl` (build_id, outcome, elapsed,
-error head, snapshot id, the HEAD it sits on, `head_dirty`).  Capture
-is fully guarded — it can never change a build's exit code.
-`bin/attempts.py` is the reader (`list` / `show ID [--full]` /
-`episodes`); its `episodes` view is the flat fail-run-closed-by-success
-segmentation, *without* the per-lemma `query` attribution or
-diff-scope field §14 calls for — those, plus the §12.5-#6 export step,
-are the remaining analysis layer (tracked under `[attempt-capture]`).
+**Implemented (2026-05-27; multi-instance format 2026-06-18).**  The
+MVP is `bin/build_record.py`, called from `bin/isabelle-watchdog.py`
+after every build: it snapshots tracked-file deltas (`git add -u`,
+seeded from HEAD — §12.6 phantom-deletion note) to a chained
+`refs/attempts/<instance_id>/<branch>` and appends an outcome record
+to `t/logs/builds.jsonl` (build_id, instance_id, outcome, elapsed,
+error head, snapshot id, the HEAD it sits on, `head_dirty`, plus
+host/contributor/origin provenance — §16).  Capture is fully guarded —
+it can never change a build's exit code.  `bin/attempts.py` is the
+reader (`list` / `show ID [--full]` / `episodes`); its `episodes` view
+is the flat fail-run-closed-by-success segmentation, *without* the
+per-lemma `query` attribution or diff-scope field §14 calls for —
+those, plus the §16 pooling/federation, are the remaining analysis
+layer (tracked under `[attempt-capture]`, `[trajectory-pool]`,
+`[trajectory-federate]`).
 
 ## 15. Payoff
 
@@ -820,7 +827,129 @@ verbose, higher-effort, error-prone).  Per §12.1, the dataset is
 valuable as an observational record even if the suggester is never
 built.
 
-## 16. References
+## 16. Multi-instance isolation, pooling, and federation
+
+§§12–15 describe capture in *one* working copy.  In practice the
+dataset is produced by *many*: parallel worktrees on one machine (the
+`stac/*` workflow) and independent clones on other machines, by other
+people running their own LLM-assisted proof efforts.  The two efforts a
+tape-reduction push would split into — deterministic Hennie–Stearns vs.
+the Book–Greibach–Wegbreit construction — touch disjoint directories
+and sessions, so their trajectories are genuinely distinct and must not
+interleave; yet we want them, and every collaborator's, to merge into
+one dataset eventually.  This section is the isolate-then-pool answer to
+§12.5 loss #6 (the dataset does not travel by default), generalised to
+many instances.
+
+### 16.1 Principle: capture isolated, integrate explicitly
+
+The dataset mirrors the code workflow.  Code is captured in isolation
+on a `stac/*` branch and integrated explicitly by one maintainer onto
+`main`; the trajectory dataset is captured in isolation per working
+copy and integrated explicitly by a pool step into one database.  The
+two halves are not in tension — that is exactly git's model: working
+copies never write to each other, integration is a separate
+fetch/merge.  Three nested rings, each merging by git's own union:
+
+- **worktrees on a machine** — share one object store, so snapshot
+  objects are *already* pooled (a sibling worktree's `refs/attempts/*`
+  is visible with no transfer); only the per-instance metadata files
+  need gathering.
+- **a person's machine** — one `instance_id` per working copy keeps the
+  chains independent; `bin/trajectory-pool.py` (§16.4) gathers them.
+- **the federation** — separate object stores across machines/people,
+  joined by fetch into one trajectory repo (§16.5).
+
+### 16.2 The record format (implemented 2026-06-18)
+
+Pooling is well-defined only if each record is globally identifiable
+and self-describing, so `bin/build_record.py` records:
+
+- **`instance_id`** — a stable per-working-copy id, minted once as
+  64-bit random hex (UUID-grade: collision-free with no central
+  registry — the property that lets disconnected parties merge without
+  coordinating) and persisted in gitignored `t/logs/instance-id`.
+- **Instance-keyed ref** — snapshots chain on
+  `refs/attempts/<instance_id>/<branch>`, not `refs/attempts/<branch>`.
+  Branch-keying was unsafe: deleting a branch leaves its
+  `refs/attempts/<branch>` dangling (the two refs are independent), so a
+  *reused* branch name would silently concatenate two unrelated efforts.
+  Instance-keying makes every working copy's chain structurally
+  independent.
+- **Provenance** — `hostname`, `contributor` (`git config user.email`,
+  else `"unknown"`), `origin_url` (the clone), recorded once per line so
+  each JSONL record stands alone under union.  Optional lookups are
+  non-raising, so an unset config never drops a record.
+
+The **global merge key is the pair `(instance_id, build_id)`**;
+`build_id` stays the local millisecond timestamp (so `attempts.py show
+<ts>` keeps working) and the pair is unique across instances by
+construction.
+
+### 16.3 Why the merge is conflict-free
+
+Each *kind* of data has a merge operator that is commutative and
+idempotent, so pooling is order-independent and safely re-runnable:
+
+| data | merge operator | why it is free |
+|------|----------------|----------------|
+| snapshots (code state) | set union of git objects | content-addressed → identical trees/blobs dedup, even across people working from one base |
+| metadata (`builds.jsonl`) | concat + dedup on `(instance_id, build_id)` | minted ids collide-free without coordination |
+
+Two reachability facts keep the snapshot union self-contained: a
+chain's first attempt parents off the capturing copy's HEAD, so
+fetching `refs/attempts/<instance_id>/*` drags in that base commit and
+its tree even when the contributor branched from a commit never pushed
+upstream — the chain arrives diffable.  And the metadata sidesteps the
+append-conflict trap (two writers appending one file) by giving each
+instance its *own* file; the dataset is their union — the move a CRDT
+makes, here with nothing fancier than a path namespace.
+
+### 16.4 Single-machine pooling — `bin/trajectory-pool.py` (planned, `[trajectory-pool]`)
+
+Run on demand from the integrating checkout.  Enumerate worktrees (`git
+worktree list`) and, per instance, copy its `t/logs/builds.jsonl` into a
+central store and append-dedup on the merge key; the snapshot objects
+are already shared on one machine, so no object transfer is needed
+there.  The durable store is a **sibling repo `../ndtht-trajectory`** —
+not an in-tree directory and not the proof repo — keeping dataset churn
+out of the proof history while giving the data a home that survives `git
+gc` and clone/push (closing §12.5 loss #6).
+
+### 16.5 Federation across machines and contributors (planned, `[trajectory-federate]`)
+
+Across clones the object stores are genuinely separate, so federation
+uses git's distribution primitives — and matches the fork+PR model
+collaborators already use:
+
+- **A dedicated trajectory repo is the hub, never the proof repo.**
+  Trajectory data is high-volume (thousands of snapshot trees) and
+  exposes contributors' raw intermediate states; routing it through the
+  proof repo's remote would balloon every cloner's download and clutter
+  the ref space.
+- **Federated pull, contributor-namespaced.**  A contributor publishes
+  to their own trajectory repo/fork; the maintainer fetches each one's
+  `refs/attempts/*` into `refs/contrib/<contributor>/*` and pulls their
+  per-instance JSONL into `data/<contributor>/`.  A new contributor is
+  one remote line — no shared write access, same trust boundary as a PR.
+  Objects dedup across contributors and ids are collide-free, so the
+  union is conflict-free.
+- **Publish extracted episodes, keep raw chains local.**  Each
+  contributor runs the §14 episode extractor locally and publishes the
+  compact result (diffs inline, outcomes, attribution); the heavy raw
+  snapshot chains stay on their machine, fetched on demand only for deep
+  replay.  This splits a light federated layer from a heavy local one.
+- **Publishing is opt-in.**  §12.3.1 made "never pushed" a feature
+  precisely because a trajectory exposes someone's proof-search process,
+  false starts and all.  Federation adds a *deliberate* publish step,
+  per contributor and ideally per instance; it is never automatic — a
+  consent matter as much as a noise-control one.
+- **Degraded path: `git bundle`.**  A contributor who cannot expose a
+  remote bundles their attempt refs and tars their JSONL; the hub
+  fetches from the bundle, still with content-addressed dedup on
+  arrival.
+
+## 17. References
 
 - `bin/isabelle-watchdog.py` — existing watchdog, frozen during
   parallel development.
