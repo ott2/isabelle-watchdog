@@ -916,6 +916,17 @@ not an in-tree directory and not the proof repo — keeping dataset churn
 out of the proof history while giving the data a home that survives `git
 gc` and clone/push (closing §12.5 loss #6).
 
+**Legacy adapter (the format change is forward-only).**  Records and
+refs that predate the §16.2 format — no `instance_id`, the flat
+`refs/attempts/<branch>` chain — must be *absorbed, not dropped*; at the
+cutover the main checkout already held 667 such records and a flat
+`refs/attempts/main`.  Since one pre-format checkout's data is one
+instance, the pooler assigns those a single synthetic per-checkout
+`instance_id` and maps the flat ref under it (host/contributor/origin
+are recoverable from that checkout's git config / machine).  Silently
+skipping `instance_id`-less rows would lose the entire pre-2026-06-18
+backlog — the "no silent caps" failure mode.
+
 ### 16.5 Federation across machines and contributors (planned, `[trajectory-federate]`)
 
 Across clones the object stores are genuinely separate, so federation
