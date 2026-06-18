@@ -916,16 +916,27 @@ not an in-tree directory and not the proof repo — keeping dataset churn
 out of the proof history while giving the data a home that survives `git
 gc` and clone/push (closing §12.5 loss #6).
 
-**Legacy adapter (the format change is forward-only).**  Records and
-refs that predate the §16.2 format — no `instance_id`, the flat
-`refs/attempts/<branch>` chain — must be *absorbed, not dropped*; at the
-cutover the main checkout already held 667 such records and a flat
-`refs/attempts/main`.  Since one pre-format checkout's data is one
-instance, the pooler assigns those a single synthetic per-checkout
-`instance_id` and maps the flat ref under it (host/contributor/origin
-are recoverable from that checkout's git config / machine).  Silently
-skipping `instance_id`-less rows would lose the entire pre-2026-06-18
-backlog — the "no silent caps" failure mode.
+**Prototype data: normalise once, do not fork.**  The capture began as
+a prototype that wrote `instance_id`-less records and a flat
+`refs/attempts/<branch>` chain; at the cutover the main checkout held
+667 such records and a flat `refs/attempts/main`.  This is *not* "legacy"
+to be adapted around forever — it is unpublished (a gitignored file, a
+never-pushed ref), all from one checkout on one machine, so its
+provenance is fully recoverable and it is cheap to rewrite.  Carrying it
+as a permanent second dialect would be an early, unnecessary data fork;
+instead `bin/trajectory-backfill.py` (`[trajectory-backfill]`) normalises
+it in place, once: mint one `instance_id` for the checkout (written to
+`t/logs/instance-id` so backfilled and future records share one
+identity), stamp each old record with that id plus provenance recovered
+from the machine / git config (`backfilled:true`, since those fields are
+reconstructed not captured), and re-home the flat ref to
+`refs/attempts/<instance_id>/<branch>` so the next build *chains onto*
+the prototype history — one continuous chain.  The pooler then consumes
+a single uniform format and needs no legacy adapter.  **Sequencing:** run
+the backfill once the checkout has the new `build_record.py`
+(post-integration); an old-code build afterwards would re-create the flat
+ref and re-fork, so backfill is part of the cutover (the tool is
+idempotent if a stray old build slips in).
 
 ### 16.5 Federation across machines and contributors (planned, `[trajectory-federate]`)
 
