@@ -1,33 +1,33 @@
 #!/usr/bin/env python3
 """build_record.py — trajectory capture for `make build` (prototype).
 
-On every build the watchdog calls `record(...)` here, which:
+On every build the watchdog calls `record(...)` here, which appends one
+JSON line to `t/logs/builds.jsonl` capturing the attempt: its outcome,
+timing, error head, provenance, the commit it built against
+(`git_head`), and — the payload — the **incremental diff** of the
+tracked-file changes since the previous attempt.  Episodes (runs of
+attempts ending in a success) are materialised into portable per-episode
+files by `bin/trajectory-export.py`; see logging-design.md §16.
 
-  1. Snapshots the working tree (tracked-file deltas) to a chained
-     commit on `refs/attempts/<instance_id>/<branch>` — failures
-     included — so the sequence of code states between committed
-     checkpoints is recoverable and diffable.
-  2. Appends one JSON line to `t/logs/builds.jsonl` with the outcome,
-     timing, error head, and the snapshot's object id (the join key
-     between code state and verdict).
-
-Design choices (see logging-design.md §§12–16 for the full design;
-this is the §14 MVP — "the snapshot ref + outcome stops the bleeding";
-§16 covers the multi-instance pooling/federation the format enables):
+Design choices (see logging-design.md §§12–16 for the full design):
 
   - **Tracked-file deltas only** (`git add -u`, seeded from HEAD):
     captures edits to theories git already tracks — the proof delta —
     with no untracked noise.  A brand-new *untracked* `.thy` is not
-    snapshotted until its first `git add`; the common case (editing
-    existing theories) is fully covered.
-  - **Per-instance isolation, poolable later.**  The ref is keyed by a
-    stable per-working-copy `instance_id` (minted once, gitignored in
-    `t/logs/instance-id`), and every record carries it plus
-    host/contributor/origin provenance — so parallel worktrees and
-    independent clones never collide and their trajectories merge by
-    union into one dataset (logging-design.md §16).  The ref is still
-    never pushed and `t/logs/` is still gitignored: capture stays local
-    until an explicit pool/publish step (§12.5 loss #6).
+    diffed until its first `git add`; the common case (editing existing
+    theories) is fully covered.
+  - **The diff is the payload, kept as text — not a git ref chain.**
+    Earlier prototypes chained snapshots on `refs/attempts/*`; that store
+    is local-only and unshareable (logging-design.md §16).  Instead each
+    record carries the incremental diff directly, anchored to the public
+    `git_head` commit, so an episode is a portable file needing no git
+    object store to interpret.  A throwaway tree object is written only to
+    *compute* the diff (its id is kept as an integrity / no-op anchor); no
+    commit chain is retained.
+  - **Per-instance attribution.**  Each record carries a stable
+    `instance_id` (minted once in gitignored `t/logs/instance-id`) plus
+    host/contributor/origin provenance, so trajectories from parallel
+    worktrees / clones agglomerate by file union (logging-design.md §16).
   - **Never breaks the build.**  `record(...)` swallows every error
     into a one-line stderr warning; the caller's exit code is
     untouched.  Trajectory capture must never cost a build.
@@ -55,6 +55,11 @@ ATTEMPT_INDEX = LOG_DIR / ".attempt-index"
 # Distinguishes parallel worktrees / clones so their trajectories pool
 # without collision (logging-design.md §16).
 INSTANCE_ID_FILE = LOG_DIR / "instance-id"
+# The previous attempt's (tree, git_head), so the next attempt's diff is
+# incremental vs the prior attempt — except when a commit moved HEAD in
+# between, where we re-baseline on the new HEAD so committed content never
+# leaks into an attempt's diff (logging-design.md §16).  Gitignored.
+LAST_ATTEMPT_FILE = LOG_DIR / ".last-attempt"
 
 
 def _git(args: list[str], env: dict | None = None) -> str:
@@ -95,6 +100,19 @@ def _instance_id() -> str:
     return new_id
 
 
+def _read_last_attempt() -> tuple[str | None, str | None]:
+    """The previous attempt's (tree, git_head); (None, None) for the first."""
+    if LAST_ATTEMPT_FILE.exists():
+        parts = LAST_ATTEMPT_FILE.read_text().strip().split("\t")
+        if len(parts) == 2 and parts[0]:
+            return parts[0], parts[1]
+    return None, None
+
+
+def _write_last_attempt(tree: str, head: str) -> None:
+    LAST_ATTEMPT_FILE.write_text(f"{tree}\t{head}\n")
+
+
 def _snapshot_tree() -> str:
     """Write the working tree's tracked-file state to a tree object.
 
@@ -132,31 +150,27 @@ def _record(argv, outcome, exit_code, timeout_reason,
     branch = _git(["rev-parse", "--abbrev-ref", "HEAD"]) or "DETACHED"
     head = _git(["rev-parse", "HEAD"])
     head_tree = _git(["rev-parse", "HEAD^{tree}"])
-    # Instance-keyed, not branch-keyed: deleting a branch leaves its old
-    # refs/attempts/<branch> dangling, so a reused name would silently
-    # concatenate two unrelated efforts.  Keying by the minted instance id
-    # keeps every working copy's chain independent (logging-design.md §16).
-    ref = f"refs/attempts/{instance}/{branch}"
 
+    # Snapshot the tracked working tree to a tree object purely to diff it;
+    # the id is kept as an integrity / no-op-rebuild anchor, but no commit
+    # chain is retained (logging-design.md §16 — episodes are portable
+    # patch files, not a git ref chain).
     tree = _snapshot_tree()
 
-    # Chain onto the previous attempt snapshot so `git log <ref>` is the
-    # attempt sequence; the first attempt parents off HEAD.
-    try:
-        parent = _git(["rev-parse", "--verify", "-q", ref])
-    except subprocess.CalledProcessError:
-        parent = head
+    # The payload: the incremental change this attempt introduced.  Normally
+    # that is vs the previous attempt's tree; but if HEAD moved since then (a
+    # mid-flight commit — committing a failing state as a rewind point, or any
+    # commit), re-baseline on the new HEAD's tree so the committed content is
+    # excluded and the diff stays the small uncommitted edit.
+    last_tree, last_head = _read_last_attempt()
+    base = head_tree if (last_tree is None or last_head != head) else last_tree
+    diff = _git(["diff", "--no-color", "-M", base, tree])
+    _write_last_attempt(tree, head)
 
     build_id = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
-    tag = outcome + (f"/{timeout_reason}" if timeout_reason else "")
-    msg = f"attempt {build_id} {tag}"
-    if error_head:
-        msg += f"\n\n{error_head}"
-    commit = _git(["commit-tree", tree, "-p", parent, "-m", msg])
-    _git(["update-ref", ref, commit])
 
-    # Provenance for cross-instance pooling: the (instance_id, build_id)
-    # pair is the global merge key; host/contributor/origin attribute a
+    # Provenance for cross-instance agglomeration: the (instance_id,
+    # build_id) pair is the global key; host/contributor/origin attribute a
     # record once federated (logging-design.md §16).  Optional lookups use
     # _git_opt so an unset user.email / missing origin never drops a record.
     hostname = socket.gethostname()
@@ -186,10 +200,10 @@ def _record(argv, outcome, exit_code, timeout_reason,
         "elapsed_s_ac": round(elapsed_s / battery_factor, 1)
                         if battery_factor else round(elapsed_s, 1),
         "error_head": error_head or None,
-        "git_head": head,                    # committed checkpoint this sits on
+        "git_head": head,                    # commit built against (episode baseline / mid-flight-commit marker)
         "head_dirty": tree != head_tree,     # False = rebuild of an unchanged tree
-        "snapshot": commit,                  # refs/attempts/<instance>/<branch> tip
-        "parent_snapshot": parent,
+        "tree": tree,                        # working-tree content id (integrity / no-op anchor)
+        "diff": diff,                        # incremental change vs the previous attempt
         "log": log_name,
     }
     with open(BUILDS_JSONL, "a") as fh:
