@@ -26,9 +26,11 @@ Output:
     provenance stamped and the incremental `diff` added per record.  Feed
     it to bin/trajectory-export.py to materialise the episode files.
 
-The minted instance_id is printed: for a canonical run, write it to the
-checkout's t/logs/instance-id so the checkout's *future* builds share the
-same identity (one continuous instance across the prototype->new boundary).
+Identity continuity: the checkout's t/logs/instance-id is reused if
+present, else minted and written there — so the legacy records and the
+checkout's *future* builds share one instance_id across the prototype->new
+boundary.  (That file is the new identity, not legacy data, so writing it
+does not violate the read-only-on-legacy-data rule.)
 """
 
 import argparse
@@ -84,7 +86,14 @@ def main() -> int:
         print(f"FAIL: no legacy log at {legacy_log}", file=sys.stderr)
         return 1
 
-    instance = secrets.token_hex(8)
+    inst_file = checkout / "t" / "logs" / "instance-id"
+    if inst_file.exists() and inst_file.read_text().strip():
+        instance, established = inst_file.read_text().strip(), False
+    else:
+        instance = secrets.token_hex(8)
+        inst_file.parent.mkdir(parents=True, exist_ok=True)
+        inst_file.write_text(instance + "\n")
+        established = True
     prov = {
         "hostname": socket.gethostname(),
         "contributor": git_out(checkout, ["config", "user.email"]).strip()
@@ -132,11 +141,11 @@ def main() -> int:
     outp.parent.mkdir(parents=True, exist_ok=True)
     outp.write_text("\n".join(json.dumps(r) for r in out_recs) + "\n")
     print(f"convert-legacy: {len(recs)} records, {matched} matched to chain "
-          f"diffs, {len(chain)} chain attempts; instance_id={instance}")
+          f"diffs, {len(chain)} chain attempts")
+    print(f"  instance_id={instance} "
+          f"({'established in ' if established else 'reused from '}{inst_file})")
     print(f"PASS: wrote diff-bearing log to {outp}")
     print(f"  next: bin/trajectory-export.py --log {outp} --apply")
-    print(f"  canonical run: write instance_id {instance} to "
-          f"{checkout}/t/logs/instance-id so future builds share it")
     return 0
 
 
