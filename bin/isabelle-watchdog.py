@@ -225,15 +225,17 @@ def main() -> int:
     # tactic time), well under the 40s wall budget, with a more
     # informative LOOP-on-line message than the bare wall timeout.
     loop_progress_threshold = int(os.environ.get("LOOP_PROGRESS_THRESHOLD", "3"))
-    # Land Isabelle's line-bearing "running for Ns" warning before the
-    # activity timeout (see inject_progress_threshold / the docstring).
     build_progress_threshold = float(os.environ.get("BUILD_PROGRESS_THRESHOLD", "15"))
-    args = inject_progress_threshold(args, build_progress_threshold)
 
     # Battery throttling: a laptop on battery runs ~BATTERY_FACTOR times
-    # slower, so scale both time budgets to keep them in AC-equivalent
+    # slower, so scale the time budgets to keep them in AC-equivalent
     # units (see the module docstring).  Detection failure / non-macOS =>
-    # no scaling.
+    # no scaling.  Done BEFORE inject_progress_threshold so the
+    # loop-detection warning threshold is scaled too: otherwise a
+    # battery-slow-but-fine command crosses the unscaled 15s threshold,
+    # emits its consecutive same-line warnings, and is spuriously
+    # loop-killed while the (scaled) activity/wall budgets still had ample
+    # room.
     battery = on_battery()
     battery_factor = float(os.environ.get("BATTERY_FACTOR", "2.0"))
     power = "battery" if battery else ("ac" if battery is False else "unknown")
@@ -244,8 +246,14 @@ def main() -> int:
     if applied_factor != 1.0:
         activity_timeout = int(activity_timeout * applied_factor)
         wall_timeout = int(wall_timeout * applied_factor)
+        build_progress_threshold = build_progress_threshold * applied_factor
         print(f"watchdog: on battery — budgets scaled x{applied_factor:g} "
-              f"(activity {activity_timeout}s, wall {wall_timeout}s)")
+              f"(activity {activity_timeout}s, wall {wall_timeout}s, "
+              f"loop-warn {build_progress_threshold:g}s)")
+
+    # Land Isabelle's line-bearing "running for Ns" warning before the
+    # activity timeout (see inject_progress_threshold / the docstring).
+    args = inject_progress_threshold(args, build_progress_threshold)
 
     startup_timeout = activity_timeout + 20
 
