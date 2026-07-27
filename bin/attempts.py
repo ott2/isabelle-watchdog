@@ -377,7 +377,22 @@ def cmd_classify(recs: list[dict], build_id: str, verbose: bool) -> None:
 
 def _episodes(recs: list[dict]) -> list[list[dict]]:
     """Maximal runs of non-ok attempts closed by an ok (§12.4).  A trailing
-    run with no closing ok is returned as an open episode."""
+    run with no closing ok is returned as an open episode.
+
+    Segmentation is chronological, **not** per working copy, even on a
+    pooled log (several instances unioned by concatenation,
+    logging-design.md §16.5).  That is deliberate: worktrees are used
+    sequentially here, so an unfinished run on one instance genuinely
+    continues on the next — in the main→stac/wip pool the handoff shows the
+    same session failing at the same `by` line on either side of the seam,
+    one repair, two working copies.  Splitting by instance would cut that
+    trajectory in half.
+
+    The assumption that fails is *concurrent* instances, whose records
+    interleave; then a run really would splice unrelated work.
+    `interleaving(recs)` measures it, and the views warn when it is
+    non-zero.
+    """
     episodes: list[list[dict]] = []
     cur: list[dict] = []
     for rec in recs:
@@ -388,6 +403,18 @@ def _episodes(recs: list[dict]) -> list[list[dict]]:
     if cur:
         episodes.append(cur)
     return episodes
+
+
+def interleaving(recs: list[dict]) -> tuple[int, int]:
+    """(instances, interleave excess) for a possibly-pooled log.
+
+    Sequential handoff between n instances costs exactly n-1 switches
+    between consecutive records; anything beyond that is genuine
+    concurrency, which chronological episode segmentation cannot model.
+    """
+    ids = [r.get("instance_id") for r in recs]
+    switches = sum(1 for a, b in zip(ids, ids[1:]) if a != b)
+    return len(set(ids)), max(0, switches - (len(set(ids)) - 1))
 
 
 def cmd_episodes(recs: list[dict], n: int, include_all: bool,
@@ -485,6 +512,11 @@ def cmd_lengths(recs: list[dict], n: int, include_all: bool,
     if blind:
         print(f"  {blind} trajectories contain a zero-byte delta after a "
               f"failure — length under-reported (capture blind spot, §13.1)")
+    instances, excess = interleaving(recs)
+    if instances > 1:
+        note = (f", {excess} interleaved switches — episodes may splice "
+                f"concurrent work" if excess else ", used sequentially")
+        print(f"  pooled log: {instances} working copies{note}")
     print("  --csv / --json for plotting")
 
 

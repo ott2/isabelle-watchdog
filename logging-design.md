@@ -1023,6 +1023,19 @@ fork+PR model collaborators already use:
   matter as much as noise control).  A portable file is trivially yours
   to share or withhold, with no local-only-ref caveat.
 
+**Reading a pooled log: segment chronologically, not per instance.**  A
+concatenated `builds.jsonl` interleaves records from several working
+copies, so the obvious defensive move is to split episodes by
+`instance_id`.  That is wrong for how worktrees are actually used here —
+sequentially.  In the main + `stac/wip` pool the seam shows the *same*
+session failing at the *same* `by` line on either side (main's last
+attempt and the worktree's first, four days apart): one repair, two
+working copies, and splitting by instance would cut that trajectory in
+half.  The assumption that fails is *concurrent* instances, whose
+records genuinely interleave; `attempts.py interleaving()` measures the
+excess over the n-1 switches a sequential handoff costs, and the views
+warn when it is non-zero rather than silently mis-segmenting.
+
 `[trajectory-pool]` (gather a machine's per-instance files) and
 `[trajectory-federate]` (the hub repo + opt-in publish) are the remaining
 build-out; the per-episode format they move is in place.
