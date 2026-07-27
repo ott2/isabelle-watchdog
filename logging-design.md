@@ -785,6 +785,48 @@ keep the data honest without demanding perfection:
   lines touched).  Analysis can down-weight or filter low-locality
   episodes, so the occasional sweep costs only itself.
 
+### 13.1 Delta class: code vs doc-only (delivered)
+
+The first diff-scope cut, in `bin/attempts.py`: classify each attempt's
+delta as **code** (a proof or a statement moved), **doc** (only prose —
+a `text` block, a `\<comment>`, a section heading, an ML comment, a
+`.md` memo, `document/`, or pure re-indentation) or **none** (no
+tracked-file change at all).  Every view filters to code by default;
+`--all` restores the raw sequence.
+
+Why it matters: a prose edit builds green first time by construction,
+so counting doc deltas inflates the one-shot-correct rate and flattens
+the trajectory histogram.  On the 693-attempt corpus, 100 of 333 closed
+episodes are doc-only and drop out entirely.
+
+The classifier is heuristic but auditable (`attempts.py classify -v`
+prints the evidence).  Per changed `.thy` line it computes a *code
+projection* — the line with prose spans, document-command keywords and
+whitespace removed — then compares the multiset of removed projections
+against the added ones.  Equality means nothing but prose moved, even
+when the touched lines are code-bearing (appending a `\<comment>` to a
+`by` line, retitling a `section`).  Prose state is carried across a hunk
+by a small state machine over `(* *)`, `\<open>`/`\<close>` and the
+document commands; since a hunk starts mid-file the entry state is
+seeded from git's `@@ … @@` context line, with two escapes — retry on an
+unmatched close token, and resync on a column-0 Isabelle command (which
+cannot occur inside a cartouche).
+
+**Computed in the reader, not recorded by the writer.**  A `diff_scope`
+field written at capture time would freeze the classifier's first
+version into the corpus; computing it on read lets an improved
+classifier apply retroactively to every attempt already banked.  The
+diff itself is the durable payload (§16); everything derived from it
+stays derived.
+
+*Finding (2026-07-27).*  Filtering on delta class also exposes build
+flakiness: ~28 fail→ok transitions in the corpus change **no bytes at
+all** — identical tree, identical HEAD, identical target, opposite
+verdict (proof-method timeouts under parallel load).  These are not
+repair steps, and the code-only metric drops them along with the doc
+deltas.  Trajectory length must therefore be counted over code deltas,
+not raw attempts, or the tail is measuring load as much as difficulty.
+
 ## 14. Episode-extraction tool
 
 `bin/episodes.py` (sibling of the cost-axis `bin/build-stats.py`,
