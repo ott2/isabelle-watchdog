@@ -819,13 +819,31 @@ classifier apply retroactively to every attempt already banked.  The
 diff itself is the durable payload (§16); everything derived from it
 stays derived.
 
-*Finding (2026-07-27).*  Filtering on delta class also exposes build
-flakiness: ~28 fail→ok transitions in the corpus change **no bytes at
-all** — identical tree, identical HEAD, identical target, opposite
-verdict (proof-method timeouts under parallel load).  These are not
-repair steps, and the code-only metric drops them along with the doc
-deltas.  Trajectory length must therefore be counted over code deltas,
-not raw attempts, or the tail is measuring load as much as difficulty.
+*Finding (2026-07-27) — the untracked-theory blind spot.*  Filtering on
+delta class exposed 28 fail→ok transitions whose delta is **empty**:
+identical tree, identical HEAD, identical target, opposite verdict.
+Flaky builds were the obvious reading and the wrong one.  The error
+heads are hard deterministic errors (`Outer syntax error`, `Undefined
+constant`, `Type unification failed`) that cannot flip green on
+identical content, elapsed times are within a second of the following
+success, and **26 of the 28 name a theory file that did not exist at
+`git_head`**.
+
+The cause was in capture, not in the build: `_snapshot_tree()` staged
+`git add -u`, which sees tracked files only.  While a new theory is
+being authored — before its first `git add` — every edit is invisible,
+the snapshot tree never moves, and a whole fail→fix run records as
+empty diffs.  The blind spot was therefore worst exactly where the
+data is most valuable: the construction of a new theory from scratch.
+Fixed 2026-07-27 by staging `git add -A` (`.gitignore` keeps logs,
+build products and scratch out).
+
+Two consequences that outlive the fix.  Records from before it under-
+report new-theory episodes and cannot be repaired retrospectively — the
+content was never captured.  And a *zero-byte* delta remains a distinct
+class from a doc-only one: it means "no change was seen", which is a
+claim about the recorder, not about the attempt.  Counting trajectory
+length over code deltas drops both, which is the conservative choice.
 
 ## 14. Episode-extraction tool
 

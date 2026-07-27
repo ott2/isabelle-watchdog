@@ -11,11 +11,16 @@ files by `bin/trajectory-export.py`; see logging-design.md §16.
 
 Design choices (see logging-design.md §§12–16 for the full design):
 
-  - **Tracked-file deltas only** (`git add -u`, seeded from HEAD):
-    captures edits to theories git already tracks — the proof delta —
-    with no untracked noise.  A brand-new *untracked* `.thy` is not
-    diffed until its first `git add`; the common case (editing existing
-    theories) is fully covered.
+  - **Non-ignored deltas** (`git add -A`, seeded from HEAD): captures
+    edits to tracked theories *and* to brand-new ones git has not seen
+    yet; `.gitignore` keeps out logs, build products and scratch.  This
+    was `git add -u` (tracked only) until 2026-07-27, which silently
+    blinded capture during exactly the highest-value work: while a new
+    theory is being authored its every edit is invisible, the snapshot
+    tree never moves, and a whole fail→fix run records as a sequence of
+    empty diffs.  On the first month of data that accounted for 26 of the
+    28 fail→ok flips that appeared to change nothing at all
+    (logging-design.md §13.1).
   - **The diff is the payload, kept as text — not a git ref chain.**
     Earlier prototypes chained snapshots on `refs/attempts/*`; that store
     is local-only and unshareable (logging-design.md §16).  Instead each
@@ -114,18 +119,21 @@ def _write_last_attempt(tree: str, head: str) -> None:
 
 
 def _snapshot_tree() -> str:
-    """Write the working tree's tracked-file state to a tree object.
+    """Write the working tree's non-ignored state to a tree object.
 
-    Seed a throwaway index from HEAD, then `git add -u` to apply the
-    working-tree deltas to tracked files — the same delta a normal
-    commit would record, so there are no phantom deletions from a
-    fresh index diverging against `.gitignore`.  The real index and
-    working tree are untouched (GIT_INDEX_FILE override)."""
+    Seed a throwaway index from HEAD, then `git add -A` to apply the
+    working-tree deltas — modifications and deletions to tracked files
+    plus any new file `.gitignore` does not exclude.  Seeding from HEAD
+    (rather than an empty index) is what keeps phantom deletions out.
+    `-A` rather than `-u` so a not-yet-added `.thy` is captured from its
+    first edit; without it a new theory's whole development is invisible.
+    The real index and working tree are untouched (GIT_INDEX_FILE
+    override)."""
     env = {**os.environ, "GIT_INDEX_FILE": str(ATTEMPT_INDEX)}
     ATTEMPT_INDEX.unlink(missing_ok=True)
     try:
         _git(["read-tree", "HEAD"], env=env)
-        _git(["add", "-u"], env=env)
+        _git(["add", "-A"], env=env)
         return _git(["write-tree"], env=env)
     finally:
         ATTEMPT_INDEX.unlink(missing_ok=True)

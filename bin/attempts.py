@@ -475,6 +475,16 @@ def cmd_lengths(recs: list[dict], n: int, include_all: bool,
           f"({100 * hist.get(1, 0) / len(lengths):.1f}%)")
     if dropped:
         print(f"  {dropped} doc-only trajectories dropped (--all to include)")
+    # A zero-byte delta right after a failure is a claim about the recorder,
+    # not the attempt: capture staged tracked files only until 2026-07-27, so
+    # a new theory's whole development recorded as empty diffs
+    # (logging-design.md §13.1).  Such trajectories under-report their length.
+    blind = sum(1 for ep in episodes
+                if any(rec_class(b) == "none" and a["outcome"] != "ok"
+                       for a, b in zip(ep, ep[1:])))
+    if blind:
+        print(f"  {blind} trajectories contain a zero-byte delta after a "
+              f"failure — length under-reported (capture blind spot, §13.1)")
     print("  --csv / --json for plotting")
 
 
