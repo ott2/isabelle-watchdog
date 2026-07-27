@@ -11,16 +11,18 @@ files by `bin/trajectory-export.py`; see logging-design.md §16.
 
 Design choices (see logging-design.md §§12–16 for the full design):
 
-  - **Non-ignored deltas** (`git add -A`, seeded from HEAD): captures
-    edits to tracked theories *and* to brand-new ones git has not seen
-    yet; `.gitignore` keeps out logs, build products and scratch.  This
-    was `git add -u` (tracked only) until 2026-07-27, which silently
-    blinded capture during exactly the highest-value work: while a new
-    theory is being authored its every edit is invisible, the snapshot
-    tree never moves, and a whole fail→fix run records as a sequence of
-    empty diffs.  On the first month of data that accounted for 26 of the
-    28 fail→ok flips that appeared to change nothing at all
-    (logging-design.md §13.1).
+  - **Tracked deltas, plus untracked source by allowlist** (seeded from
+    HEAD): `git add -u` for every tracked file, then `git add -A` over
+    `UNTRACKED_PATHSPECS` (`*.thy`, `ROOT`, `ROOTS`) so a theory git has
+    not seen yet is captured from its first edit.  Capture was
+    tracked-only until 2026-07-27, which silently blinded it during
+    exactly the highest-value work: while a new theory is authored its
+    every edit is invisible, the snapshot tree never moves, and a whole
+    fail→fix run records as a sequence of empty diffs.  On the first
+    month of data that accounted for 26 of the 28 fail→ok flips that
+    appeared to change nothing at all (logging-design.md §13.1).  The
+    allowlist is narrow on purpose: scratch scripts, draft memos and
+    editor backups are not proof deltas and must not enter the dataset.
   - **The diff is the payload, kept as text — not a git ref chain.**
     Earlier prototypes chained snapshots on `refs/attempts/*`; that store
     is local-only and unshareable (logging-design.md §16).  Instead each
@@ -65,6 +67,13 @@ INSTANCE_ID_FILE = LOG_DIR / "instance-id"
 # between, where we re-baseline on the new HEAD so committed content never
 # leaks into an attempt's diff (logging-design.md §16).  Gitignored.
 LAST_ATTEMPT_FILE = LOG_DIR / ".last-attempt"
+
+# Untracked files worth capturing: the source classes that decide whether a
+# build runs and what it proves.  Deliberately an allowlist, not `git add -A`
+# — a new theory must be visible from its first edit, but a scratch script or
+# a draft memo must not enter the dataset before anyone has decided to keep
+# it.  Git pathspec globs, so `*` crosses directory separators.
+UNTRACKED_PATHSPECS = ["*.thy", "*ROOT", "*ROOTS"]
 
 
 def _git(args: list[str], env: dict | None = None) -> str:
@@ -119,21 +128,37 @@ def _write_last_attempt(tree: str, head: str) -> None:
 
 
 def _snapshot_tree() -> str:
-    """Write the working tree's non-ignored state to a tree object.
+    """Write the working tree's build-relevant state to a tree object.
 
-    Seed a throwaway index from HEAD, then `git add -A` to apply the
-    working-tree deltas — modifications and deletions to tracked files
-    plus any new file `.gitignore` does not exclude.  Seeding from HEAD
-    (rather than an empty index) is what keeps phantom deletions out.
-    `-A` rather than `-u` so a not-yet-added `.thy` is captured from its
-    first edit; without it a new theory's whole development is invisible.
+    Two staging passes into a throwaway index seeded from HEAD (seeding
+    from HEAD, rather than an empty index, is what keeps phantom
+    deletions out):
+
+      1. `git add -u` — every *tracked* file's modification or deletion,
+         whatever its type.  This is the long-standing behaviour.
+      2. `git add -A -- <UNTRACKED_PATHSPECS>` — new files git has not
+         seen yet, restricted to the build-relevant source classes.
+
+    Pass 2 exists because tracked-only capture is blind exactly where
+    the data is most valuable: while a new theory is being authored, its
+    every edit is invisible, the snapshot tree never moves, and a whole
+    fail→fix run records as empty diffs (logging-design.md §13.1).  It
+    is a narrow allowlist rather than a bare `git add -A` so that
+    scratch scripts, draft memos, editor backups and stray artefacts
+    stay out of the dataset — `.gitignore` alone is not a tight enough
+    filter for files nobody has decided to keep yet.
+
     The real index and working tree are untouched (GIT_INDEX_FILE
     override)."""
     env = {**os.environ, "GIT_INDEX_FILE": str(ATTEMPT_INDEX)}
     ATTEMPT_INDEX.unlink(missing_ok=True)
     try:
         _git(["read-tree", "HEAD"], env=env)
-        _git(["add", "-A"], env=env)
+        _git(["add", "-u"], env=env)
+        # --ignore-errors so an unreadable stray file cannot cost a build;
+        # the pathspecs are globs, so a no-match is not an error.
+        _git(["add", "-A", "--ignore-errors", "--", *UNTRACKED_PATHSPECS],
+             env=env)
         return _git(["write-tree"], env=env)
     finally:
         ATTEMPT_INDEX.unlink(missing_ok=True)

@@ -835,8 +835,18 @@ being authored — before its first `git add` — every edit is invisible,
 the snapshot tree never moves, and a whole fail→fix run records as
 empty diffs.  The blind spot was therefore worst exactly where the
 data is most valuable: the construction of a new theory from scratch.
-Fixed 2026-07-27 by staging `git add -A` (`.gitignore` keeps logs,
-build products and scratch out).
+
+Fixed 2026-07-27, in two staging passes: `git add -u` for every tracked
+file (unchanged behaviour), then `git add -A` restricted to
+`UNTRACKED_PATHSPECS` — `*.thy`, `ROOT`, `ROOTS`.  An **allowlist, not a
+bare `git add -A`**: `.gitignore` is the wrong filter here, because it
+answers "should this be committed?" while the question is "is this a
+proof delta?".  A scratch script, a draft memo or an editor backup
+passes the first test and fails the second, and a dataset should not
+absorb files nobody has yet decided to keep.  Widening capture is
+itself a scope decision — take the narrowest widening that covers the
+defect.  `bin/check-snapshot-untracked.sh` guards both directions
+(theory and session `ROOT` in; scratch and gitignored out).
 
 Two consequences that outlive the fix.  Records from before it under-
 report new-theory episodes and cannot be repaired retrospectively — the
