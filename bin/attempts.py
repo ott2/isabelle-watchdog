@@ -16,10 +16,19 @@ any builds.jsonl — point it anywhere with -i/--input.
                                  with its outcome (--full = full diff,
                                  else a stat summary) — associate change
                                  with outcome across a whole fail→fix run.
-  attempts.py lengths [-n N] [--csv|--json]
+  attempts.py lengths [-n N] [--fit] [--by-project] [--csv|--json]
                                  histogram of trajectory (episode) lengths:
-                                 how many 1-step, 2-step, … runs — the
-                                 power-law view.  --csv/--json for plotting.
+                                 how many 1-step, 2-step, … runs.
+                                 --fit separates the two regimes — the
+                                 one-shot spike and the repair tail — and
+                                 scores a power law against a geometric
+                                 null on the same support.  --by-project
+                                 splits by development (t/ae, t/ar, t/ntr,
+                                 t/art, t/base): separate results built in
+                                 different eras, so their one-shot rate and
+                                 tail exponent are a *dynamic* difficulty
+                                 measure no static lemma count captures.
+                                 --csv/--json for plotting.
   attempts.py classify BUILD_ID [-v]
                                  why a delta was judged code or doc-only
                                  (per-file verdict; -v shows the evidence)
@@ -50,6 +59,7 @@ a `by` line).  Run `classify -v` to see the evidence for any verdict.
 
 import argparse
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -295,6 +305,144 @@ def keep(recs: list[dict], include_all: bool) -> list[dict]:
     return recs if include_all else [r for r in recs if rec_class(r) == "code"]
 
 
+# ------------------------------------------------------- project attribution
+
+# The theory tree's top-level session directories are separate developments
+# — different results, different eras, in effect different projects — so
+# their trajectories should not be pooled into one distribution.  Attributed
+# from the *paths a trajectory's code deltas touch*, not from the build
+# target, because session names have been renamed twice (NDTHT_AE ->
+# Alphabet_Enlargement -> Multitape_Alphabet_Enlargement) while `t/<dir>`
+# has been stable throughout.
+_PROJECT_DIR = re.compile(r"^t/([A-Za-z]+)/")
+
+
+def project(ep: list[dict]) -> str:
+    """Which development a trajectory belongs to: a `t/` session dir,
+    'tooling' (no theory touched), or 'mixed' (several sessions at once)."""
+    dirs, other = set(), False
+    for rec in ep:
+        if rec_class(rec) != "code":
+            continue
+        for path, _ in _split_files(rec.get("diff") or ""):
+            m = _PROJECT_DIR.match(path)
+            if m:
+                dirs.add(m.group(1))
+            else:
+                other = True
+    if len(dirs) == 1:
+        return dirs.pop()
+    if dirs:
+        return "mixed"
+    return "tooling" if other else "none"
+
+
+# ------------------------------------------------------------------ fitting
+
+def _ks(sample: list[int], cdf) -> float:
+    """Kolmogorov-Smirnov distance between a sample and a fitted CDF."""
+    xs = sorted(sample)
+    n = len(xs)
+    return max(max(abs((i + 1) / n - cdf(x)), abs(cdf(x) - i / n))
+               for i, x in enumerate(xs))
+
+
+def fit(lengths: list[int]) -> dict | None:
+    """Two-regime fit of the trajectory-length distribution.
+
+    Regime 1 is the one-shot spike (k == 1): routine edits that go green
+    first time.  Regime 2 is the repair tail (k >= 2), where the question
+    is *which* law it follows, because that is the part that reflects proof
+    difficulty rather than task mix.
+
+    Two candidate laws are fitted to the same tail and compared on the same
+    statistic (KS distance), rather than asserting one:
+
+      - **geometric** — each attempt independently succeeds with a fixed
+        probability p.  The null: repair is memoryless, one difficulty.
+      - **power law** — no characteristic scale; a few proofs are
+        qualitatively harder.  Discrete MLE (Clauset et al.)
+        alpha = 1 + n / sum ln(x / (xmin - 0.5)), with xmin chosen to
+        minimise KS as in that method.
+
+    A heavy tail shows up as the power law winning on KS *and* a large
+    observed/expected excess far out in the tail, where the two laws differ
+    most.  Returns None if the tail is too small to say anything.
+    """
+    tail = [x for x in lengths if x >= 2]
+    if len(tail) < 20:
+        return None
+    n = len(tail)
+
+    # Geometric fitted to the tail, shifted to start at 1.
+    p = 1 / (sum(x - 1 for x in tail) / n)
+    ks_geom = _ks(tail, lambda x: 1 - (1 - p) ** (x - 1))
+
+    # Power law: scan xmin, keep the KS-minimising fit (Clauset's rule).
+    best = None
+    for xmin in sorted({x for x in tail if x >= 2}):
+        sub = [x for x in tail if x >= xmin]
+        if len(sub) < 15:
+            break
+        denom = sum(math.log(x / (xmin - 0.5)) for x in sub)
+        if denom <= 0:
+            continue
+        alpha = 1 + len(sub) / denom
+        d = _ks(sub, lambda x, a=alpha, m=xmin: 1 - (x / (m - 0.5)) ** (1 - a))
+        if best is None or d < best["ks"]:
+            best = {"xmin": xmin, "alpha": alpha, "ks": d, "n": len(sub)}
+    if best is None:
+        return None
+
+    # Head-to-head: refit the geometric on the *same* support the power law
+    # was scored on.  Comparing a KS from n=21 against one from n=160 would
+    # be meaningless — the statistic depends on the sample it is computed on.
+    sub = [x for x in tail if x >= best["xmin"]]
+    p_sub = 1 / (sum(x - best["xmin"] + 1 for x in sub) / len(sub))
+    ks_geom_sub = _ks(sub, lambda x, m=best["xmin"]:
+                      1 - (1 - p_sub) ** (x - m + 1))
+
+    # Where the laws disagree most: the far tail, against the whole-tail
+    # geometric (the null for the repair process as a whole).
+    probe = max(10, best["xmin"] * 4)
+    observed = sum(1 for x in tail if x >= probe)
+    expected = n * (1 - p) ** (probe - 1)
+    return {
+        "one_shot": sum(1 for x in lengths if x == 1),
+        "total": len(lengths),
+        "tail_n": n,
+        "geometric_p": p,
+        "geometric_ks": ks_geom,
+        "power_law": best,
+        "geometric_same_support": {"p": p_sub, "ks": ks_geom_sub,
+                                   "n": len(sub)},
+        "probe": probe,
+        "probe_observed": observed,
+        "probe_expected": expected,
+    }
+
+
+def _print_fit(f: dict, indent: str = "  ") -> None:
+    pl = f["power_law"]
+    pct = 100 * f["one_shot"] / f["total"]
+    print(f"\n{indent}fit — two regimes")
+    print(f"{indent}  regime 1  one-shot      {f['one_shot']}/{f['total']} "
+          f"({pct:.1f}%) — routine edits, green first time")
+    print(f"{indent}  regime 2  repair tail   {f['tail_n']} trajectories (k >= 2)")
+    gs = f["geometric_same_support"]
+    print(f"{indent}    geometric, whole tail   p={f['geometric_p']:.3f}"
+          f"      KS={f['geometric_ks']:.3f}  n={f['tail_n']}")
+    print(f"{indent}    head-to-head on k >= {pl['xmin']} (n={pl['n']}):")
+    print(f"{indent}      power law   alpha={pl['alpha']:.2f}   KS={pl['ks']:.3f}")
+    print(f"{indent}      geometric   p={gs['p']:.3f}       KS={gs['ks']:.3f}")
+    exp = f["probe_expected"]
+    ratio = f"{f['probe_observed'] / exp:.0f}x" if exp >= 0.05 else ">100x"
+    print(f"{indent}    far tail    k>={f['probe']}: {f['probe_observed']} observed "
+          f"vs {exp:.1f} expected under geometric ({ratio})")
+    better = "power law" if pl["ks"] < gs["ks"] else "geometric"
+    print(f"{indent}    lower KS on the same support: {better}")
+
+
 # --------------------------------------------------------------- rendering
 
 def _diff_stat(diff: str, indent: str) -> str:
@@ -441,8 +589,65 @@ def cmd_episodes(recs: list[dict], n: int, include_all: bool,
         print()
 
 
-def cmd_lengths(recs: list[dict], n: int, include_all: bool,
-                fmt: str) -> None:
+def cmd_lengths_by_project(pairs: list[tuple[int, str]], label: str,
+                           do_fit: bool, fmt: str = "text") -> None:
+    """Per-development breakdown.  `t/ae`, `t/ar`, `t/ntr` and `t/art` are
+    separate results built in different eras; pooling their trajectories
+    into one distribution averages over four different problems.  Reported
+    separately, the one-shot rate and the tail exponent become a *dynamic*
+    measure of how hard each development actually was — something no static
+    count of lemmas or proof lines captures."""
+    groups: dict[str, list[int]] = {}
+    for k, proj in pairs:
+        groups.setdefault(proj, []).append(k)
+
+    if fmt == "csv":
+        print("project,length,trajectories")
+        for proj in sorted(groups):
+            hist: dict[int, int] = {}
+            for k in groups[proj]:
+                hist[k] = hist.get(k, 0) + 1
+            for k in sorted(hist):
+                print(f"{proj},{k},{hist[k]}")
+        return
+    if fmt == "json":
+        out = {}
+        for proj, L in groups.items():
+            hist = {}
+            for k in L:
+                hist[str(k)] = hist.get(str(k), 0) + 1
+            entry = {"histogram": {k: hist[k] for k in sorted(hist, key=int)},
+                     "trajectories": len(L), "steps": sum(L),
+                     "one_shot": sum(1 for x in L if x == 1), "max": max(L)}
+            if do_fit:
+                entry["fit"] = fit(L)
+            out[proj] = entry
+        print(json.dumps({"metric": label, "projects": out}, indent=1))
+        return
+
+    print(f"trajectory lengths by development — {label}\n")
+    print(f"  {'project':10} {'traj':>5} {'steps':>6} {'1-shot':>7} "
+          f"{'mean':>5} {'max':>4}  {'tail alpha':>10}")
+    for proj in sorted(groups, key=lambda p: -len(groups[p])):
+        L = groups[proj]
+        one = sum(1 for x in L if x == 1)
+        f = fit(L)
+        alpha = f"{f['power_law']['alpha']:.2f}" if f else "-"
+        print(f"  {proj:10} {len(L):5d} {sum(L):6d} "
+              f"{100 * one / len(L):6.1f}% {sum(L) / len(L):5.2f} "
+              f"{max(L):4d}  {alpha:>10}")
+    print("\n  alpha is fitted on the k >= 2 repair tail; '-' = tail too "
+          "small to fit")
+    if do_fit:
+        for proj in sorted(groups, key=lambda p: -len(groups[p])):
+            f = fit(groups[proj])
+            if f:
+                print(f"\n  --- {proj} ---")
+                _print_fit(f, indent="  ")
+
+
+def cmd_lengths(recs: list[dict], n: int, include_all: bool, fmt: str,
+                do_fit: bool = False, by_project: bool = False) -> None:
     """Frequency of 1-step, 2-step, … trajectories.
 
     A trajectory's *length* counts the attempts it took to reach a green
@@ -460,12 +665,17 @@ def cmd_lengths(recs: list[dict], n: int, include_all: bool,
     episodes = [ep for ep in _episodes(recs) if ep[-1]["outcome"] == "ok"]
     episodes = _tail(episodes, n)
     if include_all:
-        lengths = [len(ep) for ep in episodes]
+        pairs = [(len(ep), project(ep)) for ep in episodes]
         label = "attempts per trajectory, all deltas"
     else:
-        lengths = [c for ep in episodes
-                   if (c := sum(1 for r in ep if rec_class(r) == "code"))]
+        pairs = [(c, project(ep)) for ep in episodes
+                 if (c := sum(1 for r in ep if rec_class(r) == "code"))]
         label = "code-changing attempts per trajectory"
+    lengths = [k for k, _ in pairs]
+
+    if by_project:
+        cmd_lengths_by_project(pairs, label, do_fit, fmt)
+        return
 
     hist: dict[int, int] = {}
     for length in lengths:
@@ -477,10 +687,13 @@ def cmd_lengths(recs: list[dict], n: int, include_all: bool,
             print(f"{k},{hist[k]}")
         return
     if fmt == "json":
-        print(json.dumps({"metric": label,
-                          "histogram": {str(k): hist[k] for k in sorted(hist)},
-                          "trajectories": len(lengths),
-                          "steps": sum(lengths)}, indent=1))
+        out = {"metric": label,
+               "histogram": {str(k): hist[k] for k in sorted(hist)},
+               "trajectories": len(lengths),
+               "steps": sum(lengths)}
+        if do_fit:
+            out["fit"] = fit(lengths)
+        print(json.dumps(out, indent=1))
         return
 
     if not lengths:
@@ -518,6 +731,12 @@ def cmd_lengths(recs: list[dict], n: int, include_all: bool,
                 f"concurrent work" if excess else ", used sequentially")
         print(f"  pooled log: {instances} working copies{note}")
     print("  --csv / --json for plotting")
+    if do_fit:
+        f = fit(lengths)
+        if f:
+            _print_fit(f)
+        else:
+            print("\n  fit: repair tail too small to fit")
 
 
 # --------------------------------------------------------------------- main
@@ -573,6 +792,12 @@ def main() -> int:
                     help="use only the last N trajectories; 0 = all (default)")
     pg.add_argument("--csv", action="store_true", help="emit CSV for plotting")
     pg.add_argument("--json", action="store_true", help="emit JSON")
+    pg.add_argument("--fit", action="store_true",
+                    help="fit the two regimes: one-shot spike + repair tail, "
+                         "power law vs geometric on the same KS statistic")
+    pg.add_argument("--by-project", action="store_true",
+                    help="split by development (t/ae, t/ar, t/ntr, t/art, "
+                         "t/base) — they are separate results, not one pool")
 
     ns = p.parse_args()
     given = getattr(ns, "input", None)
@@ -593,7 +818,8 @@ def main() -> int:
         cmd_episodes(recs, ns.n, include_all, diffs=ns.diffs, full=ns.full)
     elif ns.cmd == "lengths":
         cmd_lengths(recs, ns.n, include_all,
-                    "csv" if ns.csv else "json" if ns.json else "text")
+                    "csv" if ns.csv else "json" if ns.json else "text",
+                    do_fit=ns.fit, by_project=ns.by_project)
     else:  # list (default)
         cmd_list(recs, getattr(ns, "n", 30), include_all)
     return 0
