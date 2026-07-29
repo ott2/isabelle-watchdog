@@ -855,6 +855,36 @@ class from a doc-only one: it means "no change was seen", which is a
 claim about the recorder, not about the attempt.  Counting trajectory
 length over code deltas drops both, which is the conservative choice.
 
+### 13.1.1 Reading a timeout: what the budgets were tuned for
+
+Wall budgets were kept **as short as possible** on purpose — long enough
+to let a proof fail and report why, short enough not to sit through a
+diverging tactic.  They were retuned per session over time.  The cost of
+that choice is that under heavy system load (not battery — the watchdog
+already scales for battery) a build that would have gone green could be
+killed instead, so a timeout count is part environmental and is *not*
+interchangeable with a failure count.
+
+Two consequences for anyone reading the numbers.  The worst of this
+predates trajectory recording: the budgets had largely settled by the
+time capture started, and the mean timeout in the corpus is ~35s, which
+is the intended regime.  And the exposure is not uniform — `t/ar` is the
+session to watch, being the only one where `activity` timeouts (18)
+outnumber `wall` (7), the signature of a budget trimmed too close rather
+than of a proof diverging.
+
+`bin/audit-timeouts.py` splits the reasons and quantifies the rest.
+`loop_progress` is genuine divergence and belongs with the failures (its
+*per-attempt* rate rises with trajectory length — 1.1% in short runs
+against 7.6% in long ones — and it clusters within a run, neither of
+which an environmental artefact would do).  `wall` and `activity` carry
+no such signature and are the load-sensitive pair.  The dynamic tables
+therefore carry a `timeouts` column: it says how much of a row's failure
+count is exposed to this, and the pooled rows show the exposure is
+essentially equal on both sides of the pre-NTR/NTR split (46 timeouts
+over 344 runs against 12 over 92), which is why it does not disturb the
+contrast.
+
 ### 13.2 Attribution scope: proof-bearing trajectories (delivered)
 
 The second cut, and a different kind of one.  §13.1 asks whether a
