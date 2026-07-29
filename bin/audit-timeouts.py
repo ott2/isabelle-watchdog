@@ -26,6 +26,21 @@ Five checks, in the order that can falsify the concern fastest:
      timing: a load-induced failure carries no proof content, so classify
      the error heads and see.
 
+`Failed to finish proof` is **not** a timeout, though it is easy to assume
+so.  It is the deterministic outcome of a method that *ran to completion*
+and left goals behind — 167 of 176 such heads go on to enumerate them
+(`goal (1 subgoal):`).  Three independent checks agree: its elapsed times
+are indistinguishable from other failures (median 20.8s vs 20.5s) and well
+under the timeouts (median 34.5s, min 20.2s); no such record carries a
+`timeout_reason`, while all 88 timeouts do; and no `fail` record anywhere
+mentions a timeout in its head.
+
+Divergent search — a method that never returns — is real, but it lands in
+the other bucket: `outcome: timeout` with `timeout_reason: loop_progress`
+(the watchdog seeing no progress).  There are 28 of those, ~3% of attempts
+in ae and ntr and near zero in base and ar.  So the phenomenon exists and
+is already separated; it is not hiding inside the failure counts.
+
 Usage:  bin/audit-timeouts.py [-i BUILDS_JSONL]
 """
 
@@ -151,6 +166,19 @@ def main() -> int:
               f"| {inst:9} | {excess:17}")
 
     print("\n4. failures long enough to be disguised timeouts\n")
+    print("   Also the timeout reasons, since `loop_progress` is divergent")
+    print("   search — the case `Failed to finish proof` is often mistaken")
+    print("   for, and it is already counted separately.\n")
+    for sess in PROOF_SESSIONS:
+        rs = [r for s, e in eps if s == sess for r in e]
+        c = Counter(r.get("timeout_reason") for r in rs
+                    if r["outcome"] == "timeout")
+        if rs:
+            print(f"   {sess:4} | loop_progress {c['loop_progress']:3} "
+                  f" wall {c['wall']:3}  activity {c['activity']:3}"
+                  f"  ({100 * c['loop_progress'] / len(rs):4.1f}% of "
+                  f"{len(rs):3} attempts divergent)")
+    print()
     for sess in PROOF_SESSIONS:
         fails = [r["elapsed_s"] for s, e in eps if s == sess
                  for r in e if r["outcome"] == "fail"]
