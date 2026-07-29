@@ -350,6 +350,65 @@ SESSION_ALIASES = {"aem": "ae", "scratch-nae": "ae"}
 # whose edits the recorder missed entirely (§13.1's untracked-theory gap).
 _THY_IN_ERROR = re.compile(r"/t/([A-Za-z0-9_-]+)/[A-Za-z0-9_]+\.thy")
 
+# The watchdog's own error heads name a theory by *base* name and give the
+# line it was elaborating: `loop_progress: "by" line 190 of EncodingWrap_WF`.
+# That is proof-work evidence as good as a path, but it cannot attribute:
+# 11 base names have lived in more than one session directory across the
+# tree's re-layouts (`AlphabetReduction` in t/generic, t/base and t/ar), and
+# the record has no era to disambiguate with that this tool can read.  So it
+# feeds `proof_bearing` only, and attribution falls through to the command.
+# The leading `[A-Za-z]` is what keeps ML frames out: `line 308 of
+# "drule.ML"` and `line 144 of "~/…/Anti_Unify.ML"` both quote the file.
+_THY_BY_LINE = re.compile(r"\bline \d+ of ([A-Za-z][A-Za-z0-9_]*)")
+
+# Session *name* -> `t/<dir>`, for the last-resort attribution route below.
+# Names were renamed twice, so this is every pairing that has ever appeared
+# in a committed ROOT, derived rather than remembered:
+#
+#   git log --all --format=%H -- 't/*/ROOT' | while read sha; do
+#       git ls-tree -r --name-only $sha -- t/ | grep '/ROOT$' | while read f; do
+#           dir=${f#t/}; git show $sha:$f |
+#               sed -n 's/^session *"\?\([A-Za-z0-9_]*\).*/\1 '"${dir%/ROOT}"'/p'
+#       done; done | sort -u
+#
+# It is an allowlist, and that is load-bearing: a target that is not a `t/`
+# session must yield *no* attribution rather than a guess.  The HOAU spike is
+# the case that makes this concrete — it built `HOAU_Spike` from
+# `-d scratch/hoau` against the tree's existing sessions, so the session it
+# runs against is not the work it is about.
+#
+# Such a target maps to **None**, not to absence.  The two behave identically
+# in `command_dir` and differently in the audit, which is the point: absence
+# is what a renamed or newly-added session looks like, so leaving a
+# deliberate exclusion implicit makes an oversight indistinguishable from a
+# decision.  `bin/audit-attribution.py` fails on the first and passes on the
+# second.
+SESSION_TARGETS = {
+    "HOAU_Spike": None,       # built against t/ sessions; not about them
+    "Alphabet_Enlargement": "ae",
+    "Alphabet_Reduction": "ar",
+    "Alphabet_Roundtrip": "art",
+    "MTTM": "base",
+    "MTTM_Examples": "ex",
+    "Multitape_Alphabet_Enlargement": "ae",
+    "Multitape_Alphabet_Reduction": "ar",
+    "Multitape_Alphabet_Roundtrip": "art",
+    "Multitape_TM_Substrate": "base",
+    "NDTHT_AE": "ae",
+    "NDTHT_AE_Machinery": "aem",
+    "NDTHT_AR": "ar",
+    "NDTHT_Base": "base",
+    "NDTHT_Scratch": "scratch",
+    "NDTHT_ScratchAR": "scratch",
+    "NDTHT_ScratchNAE": "scratch-nae",
+    "Nondeterministic_Tape_Reduction": "ntr",
+    "Substrate_Characterization": "sc",
+}
+
+# `isabelle build` flags that consume the following argument, so a target
+# scan does not mistake their values for session names.
+_FLAG_TAKES_ARG = {"-d", "-o", "-j", "-l", "-x", "-B", "-D", "-N", "-P", "-S"}
+
 
 def _alias(d: str) -> str:
     return SESSION_ALIASES.get(d, d)
@@ -361,21 +420,71 @@ def error_dirs(ep: list[dict]) -> set[str]:
             for m in [_THY_IN_ERROR.search(rec.get("error_head") or "")] if m}
 
 
+def command_dir(rec: dict) -> str | None:
+    """The `t/` session dir this build targeted, or None if unattributable.
+
+    Two readings, because the corpus contains a case where they disagree and
+    the command is right.  An explicit `-d t/<dir>` names the tree being
+    built and wins: the ten `-d t -d t/scratch-ar NDTHT_ScratchAR` runs built
+    a staging directory that was never committed, so no ROOT records it and
+    `SESSION_TARGETS` maps that name to the earlier `t/scratch` incarnation.
+    Failing that, the target name is mapped.
+
+    None means *no evidence*, not 'nothing was built' — an unmapped target is
+    a session outside the theory tree, which this cannot and should not
+    attribute to one of ours.
+    """
+    cmd = rec.get("command") or []
+    dirs, targets, i = [], [], 0
+    while i < len(cmd):
+        arg = cmd[i]
+        if arg == "-d":
+            dirs.append(cmd[i + 1] if i + 1 < len(cmd) else "")
+            i += 2
+        elif arg in _FLAG_TAKES_ARG:
+            i += 2
+        elif arg.startswith("-") or arg in ("isabelle", "build"):
+            i += 1
+        else:
+            targets.append(arg)
+            i += 1
+    sub = {d[2:].strip("/") for d in dirs if d.startswith("t/")}
+    if len(sub) == 1:
+        return _alias(sub.pop())
+    named = {SESSION_TARGETS[t] for t in targets if SESSION_TARGETS.get(t)}
+    return _alias(named.pop()) if len(named) == 1 else None
+
+
 def project(ep: list[dict]) -> str:
     """Which development a trajectory belongs to: a `t/` session dir,
     'tooling' (no theory touched), or 'mixed' (several sessions at once).
 
-    Diff paths are authoritative.  Error heads are a *fallback* used only
-    when no code delta names a directory — they are weaker evidence, since
-    a build can fail in a dependency it did not edit, but they are the only
-    evidence left for an episode the recorder captured no diff for, and 23
-    of the 35 such episodes can be attributed this way rather than lost.
+    Three routes, tried strongest first, because they are not equally good
+    evidence and the weaker ones exist only to rescue records the stronger
+    ones cannot see:
+
+    1. **Diff paths** — authoritative: the files the attempt actually edited.
+    2. **Error heads** — what the build failed *in*.  Weaker, since a build
+       can fail in a dependency it did not edit, but it is all that survives
+       an episode the recorder captured no diff for, and it recovers 23 of
+       the 35 such episodes rather than losing them.
+    3. **The build target** — weakest, and last for a reason: you can build
+       AE while editing base, so the target says what was *run*, not what was
+       worked on.  For a run with no diff and an error head naming no file —
+       a bare `wall timeout (40s wall)` — it is the only signal there is, and
+       12 multi-attempt trajectories sat unattributed on exactly that.
     """
     dirs, other = set(), False
     for rec in ep:
-        if rec_class(rec) != "code":
-            continue
-        for path, _ in _split_files(rec.get("diff") or ""):
+        for path, body in _split_files(rec.get("diff") or ""):
+            # Per *file*, not per record.  A record is code-class if any one
+            # of its files is, and taking every path from it books the doc
+            # files along for the ride: one run edited `bin/isabelle-watchdog.py`
+            # and `t/document/glossary.tex` together, and `t/document/` — the
+            # shared LaTeX include directory, not a session — became a phantom
+            # session of one trajectory.
+            if classify_file(path, body)[0] != "code":
+                continue
             m = _PROJECT_DIR.match(path)
             if m:
                 dirs.add(_alias(m.group(1)))
@@ -383,6 +492,12 @@ def project(ep: list[dict]) -> str:
                 other = True
     if not dirs:
         dirs = error_dirs(ep)
+    # `other` is route 1 *succeeding*: paths were recorded and none was under
+    # `t/`.  The target must not override that — a build of `-d t <session>`
+    # whose only captured edit is a `bin/` script is tooling work, and
+    # deferring to the target would relabel 9 such runs as proof search.
+    if not dirs and not other:
+        dirs = {d for rec in ep if (d := command_dir(rec))}
     if len(dirs) == 1:
         return dirs.pop()
     if dirs:
@@ -431,16 +546,36 @@ def attempt_length(ep: list[dict]) -> int | None:
 def proof_bearing(ep: list[dict]) -> bool:
     """Did this episode work on a theory, as opposed to build furniture?
 
-    A `.thy` code change is the direct evidence.  Failing to find one, an
-    error head naming a theory is the same claim from the other side: the
-    build got as far as elaborating a theory and that theory did not
-    compile (logging-design.md §13.2).
+    The filter exists to keep *free greens* out of the rate: a bare
+    `t/<sess>/ROOT` edit is code by `classify_file`'s deliberate
+    treat-the-unknown-as-code rule, and it builds green by construction, so
+    without this it enters the histogram as a one-shot success that had no
+    proof to get wrong (logging-design.md §13.2).  So the test to apply is
+    not "is a theory named?" but **could this trajectory have failed for a
+    proof reason?** — anything that could not is what the filter is for.
+
+    Four kinds of evidence, in descending directness:
+
+      - a `.thy` code change, by §13.1's own code test;
+      - an error head naming a theory *file* (`error_dirs`);
+      - an error head naming a theory by base name and the line it was
+        elaborating — `"by" line 190 of EncodingWrap_WF`.  50 records carry
+        this and no path, all of them watchdog kills;
+      - a **timeout**.  Build furniture cannot time out: registering a
+        theory in a ROOT does not take 40 seconds, and a build the watchdog
+        had to kill was demonstrably deep in elaboration.  It is also the
+        one kind of evidence that cannot reintroduce the bias being guarded
+        against, since a timeout is by definition not a green.
     """
     for rec in ep:
         for path, body in _split_files(rec.get("diff") or ""):
             if path.endswith(".thy") and _thy_code_change(_hunks(body)):
                 return True
-    return bool(error_dirs(ep))
+    if error_dirs(ep):
+        return True
+    return any(rec["outcome"] == "timeout"
+               or _THY_BY_LINE.search(rec.get("error_head") or "")
+               for rec in ep)
 
 
 # ------------------------------------------------------------------ fitting

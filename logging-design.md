@@ -1026,6 +1026,82 @@ anti-correlation survives, but **the AE–NTR gap closes from 43 points to
 it narrows the gap rather than widening it.  An earlier reading here had
 that direction backwards.
 
+### 13.2.1 The attribution ladder, and bounding each route to its reach
+
+The two routes above left 12 multi-attempt trajectories attributed to
+nothing at all — every one of them 0% one-shot, so their absence flattered
+the headline.  They are the residue of both routes failing at once: no
+captured diff, and an error head that names no file.  Seven are bare wall
+timeouts (`wall timeout (40s wall)`), where the watchdog killed the build
+before Isabelle reported where it was.
+
+A third signal survives in every record: **the build target on the command
+line**.  It is genuinely weaker than the other two — you can build AE while
+editing base, so the target says what was *run*, not what was worked on —
+which is why it goes last, after both stronger routes have declined.  For a
+timed-out build with nothing else recorded it is the only signal there is.
+
+It needs the historical session names mapped, which is exactly why
+attribution was by path in the first place: `NDTHT_AR` →
+`Alphabet_Reduction` → `Multitape_Alphabet_Reduction` are all `ar`.  The map
+is **derived, not remembered** — every `(session, directory)` pairing that
+has ever appeared in a committed `t/*/ROOT`, from `git log --all` (the
+recipe is in the `SESSION_TARGETS` comment).  That turned up 18 pairings for
+19 distinct invocations in the corpus, so the vocabulary is closed and the
+map is checkable rather than a guess.  An explicit `-d t/<dir>` overrides
+the name, because the corpus contains a case where they disagree and the
+command is right: the ten `-d t -d t/scratch-ar NDTHT_ScratchAR` runs built
+a staging tree that was never committed, so no ROOT records it.
+
+**The map is an allowlist, and that is the load-bearing part.**  A target
+that is not a `t/` session must yield *no* attribution rather than a guess.
+The HOAU spike is the case that forces it: it built `HOAU_Spike` from
+`-d scratch/hoau` *against the tree's existing sessions*, so the session it
+runs against is not the work it is about.  Being absent from the map, it
+declines, and its 2 trajectories stay unattributed — which is the correct
+answer, not a residual failure.  They are the only 2 left of the 12.
+
+*Bound each route to what it can actually support.*  A fourth signal exists
+and is deliberately given a narrower job.  The watchdog's own error heads
+name a theory by **base** name with the line it was elaborating —
+`loop_progress: "by" line 190 of EncodingWrap_WF` — and 50 records carry
+that and no path.  It reads like an attribution route and cannot be one:
+11 base names have lived in more than one session directory across the
+tree's re-layouts (`AlphabetReduction` in `t/generic`, `t/base` and `t/ar`),
+and the record carries no era the tool can disambiguate with.  So it feeds
+the *proof-bearing* test only, where it is decisive, and attribution falls
+through to the command.  Evidence can be conclusive about one question and
+useless about another; the reach has to be set per question, not per source.
+
+*The proof-bearing test asks the wrong question, and was widened.*  §13.2
+justifies the filter as keeping **free greens** out — a bare ROOT edit that
+builds green by construction and has no proof to get wrong.  The test it
+applied was "is a theory named?", which is a proxy.  The question the
+justification actually implies is *could this trajectory have failed for a
+proof reason?*  So a **timeout** now qualifies on its own: build furniture
+cannot time out — registering a theory in a ROOT does not take 40 seconds,
+and a build the watchdog had to kill was demonstrably deep in elaboration.
+It is also the one kind of evidence that cannot reintroduce the bias being
+guarded against, since a timeout is by definition not a green.
+
+*A phantom session, found on the way.*  `project()` iterated the paths of
+every **record** it judged code-class, rather than the paths that were
+themselves code.  A record is code-class if any one file is, so one run that
+edited `bin/isabelle-watchdog.py` and `t/document/glossary.tex` together
+booked `t/document/` — the shared LaTeX include directory, not a session —
+as a session of one trajectory.  Filtering per file removes it.  The same
+per-file discipline stops the target route from overriding a diff that did
+speak: if paths were recorded and none was under `t/`, route 1 *succeeded*
+and said "not ours", and deferring to the target would relabel 9 tooling
+runs as proof search.
+
+Effect on the published rates: pre-NTR **63.3%** of 406 against NTR
+**35.4%** of 96 — a 27.9-point gap, z = 4.98, p = 6e-07, and a day-clustered
+bootstrap interval of +0.152 to +0.378 with no replicate reversing the sign
+(`bin/oneshot-significance.py`).  Discounting timeouts still *widens* it,
+to 31.8 points, so the load confound continues to run the wrong way for the
+objection.
+
 ## 14. Episode-extraction tool
 
 `bin/episodes.py` (sibling of the cost-axis `bin/build-stats.py`,

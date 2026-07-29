@@ -46,40 +46,22 @@ def _load_attempts():
 A = _load_attempts()
 
 
-def thy_code_files(rec: dict) -> list[str]:
-    """The .thy files this record changes *as code*, by attempts.py's own test."""
-    out = []
-    for path, body in A._split_files(rec.get("diff") or ""):
-        if path.endswith(".thy") and A._thy_code_change(A._hunks(body)):
-            out.append(path)
-    return out
+def trajectories(log: Path) -> dict[str, list[tuple[int, bool]]]:
+    """Session -> [(attempt length, is proof-bearing)] per closed trajectory.
 
-
-def episode_has_thy(ep: list[dict]) -> bool:
-    return any(thy_code_files(r) for r in ep)
-
-
-def trajectories(log: Path) -> dict[str, list[tuple[int, int]]]:
-    """Session -> [(reported length, proof-edit length)] per closed trajectory.
-
-    The first is shape-vs-trajectory's own procedure: segment the *unfiltered*
-    log, keep closed episodes, count the code-class records inside.  The second
-    counts only records carrying a `.thy` code change, and is 0 for a
-    trajectory that never touched a proof.
-
-    The two corrections pull opposite ways, which is why both are needed:
-    dropping the no-proof trajectories removes free greens (pushes the rate
-    down), while not counting `ROOT`/`Makefile`/`bin` records as attempts
-    shortens the survivors (pushes it up)."""
-    by: dict[str, list[tuple[int, int]]] = {}
+    Length and the proof test both come from `attempts.py`, which owns them:
+    `attempt_length` counts recorded builds rather than captured diffs, and
+    `proof_bearing` falls back to the Isabelle error head when a run's diff
+    was lost.  This tool re-derives the *rate* under the filter and without
+    it; it does not re-implement either rule."""
+    by: dict[str, list[tuple[int, bool]]] = {}
     for ep in A._episodes(A._load(log)):
         if ep[-1]["outcome"] != "ok":
             continue
-        k = sum(1 for r in ep if A.rec_class(r) == "code")
-        if not k:
+        k = A.attempt_length(ep)
+        if k is None:
             continue
-        by.setdefault(A.project(ep), []).append(
-            (k, sum(1 for r in ep if thy_code_files(r))))
+        by.setdefault(A.project(ep), []).append((k, A.proof_bearing(ep)))
     return by
 
 
@@ -99,26 +81,22 @@ def main() -> int:
 
     print("one-shot rate, as reported vs over proof-bearing trajectories only")
     print(f"  input: {ns.input}\n")
-    print("  sess     | reported        | proof-bearing   | proof edits only"
-          " | no-proof")
-    print("  ---------+-----------------+-----------------+-----------------"
-          "-+---------")
+    print("  sess     | unfiltered      | proof-bearing   | dropped")
+    print("  ---------+-----------------+-----------------+--------")
 
     order = ["base", "ae", "ar", "ntr", "art", "mixed", "tooling", "none"]
     for sess in order + [s for s in by_sess if s not in order]:
         eps = by_sess.get(sess)
         if not eps:
             continue
-        rep = [k for k, _ in eps]
-        bearing = [k for k, t in eps if t]          # reported length, proof eps
-        strict = [t for _, t in eps if t]           # proof-edit length only
-        print(f"  {sess:8} | {pct(sum(1 for k in rep if k == 1), len(rep))}"
-              f" of {len(rep):4} "
-              f"| {pct(sum(1 for k in bearing if k == 1), len(bearing))}"
-              f" of {len(bearing):4} "
-              f"| {pct(sum(1 for k in strict if k == 1), len(strict))}"
-              f" of {len(strict):4} "
-              f"| {len(eps) - len(strict):4}")
+        allk = [k for k, _ in eps]
+        kept = [k for k, bearing in eps if bearing]
+        print(f"  {sess:8} | {pct(sum(1 for k in allk if k == 1), len(allk))}"
+              f" of {len(allk):4} "
+              f"| {pct(sum(1 for k in kept if k == 1), len(kept))}"
+              f" of {len(kept):4} "
+              f"| {len(eps) - len(kept):4}  "
+              f"{pct(len(eps) - len(kept), len(eps))}")
 
     if ns.examples:
         print(f"\n  no-theory trajectories booked against a session "
