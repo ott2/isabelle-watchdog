@@ -918,6 +918,27 @@ proof-bearing trajectories do not lengthen them — the proof-edit-only
 count matches the proof-bearing count in every session — so only the
 no-proof-trajectory half of the suspected defect is real.
 
+*Attribution is by path, so a renamed directory needs declaring.*
+`project()` reads the session off the `t/<dir>/` prefix — chosen because
+session *names* were renamed twice while the directories were stable.
+A directory rename defeats it, and one happened: `t/aem` was `t/ae` split
+into a stable and an active session for build performance, later folded
+back.  `attempts.SESSION_ALIASES` declares `aem -> ae`; without it, five
+trajectories sat under their own label and two more counted as `mixed`
+(one of them 69 attempts long).
+
+The name class matters too.  It was `[A-Za-z]+`, which cannot match
+`t/scratch-nae/` — and an unmatched path does not produce an unlabelled
+trajectory, it produces a **`tooling`** one, meaning "no theory touched",
+the opposite of the truth.  23 runs of real proof search were filed that
+way.  Widened to `[A-Za-z0-9_-]+`.
+
+Scratch trees keep their own label rather than being folded into the
+session they belong to: `t/scratch-nae` is proof search on the AE problem
+(23 runs, 65.2% one-shot, mean 1.61) but is a spike rather than part of
+the AE development, so whether to count it stays an explicit choice at
+the call site instead of a silent one in the attributor.
+
 *Interaction with §13.1's blind spot, and a counting defect it exposes.*
 The two exposures are not independent, and on pre-fix data the overlap
 dominates.  `bin/probe-noproof.py` prints the evidence per run: **20 of

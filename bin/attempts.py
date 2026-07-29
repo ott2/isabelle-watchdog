@@ -314,7 +314,22 @@ def keep(recs: list[dict], include_all: bool) -> list[dict]:
 # target, because session names have been renamed twice (NDTHT_AE ->
 # Alphabet_Enlargement -> Multitape_Alphabet_Enlargement) while `t/<dir>`
 # has been stable throughout.
-_PROJECT_DIR = re.compile(r"^t/([A-Za-z]+)/")
+# Hyphens and digits are in the class deliberately: `t/scratch-nae/` is a
+# real session directory, and a name class that cannot match it does not
+# leave those trajectories unlabelled — it drops them into 'tooling', which
+# reads as "no theory touched" and is the opposite of the truth.  23 of the
+# 24 t/scratch-nae runs were mislabelled that way.
+_PROJECT_DIR = re.compile(r"^t/([A-Za-z0-9_-]+)/")
+
+# Session directories that were the *same development* under another name.
+# `t/aem` was t/ae split into a stable and an active session for build
+# performance, later folded back; its theories are AlphabetEnlargement_*.
+# Attribution is by path (see above), so a rename that path-based
+# attribution cannot see has to be declared here.  Scratch trees are
+# deliberately absent: `t/scratch-nae` is proof search on the AE problem
+# but not part of the AE development, so it keeps its own label and the
+# choice of whether to count it stays with the caller.
+SESSION_ALIASES = {"aem": "ae"}
 
 
 def project(ep: list[dict]) -> str:
@@ -327,7 +342,8 @@ def project(ep: list[dict]) -> str:
         for path, _ in _split_files(rec.get("diff") or ""):
             m = _PROJECT_DIR.match(path)
             if m:
-                dirs.add(m.group(1))
+                d = m.group(1)
+                dirs.add(SESSION_ALIASES.get(d, d))
             else:
                 other = True
     if len(dirs) == 1:
