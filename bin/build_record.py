@@ -167,17 +167,19 @@ def _snapshot_tree() -> str:
 def record(*, argv: list[str], outcome: str, exit_code: int,
            timeout_reason: str, elapsed_s: float, error_head: str,
            log_name: str, power: str = "unknown",
-           battery_factor: float = 1.0) -> None:
+           battery_factor: float = 1.0,
+           error_loci: "list[list[str]] | None" = None) -> None:
     """Capture one build attempt.  Never raises into the caller (the
     shared `run_guarded` swallows and warns on any failure)."""
     run_guarded("build-record", lambda: _record(
         argv, outcome, exit_code, timeout_reason,
-        elapsed_s, error_head, log_name, power, battery_factor))
+        elapsed_s, error_head, log_name, power, battery_factor,
+        error_loci or []))
 
 
 def _record(argv, outcome, exit_code, timeout_reason,
             elapsed_s, error_head, log_name,
-            power="unknown", battery_factor=1.0) -> None:
+            power="unknown", battery_factor=1.0, error_loci=None) -> None:
     LOG_DIR.mkdir(exist_ok=True)
     instance = _instance_id()
     branch = _git(["rev-parse", "--abbrev-ref", "HEAD"]) or "DETACHED"
@@ -233,6 +235,16 @@ def _record(argv, outcome, exit_code, timeout_reason,
         "elapsed_s_ac": round(elapsed_s / battery_factor, 1)
                         if battery_factor else round(elapsed_s, 1),
         "error_head": error_head or None,
+        # Every `(theory, line)` the build reported an error at, whole:
+        # a path for a compile error, a session-qualified name for a
+        # watchdog kill.  The head keeps only the first two `***` lines,
+        # which for a failed proof are truncated goal text, so 210 records
+        # in the corpus name no file at all and analysis had to re-derive
+        # attribution from weaker signals (logging-design.md §13.2.1).
+        # Costs ~30 bytes against a 9.5 kB mean record — the diff is 95%
+        # of the corpus and the error fields 0.5%, so there is no reason
+        # to be sparing with the cheap half.
+        "error_loci": [list(x) for x in error_loci] or None,
         "git_head": head,                    # commit built against (episode baseline / mid-flight-commit marker)
         "head_dirty": tree != head_tree,     # False = rebuild of an unchanged tree
         "tree": tree,                        # working-tree content id (integrity / no-op anchor)

@@ -1102,6 +1102,64 @@ bootstrap interval of +0.152 to +0.378 with no replicate reversing the sign
 to 31.8 points, so the load confound continues to run the wrong way for the
 objection.
 
+### 13.2.2 Record the loci, not more prose — the cheap half of the record
+
+The ladder above is entirely retrospective repair: three routes, two of
+them fallbacks, reconstructing from surviving metadata what a discarded
+field would have said outright.  That is the second time on this dataset
+(§13.1 was the first), and both times the field was available at capture
+time and cost nothing.  So the forward question is what else to record.
+
+The storage budget answers it, and not in the direction intuition
+suggests.  Over the 1360-record pooled corpus:
+
+| field | share | mean/record |
+|---|---|---|
+| `diff` | 95.4% | 9562 B |
+| everything else combined | 4.6% | ~460 B |
+| `error_head` | **0.5%** | 55 B (98 B over the 697 non-green) |
+
+Error capture is ~175× cheaper than the diff it sits beside, and the head
+is capped where it has never needed to be: the longest in the corpus is
+287 B and only 3% reach 200.  **There is no reason to be sparing with the
+cheap half of the record.**
+
+But "record more error text" is the wrong move.  The specific thing that
+would have made two of the three rungs unnecessary is *structured* and the
+watchdog **already computes it**: `_error_loci` extracts every
+`*** At command "X" (line N of "T")` marker for the FAIL summary, and then
+throws it away.  What survived instead was `_first_error` — the first two
+`***` lines, which for a failed proof are truncated goal text.  That is why
+210 failing records name no file at all.
+
+So `error_loci` is now a field: every `(theory, line)` the build reported,
+whole.  Three details are load-bearing:
+
+- **Keep the theory unshortened.**  `_error_loci` used to strip the path
+  for display, which was right while the terminal was the only consumer
+  and wrong the moment the loci went into the record — the `t/<sess>/`
+  prefix *is* the attribution.
+- **Two shapes, deliberately.**  A compile error yields a path; a watchdog
+  kill yields Isabelle's session-qualified `Alphabet_Enlargement.EncodingWrap_WF`.
+  The qualifier is the session, so recording it whole repairs the exact
+  ambiguity that barred base names from attributing at all (§13.2.1).
+  `attempts._locus_dir` reads both; `error_dirs` prefers the structured
+  field and falls back to scraping the head, so the two eras read alike.
+- **Its absence is now informative.**  A record with no loci had no
+  reported locus — a bare wall timeout killed before Isabelle said where
+  it was.  That is the case, and now the *only* case, the build-target
+  rung exists to cover.
+
+`bin/check-loci.py` is the standing check, and it has to be a synthetic
+one: this branch fires only on a broken build, so a green suite never
+exercises it and rotated logs make it unverifiable after the fact.
+
+Not adopted: persisting whole build logs (§12.5's "rich tool feedback"
+gap — the goal state and sledgehammer suggestions).  That is the expensive
+half again, at diff-like sizes, and it answers *why a method failed*
+rather than *what this trajectory was*.  The loci are the part the
+trajectory dataset needs.
+
 ## 14. Episode-extraction tool
 
 `bin/episodes.py` (sibling of the cost-axis `bin/build-stats.py`,

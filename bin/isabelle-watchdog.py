@@ -385,6 +385,13 @@ def main() -> int:
         outcome = "timeout"
         error_head = _timeout_head(timeout_reason, loop_key,
                                    loop_elapsed, wall_timeout)
+        # The stuck command's theory is session-qualified
+        # (`Alphabet_Enlargement.EncodingWrap_WF`), so the record keeps
+        # what the head throws away: `_timeout_head` prints only the base
+        # name, and the qualifier is the session.  A bare wall timeout has
+        # no loop_key and so no locus — that is the case the build target
+        # exists to cover.
+        error_loci = ([[loop_key[0], loop_key[1]]] if loop_key else [])
     else:
         proc.wait()
         exit_code = proc.returncode
@@ -398,12 +405,19 @@ def main() -> int:
                     lambda: _append_full_error(log_path, db_error))
                 err_lines = db_error.splitlines()
         error_head = "" if exit_code == 0 else _first_error(err_lines)
+        # `_first_error` keeps the first two `***` lines, which for a failed
+        # proof are truncated goal text — 210 records in the corpus name no
+        # file at all because the `At command` marker came later.  The loci
+        # are already extracted for the FAIL summary; record them too.
+        error_loci = ([[thy, ln] for thy, ln in _error_loci(err_lines)]
+                      if exit_code else [])
 
     # Trajectory capture (bin/build_record.py): snapshot the working tree
     # to refs/attempts + a builds.jsonl record.  Guarded so it never
     # affects the build's exit code.
     _record_attempt(args, outcome, exit_code, timeout_reason,
-                    elapsed_s, error_head, power, applied_factor)
+                    elapsed_s, error_head, power, applied_factor,
+                    error_loci)
 
     if outcome == "timeout":
         _print_summary_timeout(timeout_reason, lines, wall_timeout,
@@ -509,7 +523,8 @@ def _timeout_head(reason: str, loop_key: tuple[str, str, str] | None,
 def _record_attempt(args: list[str], outcome: str, exit_code: int,
                     timeout_reason: str, elapsed_s: float,
                     error_head: str, power: str = "unknown",
-                    battery_factor: float = 1.0) -> None:
+                    battery_factor: float = 1.0,
+                    error_loci: "list[list[str]] | None" = None) -> None:
     """Hand the attempt to build_record under the shared best-effort
     guard, which here additionally covers an `import build_record`
     failure (a guard inside build_record cannot catch its own import),
@@ -521,6 +536,7 @@ def _record_attempt(args: list[str], outcome: str, exit_code: int,
             timeout_reason=timeout_reason, elapsed_s=elapsed_s,
             error_head=error_head, power=power, battery_factor=battery_factor,
             log_name=os.environ.get("LOG_NAME", "last-build.log"),
+            error_loci=error_loci or [],
         )
     common.run_guarded("build-record", go)
 
@@ -537,19 +553,26 @@ def _count_error_loci(lines: list[str]) -> int:
 
 
 def _error_loci(lines: list[str]) -> list[tuple[str, str]]:
-    """Ordered, deduped `(short-theory, line)` error loci from the
+    """Ordered, deduped `(theory, line)` error loci from the
     `*** At command "X" (line N of "T")` markers.  These are the jump
     targets a reader wants *first* — the failing command's line beats
     the goal-display context, which is often the same shape every
-    iteration of a multi-site fix.  Order = first appearance in the log."""
+    iteration of a multi-site fix.  Order = first appearance in the log.
+
+    The theory is kept **whole**, path and all, and shortened at the point
+    of display.  It used to be shortened here, which was fine while the
+    only consumer was the terminal and wrong once the loci went into the
+    attempt record: the `t/<sess>/` prefix is exactly what attribution
+    reads, and a bare base name cannot supply it — 11 base names have
+    lived in more than one session directory (logging-design.md §13.2.1).
+    """
     seen: set[tuple[str, str]] = set()
     out: list[tuple[str, str]] = []
     for l in lines:
         m = AT_COMMAND_RE.match(l)
         if m:
             lineno, theory = m.groups()
-            short = theory.rsplit("/", 1)[-1]
-            key = (short, lineno)
+            key = (theory, lineno)
             if key not in seen:
                 seen.add(key)
                 out.append(key)
@@ -656,7 +679,8 @@ def _print_summary_fail(lines: list[str], log_path: Path) -> None:
         # Line numbers first — the jump targets — then the goal-display
         # context (indented).  Priority order per the diagnose workflow:
         # you want `file:line` before re-reading the same goal shape.
-        print("FAIL  " + ", ".join(f"{thy}:{ln}" for thy, ln in loci))
+        print("FAIL  " + ", ".join(f"{thy.rsplit('/', 1)[-1]}:{ln}"
+                                   for thy, ln in loci))
         for cont in block:
             print(f"      {_trunc(cont.lstrip())}")
     elif block:

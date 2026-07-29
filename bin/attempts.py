@@ -414,10 +414,39 @@ def _alias(d: str) -> str:
     return SESSION_ALIASES.get(d, d)
 
 
+def _locus_dir(theory: str) -> str | None:
+    """Session dir for one `error_loci` entry, whichever form it took.
+
+    Post-2026-07-29 records carry the loci whole (§13.2.1), in two shapes
+    depending on which side reported them: a compile error gives a *path*,
+    `~/…/t/ae/Wrap_Defs.thy`; a watchdog kill gives Isabelle's
+    *session-qualified* name, `Alphabet_Enlargement.EncodingWrap_WF`.  The
+    qualifier is the session, which is why keeping it matters — the base
+    name alone is ambiguous across the tree's re-layouts.
+    """
+    m = _THY_IN_ERROR.search(theory)
+    if m:
+        return _alias(m.group(1))
+    if "." in theory:
+        return _alias(SESSION_TARGETS.get(theory.split(".", 1)[0]) or "") or None
+    return None
+
+
 def error_dirs(ep: list[dict]) -> set[str]:
-    """Session dirs named in this episode's error heads."""
-    return {_alias(m.group(1)) for rec in ep
-            for m in [_THY_IN_ERROR.search(rec.get("error_head") or "")] if m}
+    """Session dirs this episode's errors point at.
+
+    Prefers the structured `error_loci` and falls back to scraping the
+    prose head, so the two eras of record read the same way.
+    """
+    out = set()
+    for rec in ep:
+        for theory, _line in rec.get("error_loci") or []:
+            if (d := _locus_dir(theory)):
+                out.add(d)
+        m = _THY_IN_ERROR.search(rec.get("error_head") or "")
+        if m:
+            out.add(_alias(m.group(1)))
+    return out
 
 
 def command_dir(rec: dict) -> str | None:
@@ -573,7 +602,8 @@ def proof_bearing(ep: list[dict]) -> bool:
                 return True
     if error_dirs(ep):
         return True
-    return any(rec["outcome"] == "timeout"
+    return any(rec.get("error_loci")
+               or rec["outcome"] == "timeout"
                or _THY_BY_LINE.search(rec.get("error_head") or "")
                for rec in ep)
 
