@@ -1102,6 +1102,30 @@ bootstrap interval of +0.152 to +0.378 with no replicate reversing the sign
 to 31.8 points, so the load confound continues to run the wrong way for the
 objection.
 
+*The dependence was the recorder's, not the work's.*  A naive
+two-proportion test assumes each trajectory is an independent draw, which
+is exactly the assumption to doubt here — work happened in bursts, so a
+hard afternoon on one lemma should show up as many correlated
+observations.  Resampling whole **days** rather than trajectories measures
+it, and the design effect now comes back at **1.1**: within-day dependence
+is not inflating the naive interval.  It used to.  Swap `attempts.is_attempt`
+back for the old count-the-captured-deltas rule, holding everything else
+fixed, and the design effect is **2.4** — because untracked-theory work on
+a given day was scoring as one-shot *together*, manufacturing exactly the
+clustering the bootstrap was built to detect.  The correlation was an
+artefact of the instrument, and fixing the instrument removed it; no
+modelling choice would have.
+
+What resampling cannot settle is stated rather than smoothed over:
+pre-NTR pools four unlike developments (.545 to .688), and NTR is the
+*later* one, so nothing here separates "tape reduction is harder" from
+"that week was different".  Elapsed days is an **outcome** of difficulty
+here, not a nuisance variable — the earlier sessions ran long because they
+kept hitting problems — so conditioning on it would subtract part of the
+effect being measured.  Leave-one-day-out on NTR's five days is the cheap
+check against a single bad afternoon carrying the result; the gap survives
+every drop.
+
 ### 13.2.2 Record the loci, not more prose — the cheap half of the record
 
 The ladder above is entirely retrospective repair: three routes, two of

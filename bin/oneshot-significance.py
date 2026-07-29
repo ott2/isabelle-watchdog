@@ -3,25 +3,35 @@
 
 The gap is large (.633 vs .354 on the pooled corpus) over hundreds of
 trajectories, so a textbook two-proportion test returns an absurdly small p.
-That test assumes each trajectory is an independent Bernoulli draw, and
-these are not:
+That test assumes each trajectory is an independent Bernoulli draw, which
+has to be checked rather than assumed — work happened in bursts, and a hard
+afternoon on one lemma could produce a run of failures that the test would
+read as many independent observations.
 
-  - **Clustered in time.**  Work happened in bursts.  A hard afternoon
-    produces a run of failures on one lemma; an easy one produces a run of
-    greens.  Trajectories within a day share far more than trajectories
-    across months, so the effective sample is nearer the number of working
-    days than the number of trajectories.
-  - **Heterogeneous within the group.**  `pre-ntr` pools four sessions whose
-    own rates run .675 to .855.  Treating them as one binomial understates
-    the variance of the pooled estimate.
-  - **Confounded with calendar time.**  `ntr` is not just a different
-    development, it is the *later* one: different tooling, different capture,
-    a different phase of the project.  Nothing here separates "tape reduction
-    is harder" from "August was different".
+So the check is run: the bootstrap resamples whole *days* rather than
+trajectories, and the design effect says how much that costs.  It currently
+comes back near 1, meaning within-day dependence is not in fact inflating
+the naive interval.  That was not always so — swap `attempts.is_attempt`
+back for the old count-the-captured-deltas rule, holding everything else
+fixed, and it returns 2.4, because untracked-theory work on a given day was
+scoring as one-shot together.  The clustering was the recorder's, not the
+work's, which is why fixing the recorder removed it rather than some
+modelling choice here.
 
-So this reports three things and lets them disagree: the naive test, a
-bootstrap that resamples whole *days* rather than trajectories, and the
-between-session spread that any pooled figure hides.
+What the number cannot settle, and no amount of resampling will:
+
+  - **Heterogeneity.**  `pre-ntr` pools four developments whose own rates
+    run .545 to .688 — narrow now, but they are still unlike tasks.
+  - **Confounding with time.**  `ntr` is the later development: different
+    tooling, different capture era, a different phase of the project.
+    Nothing here separates "tape reduction is harder" from "that week was
+    different".  Note that elapsed days is an *outcome* of difficulty here,
+    not a nuisance variable — the earlier sessions ran long because they
+    kept hitting problems — so conditioning on it would subtract part of the
+    effect being measured.
+
+Leave-one-day-out on `ntr` is the cheap robustness check against the last
+of those: five days is few enough that one bad afternoon could carry it.
 
 Usage:  bin/oneshot-significance.py [-i BUILDS_JSONL] [-B REPLICATES]
 """
@@ -85,10 +95,10 @@ def naive_z(a: list, b: list) -> tuple[float, float]:
 def day_bootstrap(rows: list, B: int) -> list[float]:
     """Resample whole days with replacement; recompute the gap each time.
 
-    Days are the cluster because that is the unit the dependence lives at:
-    within a day the same lemma, the same context and the same tooling recur.
-    Resampling trajectories would treat 92 correlated draws as 92 independent
-    ones, which is exactly the assumption in doubt."""
+    Days are the candidate cluster: within a day the same lemma, the same
+    context and the same tooling recur, so trajectories could be far from
+    independent.  Whether they actually are is what the design effect
+    reports — the point of resampling days is to find out, not to assume."""
     by_day: dict[str, list] = {}
     for row in rows:
         by_day.setdefault(row[1], []).append(row)
