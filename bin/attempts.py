@@ -345,9 +345,32 @@ _PROJECT_DIR = re.compile(r"^t/([A-Za-z0-9_-]+)/")
 SESSION_ALIASES = {"aem": "ae", "scratch-nae": "ae"}
 
 
+# An Isabelle error head carries the path of the file it failed in.  That
+# survives when the diff does not, which is the only handle on an episode
+# whose edits the recorder missed entirely (§13.1's untracked-theory gap).
+_THY_IN_ERROR = re.compile(r"/t/([A-Za-z0-9_-]+)/[A-Za-z0-9_]+\.thy")
+
+
+def _alias(d: str) -> str:
+    return SESSION_ALIASES.get(d, d)
+
+
+def error_dirs(ep: list[dict]) -> set[str]:
+    """Session dirs named in this episode's error heads."""
+    return {_alias(m.group(1)) for rec in ep
+            for m in [_THY_IN_ERROR.search(rec.get("error_head") or "")] if m}
+
+
 def project(ep: list[dict]) -> str:
     """Which development a trajectory belongs to: a `t/` session dir,
-    'tooling' (no theory touched), or 'mixed' (several sessions at once)."""
+    'tooling' (no theory touched), or 'mixed' (several sessions at once).
+
+    Diff paths are authoritative.  Error heads are a *fallback* used only
+    when no code delta names a directory — they are weaker evidence, since
+    a build can fail in a dependency it did not edit, but they are the only
+    evidence left for an episode the recorder captured no diff for, and 23
+    of the 35 such episodes can be attributed this way rather than lost.
+    """
     dirs, other = set(), False
     for rec in ep:
         if rec_class(rec) != "code":
@@ -355,15 +378,69 @@ def project(ep: list[dict]) -> str:
         for path, _ in _split_files(rec.get("diff") or ""):
             m = _PROJECT_DIR.match(path)
             if m:
-                d = m.group(1)
-                dirs.add(SESSION_ALIASES.get(d, d))
+                dirs.add(_alias(m.group(1)))
             else:
                 other = True
+    if not dirs:
+        dirs = error_dirs(ep)
     if len(dirs) == 1:
         return dirs.pop()
     if dirs:
         return "mixed"
     return "tooling" if other else "none"
+
+
+def is_attempt(rec: dict, prev: dict | None) -> bool:
+    """Does this record represent a build attempt worth counting?
+
+    A record counts unless it is a **no-op rebuild**: a green build with no
+    code delta that did not follow a failure.  Everything else did work.
+
+      - A *failure* is an attempt whether or not its diff was captured —
+        something was built and it did not compile.  Before the 2026-07-27
+        capture fix a theory being authored was untracked and therefore
+        invisible, so 124 failing builds recorded an empty diff; counting
+        only captured deltas scored 23 multi-attempt searches as one-shot.
+      - A *green after a failure* is the repair that closed the run, and is
+        an attempt for the same reason even when its diff was lost (56 such).
+      - A *green after a green* with nothing recorded is a re-run of an
+        unchanged tree (79 such).  That, and only that, is not an attempt.
+    """
+    if rec["outcome"] != "ok":
+        return True
+    return rec_class(rec) == "code" or (prev is not None
+                                        and prev["outcome"] != "ok")
+
+
+def attempt_length(ep: list[dict]) -> int | None:
+    """Attempts in a closed episode, or None if it is not real work.
+
+    Returns None for a no-op rebuild — a lone green with no code delta —
+    and for a doc-only run, so prose edits do not pile onto length 1.  Both
+    fall out of `is_attempt` counting nothing, so there is no second rule.
+    """
+    prev = None
+    n = 0
+    for rec in ep:
+        if is_attempt(rec, prev):
+            n += 1
+        prev = rec
+    return n or None
+
+
+def proof_bearing(ep: list[dict]) -> bool:
+    """Did this episode work on a theory, as opposed to build furniture?
+
+    A `.thy` code change is the direct evidence.  Failing to find one, an
+    error head naming a theory is the same claim from the other side: the
+    build got as far as elaborating a theory and that theory did not
+    compile (logging-design.md §13.2).
+    """
+    for rec in ep:
+        for path, body in _split_files(rec.get("diff") or ""):
+            if path.endswith(".thy") and _thy_code_change(_hunks(body)):
+                return True
+    return bool(error_dirs(ep))
 
 
 # ------------------------------------------------------------------ fitting

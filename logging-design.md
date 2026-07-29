@@ -885,6 +885,48 @@ essentially equal on both sides of the pre-NTR/NTR split (46 timeouts
 over 344 runs against 12 over 92), which is why it does not disturb the
 contrast.
 
+### 13.1.2 Length counts recorded builds, not captured diffs (delivered)
+
+Trajectory length was originally the count of **code-class records** — a
+conservative choice against doc-only noise, and wrong for the same reason
+§13.1 was: a zero-byte delta is a claim about the recorder, not about the
+attempt.  While a theory was untracked its edits produced empty diffs, so
+a run that failed six times and then went green counted as **length 1, a
+one-shot**.
+
+`attempts.is_attempt` states the rule that replaces it.  A record counts
+unless it is a *no-op rebuild* — a green with no code delta that did not
+follow a failure.  Everything else did work:
+
+- a **failure** is an attempt whether or not its diff survived; something
+  was built and it did not compile;
+- a **green after a failure** is the repair that closed the run, likewise;
+- a **green after a green** with nothing recorded is a re-run of an
+  unchanged tree, and is the only category that is not an attempt.
+
+`bin/audit-zerodiff.py` measures the population this recovers.  Empty
+diffs are 259 of 1360 records (19.0%, all pre-fix): 124 failures, 56
+greens closing a failed run, and 79 no-op rebuilds.  So 180 of 259 are
+real events.  Under the old counting, 35 closed episodes were dropped
+entirely (116 attempts, lengths to 15) and 36 more were shortened — **23
+of which scored as one-shot despite containing failures**.  That last
+group is the reason this is a correctness fix and not a preference: a
+missing episode is a hole, but a multi-attempt search recorded as a
+first-time success is a wrong value in the headline statistic.
+
+Attribution follows.  A diffless episode has no path to attribute by, but
+an Isabelle error head carries the file it failed in, so `project()` falls
+back to `attempts.error_dirs` — recovering 23 of the 35.  Diff paths stay
+authoritative where they exist, since a build can fail in a dependency it
+did not edit.
+
+Effect on the published rates (pooled, attempt scope): pre-NTR 64.6% of
+395 runs, NTR 35.4% of 96, a 29.2-point gap at p ~ 1e-7.  Every session
+falls, AE most (77.9% -> 59.8%, it held the most untracked-theory work);
+the contrast is unmoved.  The `blind%` column changes meaning with the
+fix — those runs are now counted correctly, so what is lost is the *diff
+content*, leaving them usable for rates but not for per-lemma analysis.
+
 ### 13.2 Attribution scope: proof-bearing trajectories (delivered)
 
 The second cut, and a different kind of one.  §13.1 asks whether a

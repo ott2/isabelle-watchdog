@@ -67,32 +67,22 @@ def _load(name: str):
 
 
 A = _load("attempts")
-_THY_NAME = re.compile(r"^\+\s*([A-Z][A-Za-z0-9_']*)\s*$")
 PROOF_SESSIONS = ["base", "ae", "ar", "ntr", "art"]
 
 
-def touches_proof(rec: dict) -> bool:
-    return any(p.endswith(".thy") and A._thy_code_change(A._hunks(b))
-               for p, b in A._split_files(rec.get("diff") or ""))
-
-
-def registers_theory(rec: dict) -> bool:
-    return any(p.endswith(("ROOT", "ROOTS"))
-               and any(_THY_NAME.match(ln) for ln in b
-                       if not ln.startswith("+++"))
-               for p, b in A._split_files(rec.get("diff") or ""))
-
-
 def episodes(log: Path) -> list[tuple[str, list[dict]]]:
-    """Closed, real-work episodes with their session, on the attempt scope."""
+    """Closed, real-work episodes with their session.
+
+    Uses `attempts.attempt_length` / `proof_bearing` rather than a local
+    copy, so this audit reports on exactly the population the published
+    table counts.  A load audit that filtered differently from the thing it
+    is auditing would be measuring a different corpus and saying nothing.
+    """
     out = []
     for ep in A._episodes(A._load(log)):
         if ep[-1]["outcome"] != "ok":
             continue
-        if not sum(1 for r in ep if A.rec_class(r) == "code"):
-            continue
-        if not (any(touches_proof(r) for r in ep)
-                or any(registers_theory(r) for r in ep)):
+        if A.attempt_length(ep) is None or not A.proof_bearing(ep):
             continue
         out.append((A.project(ep), ep))
     return out

@@ -11,8 +11,8 @@ Three scopes, over closed episodes:
 
   code    code-class records only                    (as shipped)
   proof   ditto, restricted to runs with a .thy edit (logging-design.md 13.2)
-  attempt every recorded build in the episode, for runs that are real work —
-          a .thy edit *or* a ROOT registering a theory absent at baseline
+  attempt every recorded build in the episode (attempts.attempt_length) —
+          the scope the published table uses; drops only no-op rebuilds
 
 The third treats a failing build as an attempt whether or not its diff was
 captured, which is what the error head shows it to be.  Comparing the three
@@ -27,7 +27,6 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import math
-import re
 import sys
 from pathlib import Path
 
@@ -42,7 +41,6 @@ def _load(name: str):
 
 
 A = _load("attempts")
-_THY_NAME = re.compile(r"^\+\s*([A-Z][A-Za-z0-9_']*)\s*$")
 
 
 def touches_proof(rec: dict) -> bool:
@@ -51,15 +49,6 @@ def touches_proof(rec: dict) -> bool:
             return True
     return False
 
-
-def registers_theory(rec: dict) -> bool:
-    """Does this record add a theory name to a ROOT?"""
-    for path, body in A._split_files(rec.get("diff") or ""):
-        if path.endswith(("ROOT", "ROOTS")) and any(
-                _THY_NAME.match(ln) for ln in body
-                if not ln.startswith("+++")):
-            return True
-    return False
 
 
 def compare(a_name: str, a: list[int], b_name: str, b: list[int]) -> None:
@@ -125,16 +114,20 @@ def main() -> int:
     for ep in A._episodes(A._load(Path(ns.input))):
         if ep[-1]["outcome"] != "ok":
             continue
+        sess = A.project(ep)
+        # The attempt scope is computed first and unconditionally: the older
+        # two scopes drop an episode with no captured delta, and those are
+        # precisely the episodes this column exists to recover, so gating it
+        # behind their filter would hide what it is meant to show.
+        n = A.attempt_length(ep)
+        if n is not None and A.proof_bearing(ep):
+            scopes["attempt"].setdefault(sess, []).append(n)
         k = sum(1 for r in ep if A.rec_class(r) == "code")
         if not k:
             continue
-        sess = A.project(ep)
         scopes["code"].setdefault(sess, []).append(k)
-        has_proof = any(touches_proof(r) for r in ep)
-        if has_proof:
+        if any(touches_proof(r) for r in ep):
             scopes["proof"].setdefault(sess, []).append(k)
-        if has_proof or any(registers_theory(r) for r in ep):
-            scopes["attempt"].setdefault(sess, []).append(len(ep))
 
     print("trajectory length under three counting scopes\n")
     print("  sess     |      code       |      proof      |     attempt")
@@ -152,8 +145,8 @@ def main() -> int:
 
     print("\n  code     code-class records only (as shipped before the filter)")
     print("  proof    ditto, runs with a .thy code edit only")
-    print("  attempt  every recorded build, for runs that are real work")
-    print("           (.thy edit, or a ROOT registering a new theory)")
+    print("  attempt  every recorded build (attempts.attempt_length) --")
+    print("           the shipped scope; drops only no-op rebuilds")
 
     if ns.split:
         # Only the proof sessions: `tooling`/`mixed`/`none` are not a
