@@ -855,6 +855,50 @@ class from a doc-only one: it means "no change was seen", which is a
 claim about the recorder, not about the attempt.  Counting trajectory
 length over code deltas drops both, which is the conservative choice.
 
+### 13.2 Attribution scope: proof-bearing trajectories (delivered)
+
+The second cut, and a different kind of one.  §13.1 asks whether a
+*delta* is substantive; this asks whether a *trajectory* is about the
+thing being measured.  A trajectory reaches a session by path — the
+`t/<sess>/` prefix of the files its code deltas touch — and
+`classify_file` deliberately treats an unrecognised suffix as code so
+nothing is hidden by accident.  Composing the two books a bare
+`t/<sess>/ROOT` edit against that session as a code attempt, and a ROOT
+edit builds green by construction, so it enters the histogram as a free
+one-shot.  Nothing else in the pipeline separates "the edit was right
+first time" from "there was no proof edit to get wrong".
+
+`bin/shape-vs-trajectory.py` therefore counts only trajectories
+containing a `.thy` change that passes §13.1's own code test — a
+strictening in *scope*, not in kind.  `bin/audit-1shot.py` is the
+standing check: it reports both scopes side by side, plus the dropped
+runs, so the effect of the filter stays visible rather than becoming
+invisible policy.
+
+On the pooled corpus the effect is uneven and largest for AE (21 of 104
+trajectories dropped, 88.5% -> 85.5%; NTR 4 of 96, 44.8% -> 42.4%),
+which is why the share is reported per session as `noproof%` rather than
+applied silently.  AE's exposure is structural: ~30 small theories means
+the most ROOT churn.  The contrast the table exists to show survives at
+roughly forty points, so this is a **reporting choice made explicit**,
+not a correction to a wrong number.
+
+The audit's other half came back empty.  Non-theory records *inside*
+proof-bearing trajectories do not lengthen them — the proof-edit-only
+count matches the proof-bearing count in every session — so only the
+no-proof-trajectory half of the suspected defect is real.
+
+*Interaction with §13.1's blind spot.*  The two exposures are not
+independent, and on pre-fix data the overlap is large: while a new
+theory was being authored its edits were invisible, so the run shows
+only the `ROOT` edit that registered it and is indistinguishable from
+bookkeeping.  10 of AE's 21 dropped runs are capture-gap victims rather
+than genuine bookkeeping — real proof search, unrecoverable.  So
+`noproof%` is an **upper bound** on bookkeeping for pre-2026-07-27 data,
+and dropping those runs is also why the reported `blind%` falls once the
+filter is applied.  Capture is fixed from 2026-07-27, so for later data
+the two measures separate cleanly.
+
 ## 14. Episode-extraction tool
 
 `bin/episodes.py` (sibling of the cost-axis `bin/build-stats.py`,
