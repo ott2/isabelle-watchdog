@@ -888,16 +888,40 @@ proof-bearing trajectories do not lengthen them — the proof-edit-only
 count matches the proof-bearing count in every session — so only the
 no-proof-trajectory half of the suspected defect is real.
 
-*Interaction with §13.1's blind spot.*  The two exposures are not
-independent, and on pre-fix data the overlap is large: while a new
-theory was being authored its edits were invisible, so the run shows
-only the `ROOT` edit that registered it and is indistinguishable from
-bookkeeping.  10 of AE's 21 dropped runs are capture-gap victims rather
-than genuine bookkeeping — real proof search, unrecoverable.  So
-`noproof%` is an **upper bound** on bookkeeping for pre-2026-07-27 data,
-and dropping those runs is also why the reported `blind%` falls once the
-filter is applied.  Capture is fixed from 2026-07-27, so for later data
-the two measures separate cleanly.
+*Interaction with §13.1's blind spot, and a counting defect it exposes.*
+The two exposures are not independent, and on pre-fix data the overlap
+dominates.  `bin/probe-noproof.py` prints the evidence per run: **20 of
+AE's 21 dropped runs register a theory in a `ROOT`, and all 20 of those
+theories were absent at the baseline commit** — authored while untracked,
+so only the `ROOT` edit that registered them was captured.  Almost none of
+what the filter drops is bookkeeping.
+
+The 20 split cleanly, and in opposite directions:
+
+- **10 contain failures whose error heads name the very theory being
+  registered** — `EncodingWrap_TransposeLanguage` runs undefined constant
+  → type unification → three failed proofs at line 127 → timeout → green,
+  eight builds.  That is real proof search.
+- **10 are a single green build**: the theory was written and compiled
+  first time on first inclusion.  That is real one-shot signal, and
+  dropping it *understates* the rate.
+
+The first group also exposes a defect in the length metric itself.  Length
+counts **code-class records**, and a zero-byte delta is class `none`, so
+every one of those multi-attempt runs scored as length **1** — an
+eight-attempt search recorded as a one-shot.  All 21 dropped runs were
+length 1 under that metric, which is why removing them lowers AE's rate
+despite half of them being genuine one-shots.
+
+The diffs are unrecoverable, but **the attempt count and the error heads
+are not** — they were recorded.  `bin/recount-lengths.py` compares three
+scopes; counting every recorded build for runs that are real work (a
+`.thy` edit *or* a `ROOT` registering a new theory) gives AE 69.9% of 103
+and NTR 38.5% of 96, against 85.5%/42.4% under the proof scope.  The
+anti-correlation survives, but **the AE–NTR gap closes from 43 points to
+31**: the capture gap was inflating the easier session more, so correcting
+it narrows the gap rather than widening it.  An earlier reading here had
+that direction backwards.
 
 ## 14. Episode-extraction tool
 
