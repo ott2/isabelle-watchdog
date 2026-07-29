@@ -321,15 +321,28 @@ def keep(recs: list[dict], include_all: bool) -> list[dict]:
 # 24 t/scratch-nae runs were mislabelled that way.
 _PROJECT_DIR = re.compile(r"^t/([A-Za-z0-9_-]+)/")
 
-# Session directories that were the *same development* under another name.
-# `t/aem` was t/ae split into a stable and an active session for build
-# performance, later folded back; its theories are AlphabetEnlargement_*.
-# Attribution is by path (see above), so a rename that path-based
-# attribution cannot see has to be declared here.  Scratch trees are
-# deliberately absent: `t/scratch-nae` is proof search on the AE problem
-# but not part of the AE development, so it keeps its own label and the
-# choice of whether to count it stays with the caller.
-SESSION_ALIASES = {"aem": "ae"}
+# Directories that were the *same development* under another name.
+# Attribution is by path (see above), so a directory rename is invisible to
+# it and has to be declared here.
+#
+# The test is whether the work **graduated** into the session, not what the
+# directory was called — a "scratch" name proves nothing either way:
+#
+#   t/aem         NDTHT_AE_Machinery: t/ae split for build caching
+#                 (6f58ba5), folded back by ee630c4.
+#   t/scratch-nae the [nae-prove] reverse-arm toolkit, developed in a
+#                 staging tree and graduated by 68f95df ("graduate det-free
+#                 reverse-arm toolkit into NDTHT_AE").  Its lemmas are in
+#                 t/ae/AlphabetEnlargement_Reverse.thy today —
+#                 ae_ss5_window_ofs_agree among them.
+#
+# t/scratch is deliberately absent, and is the contrast that makes the rule
+# concrete: NDTHT_Scratch was the [substrate-value-arity] fork-(a) *decision
+# prototype*, measuring whether a 'k-typed result transfers across a
+# fixed-arity isomorphism.  It answered the question and was retired as
+# spent (6f4d1fd); nothing graduated, and it no longer builds.  Search that
+# settled a design question is not search that built a session.
+SESSION_ALIASES = {"aem": "ae", "scratch-nae": "ae"}
 
 
 def project(ep: list[dict]) -> str:

@@ -933,11 +933,21 @@ trajectory, it produces a **`tooling`** one, meaning "no theory touched",
 the opposite of the truth.  23 runs of real proof search were filed that
 way.  Widened to `[A-Za-z0-9_-]+`.
 
-Scratch trees keep their own label rather than being folded into the
-session they belong to: `t/scratch-nae` is proof search on the AE problem
-(23 runs, 65.2% one-shot, mean 1.61) but is a spike rather than part of
-the AE development, so whether to count it stays an explicit choice at
-the call site instead of a silent one in the attributor.
+The test for folding a directory in is whether its work **graduated into
+the session**, which the git log settles; the directory's name proves
+nothing either way.  `t/scratch-nae` reads like a spike and is not one —
+it was the `[nae-prove]` reverse-arm toolkit, developed in a staging tree
+and graduated by `68f95df`, and its lemmas sit in
+`t/ae/AlphabetEnlargement_Reverse.thy` today (`ae_ss5_window_ofs_agree`
+among them).  It is AE work: 23 runs, 65.2% one-shot.
+
+`t/scratch` is the contrast that makes the rule concrete and stays out.
+`NDTHT_Scratch` was the `[substrate-value-arity]` fork-(a) *decision
+prototype* — it measured whether a `'k`-typed result transfers across a
+fixed-arity isomorphism, answered the question, and was retired as spent
+(`6f4d1fd`); nothing graduated and it no longer builds.  Search that
+settles a design question is not search that built a session, and
+counting it would mix two different activities in one rate.
 
 *Interaction with §13.1's blind spot, and a counting defect it exposes.*
 The two exposures are not independent, and on pre-fix data the overlap
