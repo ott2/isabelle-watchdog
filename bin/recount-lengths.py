@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import math
 import re
 import sys
 from pathlib import Path
@@ -61,6 +62,47 @@ def registers_theory(rec: dict) -> bool:
     return False
 
 
+def compare(a_name: str, a: list[int], b_name: str, b: list[int]) -> None:
+    """Two pooled groups head to head, on the honest (attempt) scope.
+
+    Reports the one-shot rate with a two-proportion test, then the repair
+    tail separately, because the two carry very different weight.  The
+    one-shot rates rest on hundreds of runs; the tail fits rest on the
+    handful of points above the KS-chosen xmin, and are printed with their
+    support size and the same-support geometric KS precisely so a reader can
+    see when the power law is *not* winning.  Trajectories from one session
+    are also autocorrelated in time, so the p-value is indicative, not a
+    clean experiment.
+    """
+    print(f"\n{a_name} vs {b_name} (attempt scope, pooled)\n")
+    for name, xs in ((a_name, a), (b_name, b)):
+        print(f"  {name:26} n={len(xs):4}  "
+              f"1-shot={100 * sum(1 for x in xs if x == 1) / len(xs):5.1f}%  "
+              f"mean={sum(xs) / len(xs):4.2f}  max={max(xs):3}")
+    k1, n1, k2, n2 = (sum(1 for x in a if x == 1), len(a),
+                      sum(1 for x in b if x == 1), len(b))
+    p1, p2 = k1 / n1, k2 / n2
+    p = (k1 + k2) / (n1 + n2)
+    se = math.sqrt(p * (1 - p) * (1 / n1 + 1 / n2))
+    z = (p1 - p2) / se if se else 0.0
+    ci = 1.96 * math.sqrt(p1 * (1 - p1) / n1 + p2 * (1 - p2) / n2)
+    pval = 2 * (1 - 0.5 * (1 + math.erf(abs(z) / math.sqrt(2))))
+    print(f"\n  one-shot difference {100 * (p1 - p2):+.1f}pp "
+          f"(95% CI +/-{100 * ci:.1f}), z={z:.2f}, p={pval:.1e}")
+
+    print("\n  repair tail (k >= 2), where the fits are weak — read with care:")
+    for name, xs in ((a_name, a), (b_name, b)):
+        f = A.fit(xs)
+        if not f:
+            print(f"    {name:26} tail too small to fit")
+            continue
+        pl, g = f["power_law"], f["geometric_same_support"]
+        better = "power law" if pl["ks"] < g["ks"] else "GEOMETRIC"
+        print(f"    {name:26} tail n={f['tail_n']:3}  xmin={pl['xmin']}  "
+              f"alpha={pl['alpha']:.2f} over {pl['n']:3} pts  "
+              f"KS {pl['ks']:.3f} vs geom {g['ks']:.3f} -> {better}")
+
+
 def pct(xs: list[int]) -> str:
     return f"{100.0 * sum(1 for x in xs if x == 1) / len(xs):5.1f}%" if xs \
         else "    --"
@@ -73,6 +115,9 @@ def mean(xs: list[int]) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-i", "--input", default=str(A.BUILDS_JSONL))
+    ap.add_argument("--split", metavar="SESS",
+                    help="also pool SESS against the other proof sessions "
+                         "and compare (e.g. --split ntr)")
     ns = ap.parse_args()
 
     scopes: dict[str, dict[str, list[int]]] = {
@@ -109,6 +154,20 @@ def main() -> int:
     print("  proof    ditto, runs with a .thy code edit only")
     print("  attempt  every recorded build, for runs that are real work")
     print("           (.thy edit, or a ROOT registering a new theory)")
+
+    if ns.split:
+        # Only the proof sessions: `tooling`/`mixed`/`none` are not a
+        # development, and the retired dirs (`aem`, `scratch`) are too small
+        # to pool meaningfully.
+        proof_sess = [s for s in order if s in scopes["attempt"]]
+        if ns.split not in proof_sess:
+            print(f"\nFAIL: {ns.split} is not one of {proof_sess}",
+                  file=sys.stderr)
+            return 2
+        rest = [s for s in proof_sess if s != ns.split]
+        compare(f"pre-{ns.split} ({'+'.join(rest)})",
+                [x for s in rest for x in scopes["attempt"][s]],
+                ns.split, scopes["attempt"][ns.split])
     return 0
 
 
