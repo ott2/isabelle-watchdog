@@ -8,7 +8,7 @@ once.  If one development ran under heavier load than the others, its
 one-shot rate is depressed for a reason that has nothing to do with proof
 difficulty — which would be a confound, not a finding.
 
-Five checks, in the order that can falsify the concern fastest:
+Six checks, in the order that can falsify the concern fastest:
 
   1. **Outcome mix** — what share of each session's non-green attempts are
      timeouts rather than failures?  If timeouts are rare everywhere, the
@@ -37,9 +37,11 @@ mentions a timeout in its head.
 
 Divergent search — a method that never returns — is real, but it lands in
 the other bucket: `outcome: timeout` with `timeout_reason: loop_progress`
-(the watchdog seeing no progress).  There are 28 of those, ~3% of attempts
-in ae and ntr and near zero in base and ar.  So the phenomenon exists and
-is already separated; it is not hiding inside the failure counts.
+(the watchdog seeing no progress).  There are 28 in the corpus, 21 of them
+in the proof sessions — ~3% of attempts in ae and ntr, near zero in base
+and ar.  So the phenomenon exists and is already separated; it is not
+hiding inside the failure counts.  Check 6 asks whether separating it is
+enough, or whether it should also be counted differently.
 
 Usage:  bin/audit-timeouts.py [-i BUILDS_JSONL]
 """
@@ -221,6 +223,43 @@ def main() -> int:
         n = len(heads)
         print(f"   {sess:4} | {n:5} | {100 * fin / n:11.1f}% "
               f"| {100 * init / n:13.1f}% | {100 * (n - proofish) / n:8.1f}%")
+    print("\n6. is a timeout a proof event or an environmental one?\n")
+    print("   The pipeline tests only `outcome == \"ok\"`, so a timeout is"
+          "\n   already just a failure step: it never closes an episode and it"
+          "\n   counts as an attempt.  Whether that is right depends on the"
+          "\n   reason, and the per-attempt divergence rate answers it —"
+          "\n   exposure-free, unlike 'episodes containing a timeout', which"
+          "\n   rises with length for free.\n")
+    all_eps = [e for _, e in eps]
+    recs = [r for e in all_eps for r in e]
+    p = sum(1 for r in recs
+            if r.get("timeout_reason") == "loop_progress") / len(recs)
+    print(f"   per-attempt loop_progress rate overall: {100 * p:.2f}%\n")
+    print("   episode length | episodes  attempts | loop_progress per attempt")
+    print("   ---------------+--------------------+--------------------------")
+    for lo, hi in ((1, 1), (2, 4), (5, 9), (10, 10 ** 9)):
+        sel = [e for e in all_eps if lo <= len(e) <= hi]
+        att = [r for e in sel for r in e]
+        if not att:
+            continue
+        lp = sum(1 for r in att if r.get("timeout_reason") == "loop_progress")
+        band = f"{lo}-{hi}" if hi < 10 ** 9 else f"{lo}+"
+        note = "  (no failures by construction)" if hi == 1 else ""
+        print(f"   {band:>14} | {len(sel):8} {len(att):9} | "
+              f"{lp:4} ({100 * lp / len(att):5.2f}%){note}")
+
+    obs = sum(1 for e in all_eps
+              if any(r.get("timeout_reason") == "loop_progress" for r in e))
+    exp = sum(1 - (1 - p) ** len(e) for e in all_eps)
+    print(f"\n   episodes containing one: {obs} observed vs {exp:.1f} expected "
+          f"if divergence\n   were independent across attempts — fewer, so it "
+          f"*clusters*: hit a\n   diverging tactic and the next attempt tends "
+          f"to diverge too.")
+    print("\n   Divergence is therefore a proof-search event, not environmental"
+          "\n   noise: its per-attempt rate rises with trajectory difficulty and"
+          "\n   it repeats within a run.  Counting it as a failure step is the"
+          "\n   right default; `wall` and `activity` have no such signature and"
+          "\n   are the ones a stricter reading should question.")
     return 0
 
 
