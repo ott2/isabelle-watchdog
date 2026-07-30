@@ -1251,6 +1251,20 @@ Only the 697 abandoned attempts are additive: 25,669 added lines, 5.2%
 of the total.  The same data, one boundary apart, goes from "all of it
 counts" to "a quarter of it counts".
 
+*The trajectory column is about builds, not about slices, and is not
+comparable without its coverage.*  It reports lines from attempts that
+did not compile, so a slice showing a large figure had its search
+recorded — nothing more.  NTR is the case that makes this concrete: 6,798
+failed-attempt lines against 9,803 committed, which reads as alarming
+until the coverage column is beside it.  Every one of NTR's committed
+lines falls inside the capture window (100%); the AFP slice is at 63%,
+with 66,261 of its added lines predating the corpus entirely, and
+attempt 2 is at 0%.  NTR is not the hardest development, it is the only
+fully-observed one.  Its committed churn says the opposite of hard, in
+fact: 881 deleted against 9,803 added, 9% rework, where the AFP sessions
+sit at 67%.  The tool prints `cover` per slice and refuses the comparison
+in prose; `failed` alone means nothing.
+
 *No single metric carries it.*  The distribution is heavy on both sides —
 the top 10% of commits hold 51% of added lines, the top 10% of abandoned
 attempts 55%, and the median abandoned attempt is 7 lines.  Added lines
