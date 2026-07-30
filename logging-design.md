@@ -1222,6 +1222,54 @@ reader.  Remaining analysis layer (per-lemma `query` attribution,
 diff-scope) tracked under `[attempt-capture]`; the file-shipping
 build-out under `[trajectory-pool]` / `[trajectory-federate]`.
 
+### 13.3 What the corpus contributes to a project-size breakdown
+
+Two tools answer this, and they disagree because they are asked under
+different accounting boundaries.  Settling the boundary first is the
+whole job; the metric argument is downstream of it.
+
+*Boundary A — the git tree is not counted.*  `bin/attempts.py size`.
+Every record carries its diff inline (§16), which is what lets the tool
+run with no object store present, and is also the accounting rule: these
+diffs are the only copy of what they describe, so all 14.07 MB counts.
+The `git_head` / `snapshot` / `parent_snapshot` / `tree` hashes (0.22 MB,
+1.6%) are pointers into a store the boundary excludes — real bytes,
+inert content, reported on their own row so the distinction is not
+assumed.  Compression is the only honest reduction and a large one:
+2.09 MB gzipped, 6.7x.  That factor is bigger than any refinement of
+"which records are relevant" would be, which is why the definition is not
+worth sharpening.  Errors are 0.9% today and are the field set to grow;
+watch that row against the gzipped diff figure.
+
+*Boundary B — git history is the global measure.*  `bin/churn-slice.py`.
+Sizing the working tree asks how big what survived is, which for a project
+with two abandoned attempts is the wrong question: attempt 2 leaves a 2 MB
+snapshot behind ~108k added lines.  So the measure is what every commit
+added, sliced by path — and now the green attempts must be *dropped*,
+because their content landed and the committed churn already holds it.
+Only the 697 abandoned attempts are additive: 25,669 added lines, 5.2%
+of the total.  The same data, one boundary apart, goes from "all of it
+counts" to "a quarter of it counts".
+
+*No single metric carries it.*  The distribution is heavy on both sides —
+the top 10% of commits hold 51% of added lines, the top 10% of abandoned
+attempts 55%, and the median abandoned attempt is 7 lines.  Added lines
+therefore largely report where the bulk edits were.  Touches (commit-file
+pairs) score an edit event once regardless of size, and the two are
+reported side by side: where they agree the number is solid, where they
+diverge (design docs 14% by lines, 27% by touches) the divergence is the
+finding.  By touches the trajectory is 10.0%, not 5.2%.
+
+*Three mechanical contaminants, each with a signature.*  Renames counted
+as fresh writing inflate the total 22% (`--no-renames` is wrong here);
+git's composite `prefix{old => new}suffix` path must be resolved to its
+destination or 153 rows misslice; and script-maintained files — found via
+additions exactly equalling deletions — inflate whichever prefix they
+match, `isa/registry/` alone by 18,973 lines against attempt-2 Isar.
+That equality is *not* a generated-content test, though: it says only
+that nothing survives at HEAD, which retired hand-written theories
+satisfy too.  The exclusion list stays a named judgement.
+
 ## 15. Payoff
 
 Attributable *(goal context, change, verdict)* episodes are the

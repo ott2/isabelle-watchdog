@@ -32,6 +32,16 @@ any builds.jsonl — point it anywhere with -i/--input.
   attempts.py classify BUILD_ID [-v]
                                  why a delta was judged code or doc-only
                                  (per-file verdict; -v shows the evidence)
+  attempts.py size [--compare DIR...] [--json]
+                                 byte accounting for a project-size
+                                 breakdown that does not count the git
+                                 tree.  Every record carries its diff
+                                 inline (§16), so the corpus is the only
+                                 copy of what it describes; the hashes
+                                 beside them are pointers into a store
+                                 that accounting excludes.  Compression is
+                                 the only real reduction, and it is bigger
+                                 than any refinement of "relevant" would be.
 
 Common options (accepted before *or* after the subcommand):
 
@@ -58,9 +68,11 @@ a `by` line).  Run `classify -v` to see the evidence for any verdict.
 """
 
 import argparse
+import gzip
 import json
 import math
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -917,6 +929,174 @@ def cmd_lengths_by_project(pairs: list[tuple[int, str]], label: str,
                 _print_fit(f, indent="  ")
 
 
+# ------------------------------------------------------------------- size
+
+# Hashes into the git object store.  They look like data and cost real
+# bytes, but they carry nothing on their own: resolving one needs the
+# repository, and a corpus sized *without* counting the repository cannot
+# claim their referents as content it holds.  Reported separately so the
+# distinction is visible rather than assumed.
+POINTER_FIELDS = ("git_head", "snapshot", "parent_snapshot", "tree")
+
+# Present only here at any price: no git object, however reachable, records
+# why a build failed.
+ERROR_FIELDS = ("error_head", "error_loci", "timeout_reason")
+
+
+def _field_bytes(rec: dict) -> dict[str, int]:
+    """Serialised cost of each field, key and JSON escaping included.
+
+    Measured by re-encoding rather than slicing the source line: a field's
+    cost is its own encoding plus its key, not its offset in someone else's
+    byte layout.  The per-field total therefore slightly exceeds the raw
+    string lengths -- a diff's newlines cost two bytes each once escaped.
+    """
+    return {k: len(json.dumps(k)) + len(json.dumps(v)) + 2 for k, v in rec.items()}
+
+
+def _gz(payload: str) -> int:
+    """Compressed size -- the stand-in for information content.
+
+    The one honest reduction available here.  Successive attempts on one
+    lemma re-emit the same context lines, and no definition of "relevant"
+    measures that redundancy as directly as compressing it does.
+    """
+    return len(gzip.compress(payload.encode(), compresslevel=6)) if payload else 0
+
+
+def _tracked_thy_bytes(root: Path) -> int:
+    """Bytes of git-tracked .thy under *root*, for scale comparison.
+
+    Tracking is what separates a project's own theories from a vendored AFP
+    checkout beside them: ndthtf carries 41 vendored theories against its
+    own 22, so an unfiltered walk overstates it tenfold.
+    """
+    try:
+        out = subprocess.run(["git", "ls-files", "-z", "*.thy"], cwd=root,
+                             capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return 0
+    total = 0
+    for rel in out.split("\0"):
+        if rel:
+            try:
+                total += (root / rel).stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def size_report(recs: list[dict], path: Path) -> dict:
+    """Byte accounting for the corpus, on its own terms.
+
+    The corpus is self-contained by construction (logging-design.md §16):
+    every record carries its incremental diff inline, which is what lets
+    this tool run against any builds.jsonl with no object store present.
+    That property is also the accounting rule -- when the git tree is not
+    itself being counted as project size, these diffs are the only copy of
+    the content they describe, and all of them count.  The kept/discarded
+    split below is descriptive, not a discount: it says how much of the
+    record is search and how much is result.
+    """
+    per_field: dict[str, int] = {}
+    outcomes: dict[str, int] = {}
+    kept, discarded, errors = [], [], []
+    doc_only = 0
+
+    for rec in recs:
+        for key, value in _field_bytes(rec).items():
+            per_field[key] = per_field.get(key, 0) + value
+        outcome = rec.get("outcome") or "?"
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+        diff = rec.get("diff") or ""
+        (kept if outcome == "ok" else discarded).append(diff)
+        if diff and rec_class(rec) == "doc":
+            doc_only += len(diff)
+        for key in ERROR_FIELDS:
+            if rec.get(key):
+                errors.append(str(rec[key]))
+
+    gross = path.stat().st_size if path.exists() else sum(per_field.values())
+    all_diffs = kept + discarded
+    return {
+        "path": str(path),
+        "records": len(recs),
+        "outcomes": outcomes,
+        "per_field": per_field,
+        "gross": gross,
+        "gross_gz": _gz(path.read_text(errors="replace")) if path.exists() else 0,
+        "diff_raw": sum(len(d) for d in all_diffs),
+        "diff_gz": _gz("\n".join(all_diffs)),
+        "kept_raw": sum(len(d) for d in kept),
+        "discarded_raw": sum(len(d) for d in discarded),
+        "doc_only_raw": doc_only,
+        "pointer_bytes": sum(per_field.get(k, 0) for k in POINTER_FIELDS),
+        "error_bytes": sum(per_field.get(k, 0) for k in ERROR_FIELDS),
+        "error_gz": _gz("\n".join(errors)),
+    }
+
+
+def _mb(n: int) -> str:
+    return f"{n / 1_000_000:6.2f} MB"
+
+
+def cmd_size(recs: list[dict], path: Path, compare: list[str], fmt: str) -> None:
+    """What this corpus contributes to a project-size breakdown.
+
+    Answers "how big is the trajectory data" for an accounting that does not
+    count the git tree.  Under that rule the whole corpus counts: the diffs
+    are inline and self-contained, and the hashes beside them are pointers
+    into a store the accounting excludes, so nothing here is double-counted
+    against the theory tree.  Compression is the only real reduction, and it
+    is a large one -- large enough that refining what "relevant" means moves
+    the answer far less than gzip already does.
+    """
+    s = size_report(recs, path)
+    if fmt == "json":
+        s["compare"] = {d: _tracked_thy_bytes(Path(d)) for d in compare}
+        print(json.dumps(s, indent=1))
+        return
+
+    gross = s["gross"]
+    pct = lambda v: f"{100 * v / gross:5.1f}%" if gross else "    -"
+    print(f"{s['path']} — {s['records']:,} records, "
+          + ", ".join(f"{k} {v:,}" for k, v in sorted(s["outcomes"].items())))
+
+    print("\n  field                  bytes     share")
+    ranked = sorted(s["per_field"].items(), key=lambda kv: -kv[1])
+    for key, value in ranked[:5]:
+        tag = "  (pointer)" if key in POINTER_FIELDS else ""
+        print(f"    {key:<18} {_mb(value)}   {pct(value)}{tag}")
+    rest = gross - sum(v for _, v in ranked[:5])
+    print(f"    {'(rest)':<18} {_mb(rest)}   {pct(rest)}")
+
+    print("\n  what it is             bytes     share")
+    print(f"    gross              {_mb(gross)}   {pct(gross)}")
+    print(f"    gzipped            {_mb(s['gross_gz'])}   {pct(s['gross_gz'])}"
+          f"   <- the irreducible figure")
+    print(f"    pointers (inert)   {_mb(s['pointer_bytes'])}   "
+          f"{pct(s['pointer_bytes'])}   <- hashes; need the object store")
+
+    print("\n  of the diffs           bytes     share")
+    for label, value in (("kept (built green)", s["kept_raw"]),
+                         ("discarded (search)", s["discarded_raw"]),
+                         ("doc-only deltas", s["doc_only_raw"])):
+        print(f"    {label:<18} {_mb(value)}   {pct(value)}")
+    print(f"    {'gzipped':<18} {_mb(s['diff_gz'])}   {pct(s['diff_gz'])}")
+
+    print("\n  errors                 bytes     share")
+    print(f"    {'raw':<18} {_mb(s['error_bytes'])}   {pct(s['error_bytes'])}")
+    print(f"    {'gzipped':<18} {_mb(s['error_gz'])}   {pct(s['error_gz'])}")
+    print("    the highest-value-density field and the one set to grow; "
+          "watch this\n    row against the gzipped diff figure above")
+
+    for directory in compare:
+        root = Path(directory)
+        if root.exists():
+            print(f"\n  {directory + ' .thy':<20} {_mb(_tracked_thy_bytes(root))}"
+                  f"   (tracked only)")
+
+
 def cmd_lengths(recs: list[dict], n: int, include_all: bool, fmt: str,
                 do_fit: bool = False, by_project: bool = False) -> None:
     """Frequency of 1-step, 2-step, … trajectories.
@@ -1070,6 +1250,13 @@ def main() -> int:
                     help="split by development (t/ae, t/ar, t/ntr, t/art, "
                          "t/base) — they are separate results, not one pool")
 
+    pz = sub.add_parser("size", parents=[common],
+                        help="byte accounting: what this corpus adds to a "
+                             "project-size breakdown")
+    pz.add_argument("--compare", nargs="*", default=[], metavar="DIR",
+                    help="also size the git-tracked .thy under these trees")
+    pz.add_argument("--json", action="store_true", help="emit JSON")
+
     ns = p.parse_args()
     given = getattr(ns, "input", None)
     include_all = getattr(ns, "all", False)
@@ -1087,6 +1274,8 @@ def main() -> int:
         cmd_classify(recs, ns.build_id, ns.verbose)
     elif ns.cmd == "episodes":
         cmd_episodes(recs, ns.n, include_all, diffs=ns.diffs, full=ns.full)
+    elif ns.cmd == "size":
+        cmd_size(recs, path, ns.compare, "json" if ns.json else "text")
     elif ns.cmd == "lengths":
         cmd_lengths(recs, ns.n, include_all,
                     "csv" if ns.csv else "json" if ns.json else "text",
