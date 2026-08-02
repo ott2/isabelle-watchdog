@@ -376,7 +376,13 @@ def cmd_repair(records, repo, args) -> int:
     if backup:
         print(f"  backup at {backup}")
     else:
-        print(f"  revert with: git -C {net} checkout -- {corpus.name}")
+        # Relative to the repo ROOT, not the corpus's own directory: a corpus
+        # usually sits in a subdirectory, so the bare filename would not resolve.
+        try:
+            rel = corpus.relative_to(net)
+        except ValueError:
+            rel = corpus
+        print(f"  revert with: git -C {net} checkout -- {rel}")
     return 0
 
 
