@@ -78,6 +78,7 @@ Usage:
     bin/trajectory.py check  [CORPUS] [--repo PATH]
     bin/trajectory.py repair [CORPUS] [--repo PATH] [--apply] [--heuristic]
     bin/trajectory.py replay [CORPUS] [--repo PATH] [--from N] [--to N]
+    bin/trajectory.py progress [CORPUS] [--repo PATH]
     bin/trajectory.py extract CORPUS N DEST [--repo PATH]
 """
 
@@ -461,6 +462,126 @@ def cmd_replay(records, repo, args) -> int:
         shutil.rmtree(work, ignore_errors=True)
 
 
+FILE_HEADER = re.compile(r"^\+\+\+ b/(.*)$")
+HUNK_FULL = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+LOCI_IN_HEAD = [re.compile(r'\(line (\d+) of "([^"]+)"\)'),
+                re.compile(r"line (\d+) of (\S+)")]
+
+
+def theory_key(name: str) -> str:
+    """Collapse the several ways a theory is named into one key.
+
+    A compile error cites a path (`…/isabelle/SP_Slowdown.thy`); a watchdog kill
+    cites a session-qualified name (`SPSlowdown.SP_Slowdown`); a diff cites a
+    repo-relative path.  All three must compare equal or every transition looks
+    like a cross-file edit."""
+    b = Path(name).name
+    return b[:-4] if b.endswith(".thy") else b.rsplit(".", 1)[-1]
+
+
+def error_loci(rec: dict) -> list[tuple[str, int]]:
+    """(theory, line) pairs, from `error_loci` or parsed out of `error_head`.
+
+    Older corpora predate the `error_loci` field and carry only the first two
+    `***` lines, so roughly half their failures name no location at all."""
+    if rec.get("error_loci"):
+        return [(theory_key(f), int(l)) for f, l in rec["error_loci"]]
+    head = rec.get("error_head") or ""
+    for pat in LOCI_IN_HEAD:
+        found = [(theory_key(m.group(2)), int(m.group(1))) for m in pat.finditer(head)]
+        if found:
+            return found
+    return []
+
+
+def hunks_by_theory(diff: str) -> dict[str, list[tuple[int, int, int, int]]]:
+    out, cur = collections.defaultdict(list), None
+    for line in diff.split("\n"):
+        m = FILE_HEADER.match(line)
+        if m:
+            cur = theory_key(m.group(1))
+            continue
+        m = HUNK_FULL.match(line)
+        if m and cur:
+            out[cur].append((int(m.group(1)), int(m.group(2) or 1),
+                             int(m.group(3)), int(m.group(4) or 1)))
+    return dict(out)
+
+
+def map_line(hunks, ln: int) -> int | None:
+    """Where old line `ln` ends up after the edit; None if the edit covers it.
+
+    Without this correction an insertion anywhere above the error makes the
+    error's line number grow, and 'the error moved later in the file' fires on
+    pure drift rather than on progress."""
+    delta = 0
+    for old_start, old_len, new_start, new_len in sorted(hunks):
+        if ln < old_start:
+            break
+        if old_start <= ln < old_start + old_len:
+            return None
+        delta = (new_start + new_len) - (old_start + old_len)
+    return ln + delta
+
+
+def cmd_progress(records, repo, args) -> int:
+    """Classify each fail -> next-attempt transition: did the edit make progress?
+
+    Line numbers alone cannot settle this (see INSIGHTS.md #19); the output
+    separates what they *can* decide from what needs the error text."""
+    tally = collections.Counter()
+    for i in range(1, len(records)):
+        prev, cur = records[i - 1], records[i]
+        if prev.get("outcome") == "ok":
+            continue                                   # a new trajectory starts
+        pl = error_loci(prev)
+        hunks = hunks_by_theory(cur.get("diff") or "")
+        if not pl or not hunks:
+            tally["unclassifiable (no locus, or no edit)"] += 1
+            continue
+        theory, old_line = min(pl, key=lambda x: x[1])
+        old_line = min(ln for f, ln in pl if f == theory)
+        if theory not in hunks:
+            tally["edit was in a different theory"] += 1
+            continue
+        hs = hunks[theory]
+        mapped = map_line(hs, old_line)
+
+        if cur.get("outcome") == "ok":
+            tally["OK  · edit covered the failing line" if mapped is None
+                  else "OK  · failing line untouched (the fix was elsewhere)"] += 1
+            continue
+        cl = [ln for f, ln in error_loci(cur) if f == theory]
+        if not cl:
+            tally["error left the theory"] += 1
+            continue
+        new_line = min(cl)
+        inside = any(ns <= new_line < ns + nl for _, _, ns, nl in hs)
+        if mapped is None:
+            if inside:
+                # The edit rewrote the failing proof and it still fails there.
+                # Whether that is partial progress or none is exactly what line
+                # numbers cannot say -- fall back to the error text.
+                moved = (prev.get("error_head") or "") != (cur.get("error_head") or "")
+                tally["still failing in the edited region, DIFFERENT error"
+                      if moved else
+                      "still failing in the edited region, SAME error"] += 1
+            else:
+                tally["edited the failing line; error moved off it"] += 1
+        elif new_line > mapped:
+            tally["error advanced past the edit"] += 1
+        elif new_line == mapped:
+            tally["error at the same drift-corrected line"] += 1
+        else:
+            tally["error retreated (something earlier broke)"] += 1
+
+    total = sum(tally.values())
+    print(f"{total} transitions out of a fail:\n")
+    for k, n in tally.most_common():
+        print(f"  {n:>5}  {k}")
+    return 0
+
+
 def paths_in_diff(diff: str) -> tuple[set[str], set[str]]:
     """Paths the patch reads (a/ side) and writes (b/ side)."""
     pre, post = set(), set()
@@ -509,6 +630,7 @@ def main() -> int:
     for name, helptext in (("check", "classify every record (read-only)"),
                            ("repair", "regenerate repairable payloads"),
                            ("replay", "apply payloads and verify the resulting blobs"),
+                           ("progress", "classify whether each edit made progress"),
                            ("extract", "write one record's snapshot to a directory")):
         s = sub.add_parser(name, help=helptext)
         s.add_argument("corpus", nargs="?", default=str(DEFAULT_CORPUS))
@@ -539,8 +661,8 @@ def main() -> int:
     with open(corpus) as fh:
         records = [json.loads(line) for line in fh if line.strip()]
 
-    return {"check": cmd_check, "repair": cmd_repair,
-            "replay": cmd_replay, "extract": cmd_extract}[args.cmd](records, repo, args)
+    return {"check": cmd_check, "repair": cmd_repair, "replay": cmd_replay,
+            "progress": cmd_progress, "extract": cmd_extract}[args.cmd](records, repo, args)
 
 
 if __name__ == "__main__":
