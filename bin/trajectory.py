@@ -588,6 +588,63 @@ def cmd_progress(records, repo, args) -> int:
     return 0
 
 
+def cmd_notes(records, repo, args) -> int:
+    """Show the reasoning attached to each attempt, scored against what happened.
+
+    The scoring is the point.  A note that predicted `ok` and got `fail` marks
+    a place where the engineer's model of the system was wrong, which is
+    exactly the record worth re-reading; a corpus of notes without outcomes
+    attached is a diary, and diaries are not evidence."""
+    noted = [(i, r) for i, r in enumerate(records) if r.get("note")]
+    if not noted:
+        print(f"{len(records)} records, none carry a note.\n"
+              f"Write a note before building — see `make note`.")
+        return 0
+
+    scored = hits = posthoc = 0
+    for i, rec in noted:
+        outcome = rec.get("outcome")
+        pred = rec.get("note_predicted")
+        mark = ""
+        if pred:
+            scored += 1
+            if pred == outcome:
+                hits += 1
+                mark = f"  predicted {pred} ✓"
+            else:
+                mark = f"  predicted {pred}, got {outcome}  <-- SURPRISE"
+        if rec.get("note_pre_build") is False:
+            posthoc += 1
+            mark += "  [written after the build: not a prediction]"
+        print(f"\n#{i}  {outcome}  {rec.get('elapsed_s')}s"
+              f"  {rec.get('timestamp', '')}{mark}")
+        fields = rec.get("note_fields") or {}
+        if args.raw or not fields:
+            for line in (rec.get("note") or "").strip().splitlines():
+                print(f"    {line}")
+        else:
+            for key in ("diagnosis", "change", "expect", "ref", "notes"):
+                if key in fields:
+                    body = [ln.strip() for ln in fields[key].splitlines()] or [""]
+                    print(f"    {key + ':':<11}{body[0]}")
+                    for line in body[1:]:
+                        print(f"    {'':<11}{line}")
+        if args.loci:
+            for thy, ln in error_loci(rec):
+                print(f"      -> {thy}:{ln}")
+
+    print(f"\n{len(noted)}/{len(records)} records carry a note.")
+    if scored:
+        print(f"{hits}/{scored} predictions correct "
+              f"({100 * hits // scored}%); {scored - hits} surprises.")
+    else:
+        print("No note named an expected outcome (`expect: ok|fail|timeout`).")
+    if posthoc:
+        print(f"{posthoc} note(s) postdate their build and are summaries, "
+              f"not predictions — excluded from nothing, but read them as such.")
+    return 0
+
+
 def paths_in_diff(diff: str) -> tuple[set[str], set[str]]:
     """Paths the patch reads (a/ side) and writes (b/ side)."""
     pre, post = set(), set()
@@ -637,6 +694,7 @@ def main() -> int:
                            ("repair", "regenerate repairable payloads"),
                            ("replay", "apply payloads and verify the resulting blobs"),
                            ("progress", "classify whether each edit made progress"),
+                           ("notes", "show attached reasoning, scored against outcomes"),
                            ("extract", "write one record's snapshot to a directory")):
         s = sub.add_parser(name, help=helptext)
         s.add_argument("corpus", nargs="?", default=str(DEFAULT_CORPUS))
@@ -651,6 +709,11 @@ def main() -> int:
         if name == "replay":
             s.add_argument("--from", dest="start", type=int)
             s.add_argument("--to", dest="stop", type=int)
+        if name == "notes":
+            s.add_argument("--raw", action="store_true",
+                           help="print notes verbatim instead of by section")
+            s.add_argument("--loci", action="store_true",
+                           help="also show the error loci each attempt reported")
         if name == "extract":
             s.add_argument("n", help="record index")
             s.add_argument("dest", help="destination directory")
@@ -668,7 +731,8 @@ def main() -> int:
         records = [json.loads(line) for line in fh if line.strip()]
 
     return {"check": cmd_check, "repair": cmd_repair, "replay": cmd_replay,
-            "progress": cmd_progress, "extract": cmd_extract}[args.cmd](records, repo, args)
+            "progress": cmd_progress, "notes": cmd_notes,
+            "extract": cmd_extract}[args.cmd](records, repo, args)
 
 
 if __name__ == "__main__":

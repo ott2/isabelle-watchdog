@@ -35,18 +35,40 @@ Design choices (see logging-design.md §§12–16 for the full design):
     `instance_id` (minted once in gitignored `t/logs/instance-id`) plus
     host/contributor/origin provenance, so trajectories from parallel
     worktrees / clones agglomerate by file union (logging-design.md §16).
+  - **A note carries the reasoning the diff cannot.**  The diff records
+    what changed; nothing recorded what the engineer believed was wrong,
+    what they were testing, or what they expected.  That is the half a
+    reader cannot reconstruct — an edit's effect is recoverable from the
+    sources forever, its rationale only while someone remembers it.  Write
+    `<LOG_DIR>/next-note.md` before building (or pass `BUILD_NOTE=...`);
+    the attempt consumes it, so a note is attached to exactly the build it
+    was written for and never drifts onto a later one.  Optional: absent
+    notes record as null rather than blocking anything.
+
+    Notes are free text, with four recognised section keys — `diagnosis:`,
+    `change:`, `expect:`, `ref:` — parsed into `note_fields` for querying
+    while `note` keeps the text verbatim.  `expect:` is the field worth the
+    trouble: a *prediction*, recorded before the outcome is known, is the
+    one signal in a build corpus that says whether the engineer understood
+    the system or was guessing, and it can be scored automatically against
+    `outcome`.  Because that only holds if the note predates the build,
+    `note_pre_build` records whether it did, rather than assuming it.
+
   - **Never breaks the build.**  `record(...)` swallows every error
     into a one-line stderr warning; the caller's exit code is
     untouched.  Trajectory capture must never cost a build.
 
-Inspect captured data with `bin/attempts.py`.
+Inspect captured data with `bin/attempts.py`; `bin/trajectory.py notes`
+shows the notes against their outcomes.
 """
 
 import json
 import os
+import re
 import secrets
 import socket
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -77,6 +99,23 @@ LAST_ATTEMPT_FILE = LOG_DIR / ".last-attempt"
 # a draft memo must not enter the dataset before anyone has decided to keep
 # it.  Git pathspec globs, so `*` crosses directory separators.
 UNTRACKED_PATHSPECS = ["*.thy", "*ROOT", "*ROOTS"]
+
+# The note attached to the next attempt.  Written before the build, consumed by
+# it.  Kept under LOG_DIR so it inherits whatever gitignore already covers the
+# logs, and so a pending note is visible next to the corpus it will join.
+NOTE_FILE = Path(os.environ.get("BUILD_NOTE_FILE") or (LOG_DIR / "next-note.md"))
+
+# Recognised section keys.  Deliberately few: `diagnosis` (what I think is
+# wrong), `change` (what I am doing about it), `expect` (what I predict will
+# happen), `ref` (a pointer — an insight id, an issue, a prior attempt).
+# Anything unrecognised is still captured, under "notes".
+NOTE_KEYS = ("diagnosis", "change", "expect", "ref")
+# Allow a leading markdown marker so the file reads as prose either way.
+NOTE_KEY_RE = re.compile(r"^\s*[-*#]{0,3}\s*([A-Za-z_]+)\s*:\s*(.*)$")
+# Anchored at the start of `expect:`, so the convention is `expect: ok — why`.
+# Searching the whole section would read "expect: no timeout this time, ok" as
+# predicting a timeout; an unscored note is better than a miscounted one.
+OUTCOME_RE = re.compile(r"^\W*(ok|fail|timeout)\b", re.IGNORECASE)
 
 
 def _git(args: list[str], env: dict | None = None) -> str:
@@ -207,6 +246,82 @@ def _snapshot_tree() -> str:
         ATTEMPT_INDEX.unlink(missing_ok=True)
 
 
+def _parse_note(text: str) -> dict | None:
+    """Split a note into its recognised sections, forgivingly.
+
+    A line `diagnosis: ...` opens a section that runs until the next
+    recognised key, so a section can be a paragraph.  Text before the first
+    key lands under "notes", and a note using no keys at all is captured whole
+    the same way — a format that rejects free prose collects nothing, and the
+    raw text is stored verbatim regardless.  The parse is a convenience for
+    querying, never the record of what was written."""
+    fields: dict[str, str] = {}
+    key: str | None = None
+    buf: list[str] = []
+    preamble: list[str] = []
+    for line in text.splitlines():
+        m = NOTE_KEY_RE.match(line)
+        if m and m.group(1).lower() in NOTE_KEYS:
+            if key is not None:
+                fields[key] = "\n".join(buf).strip()
+            key, buf = m.group(1).lower(), [m.group(2)]
+        elif key is not None:
+            buf.append(line)
+        else:
+            preamble.append(line)
+    if key is not None:
+        fields[key] = "\n".join(buf).strip()
+    leftover = "\n".join(preamble).strip()
+    if leftover:
+        fields["notes"] = leftover
+    return {k: v for k, v in fields.items() if v} or None
+
+
+def _predicted_outcome(fields: dict | None) -> str | None:
+    """The outcome the note predicted, if it named one unambiguously.
+
+    Two deliberate restrictions, both to keep the calibration statistic
+    honest.  Only `expect:` counts — an outcome mentioned in passing inside a
+    diagnosis is not a prediction.  And it must *open* the section, so the
+    convention is `expect: fail — reasoning`; a note whose expectation is
+    buried in prose scores as unpredicted rather than as a guess about what
+    its author meant."""
+    if not fields:
+        return None
+    m = OUTCOME_RE.match(fields.get("expect", ""))
+    return m.group(1).lower() if m else None
+
+
+def _read_note(elapsed_s: float) -> tuple[str | None, str | None, bool | None]:
+    """The note for this attempt as (text, source, written_before_the_build).
+
+    `BUILD_NOTE` wins over the note file so a one-liner can override a stale
+    pending note.  Nothing is consumed here: the file is removed only once the
+    record is safely on disk, so a capture that fails does not also destroy
+    the reasoning it was meant to carry.
+
+    The third element is the integrity bit that makes `expect:` worth having.
+    A note written *after* the build finished is a summary, and its prediction
+    is not a prediction; comparing the file's mtime against the build's start
+    (now minus its elapsed time) distinguishes the two without trusting
+    anyone.  It is None for `BUILD_NOTE`, which is set before the process
+    starts and so cannot be post-hoc — though it *can* go stale if exported
+    into a shell rather than passed per-invocation, which is why the file is
+    the recommended route."""
+    env_note = (os.environ.get("BUILD_NOTE") or "").strip()
+    if env_note:
+        return env_note, "env", None
+    try:
+        if NOTE_FILE.exists():
+            text = NOTE_FILE.read_text()
+            if text.strip():
+                started = time.time() - (elapsed_s or 0.0)
+                return text, "file", NOTE_FILE.stat().st_mtime <= started
+    except OSError:
+        pass
+    return None, None, None
+
+
 def record(*, argv: list[str], outcome: str, exit_code: int,
            timeout_reason: str, elapsed_s: float, error_head: str,
            log_name: str, power: str = "unknown",
@@ -245,6 +360,9 @@ def _record(argv, outcome, exit_code, timeout_reason,
     # _git_raw, not _git: trailing blank context lines are part of the patch.
     diff = _git_raw(["diff", "--no-color", "-M", base, tree])
     _write_last_attempt(tree, head)
+
+    note, note_source, note_pre_build = _read_note(elapsed_s)
+    note_fields = _parse_note(note) if note else None
 
     build_id = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
 
@@ -293,7 +411,27 @@ def _record(argv, outcome, exit_code, timeout_reason,
         "head_dirty": tree != head_tree,     # False = rebuild of an unchanged tree
         "tree": tree,                        # working-tree content id (integrity / no-op anchor)
         "diff": diff,                        # incremental change vs the previous attempt
+        # WHY this attempt looks the way it does.  The diff is a complete
+        # record of *what* changed and no record at all of the reasoning that
+        # produced it — the diagnosis of the last failure, the hypothesis
+        # being tested, the prediction.  That reasoning is the expensive part
+        # and the only part not reconstructible afterwards: a reader can
+        # re-derive what an edit did, never why it was believed to help, and
+        # never what its author expected to happen.  Null when no note was
+        # left, which is honest; a stale note wrongly attached to a later
+        # attempt would be worse than none, so the file is consumed on use.
+        "note": note,                        # verbatim, exactly as written
+        "note_fields": note_fields,          # parsed sections, for querying
+        "note_predicted": _predicted_outcome(note_fields),   # ok | fail | timeout
+        "note_source": note_source,          # file | env
+        "note_pre_build": note_pre_build,    # False = written after the fact
         "log": log_name,
     }
     with open(BUILDS_JSONL, "a") as fh:
         fh.write(json.dumps(rec) + "\n")
+
+    # Consume the note only now.  Had the append above raised, the note would
+    # stay on disk and attach to the next attempt — a duplicated note is
+    # recoverable, a deleted one is not.
+    if note_source == "file":
+        NOTE_FILE.unlink(missing_ok=True)
