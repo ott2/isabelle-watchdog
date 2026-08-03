@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""bin/build — the recorded way to run the Isabelle build.
+
+    bin/build                                          # no note; records null
+    bin/build -m 'change: swap blast for auto; expect: ok'
+    bin/build -m - < note.md                           # note on stdin
+    bin/build --note-file notes/next.md
+    bin/build --lint -m '...'                          # check the note, do not build
+    bin/build -- -o quick_and_dirty                    # extra isabelle arguments
+
+Why a single command that carries its own note, rather than "write a file,
+then build":
+
+  - **One call, one record.**  The note and the attempt it explains cannot
+    become separated, and a caller cannot do half the protocol.  Write-then-
+    build is two steps with state between them; the failure mode is a build
+    with no note (silent, and the whole point lost) or a pending note that
+    attaches to some later attempt (worse — misattributed reasoning is
+    indistinguishable from the real thing).
+  - **`-m` is the shape every operator already knows.**  It is `git commit
+    -m`.  Nothing has to be learned, and a small model reaches for it without
+    being told twice.
+  - **One permission, one audit line.**  In a harness that gates tool calls by
+    command prefix, `bin/build *` is a single rule.  The file route needs a
+    write permission into the log directory *as well*, and shows up in a
+    transcript as two unrelated actions.
+
+The file route is kept for genuinely long notes, where shell quoting stops
+being pleasant: write $WATCHDOG_LOG_DIR/next-note.md and build with no -m.
+Notes are optional in every form; the default is no note, recorded as null.
+
+This wraps bin/isabelle-watchdog.py, which is where trajectory capture
+actually happens, so any path through the watchdog is recorded whether or not
+it came through here.  Running `isabelle build` directly is the one way to
+lose an attempt: the sources are still captured by the next recorded build
+(the diff is cumulative), but that attempt's outcome, timing and error loci
+are gone.
+"""
+
+import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+WATCHDOG = PROJECT_DIR / "bin" / "isabelle-watchdog.py"
+ISABELLE_DIR = PROJECT_DIR / "isabelle"
+SESSION = "SPSlowdown"
+# The entry point owns this rather than inheriting it.  It was the Makefile's
+# to export, which meant `bin/build` run directly quietly recorded into the
+# recorder's built-in default (t/logs/) — a second corpus, a second instance
+# id, and a build that looks unrecorded because the records are somewhere
+# else.  Configuration belongs to the command, not to one of its wrappers.
+LOG_DIR = PROJECT_DIR / "results" / "isabelle-logs"
+
+sys.path.insert(0, str(PROJECT_DIR / "bin"))
+
+
+def read_note(args) -> str | None:
+    """The note from -m or --note-file, or None to fall back to the pending
+    file (which build_record reads itself)."""
+    if args.note_file:
+        return sys.stdin.read() if args.note_file == "-" \
+            else Path(args.note_file).read_text()
+    if args.note:
+        return sys.stdin.read() if args.note == "-" else args.note
+    return None
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("-m", "--note", metavar="TEXT",
+                    help="reasoning for this attempt; '-' reads stdin. "
+                         "Sections: diagnosis: / change: / expect: / ref:, "
+                         "separable by '; '. Optional.")
+    ap.add_argument("--note-file", metavar="PATH",
+                    help="read the note from a file ('-' for stdin)")
+    ap.add_argument("--lint", action="store_true",
+                    help="report on the note's format and exit without building")
+    ap.add_argument("--session", default=SESSION)
+    ap.add_argument("--dir", default=str(ISABELLE_DIR))
+    ap.add_argument("rest", nargs="*", metavar="...",
+                    help="extra arguments passed through to isabelle build")
+    args = ap.parse_args()
+
+    from build_record import lint_note, NOTE_FILE
+
+    note = read_note(args)
+    if note is None and args.lint:
+        note = NOTE_FILE.read_text() if NOTE_FILE.exists() else ""
+
+    if args.lint:
+        if not (note or "").strip():
+            print("no note to lint", file=sys.stderr)
+            return 2
+        complaints = lint_note(note)
+        for c in complaints:
+            print(f"note: {c}", file=sys.stderr)
+        if not complaints:
+            print("note: ok")
+        return 1 if complaints else 0
+
+    env = dict(os.environ)
+    env.setdefault("WATCHDOG_LOG_DIR", str(LOG_DIR))
+    if note is not None:
+        env["BUILD_NOTE"] = note
+        # A note given here supersedes whatever was pending, and the pending
+        # file must not then be consumed by this build: it belongs to an
+        # attempt that has not happened yet.
+        for c in lint_note(note):
+            print(f"note: {c}", file=sys.stderr)
+
+    cmd = [sys.executable, str(WATCHDOG), "isabelle", "build",
+           "-d", args.dir, "-v", *args.rest, args.session]
+    return subprocess.run(cmd, cwd=PROJECT_DIR, env=env).returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main())
