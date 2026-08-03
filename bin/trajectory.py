@@ -74,11 +74,20 @@ DEFECT CLASSES (`check`):
                      wall-clock dependent and so able to differ on identical
                      input.
 
+ATTRIBUTING AN OUTCOME.  An outcome is only interpretable against the
+conditions that produced it, so each record also carries the watchdog budgets
+in force (`limits`) and the non-source files that changed (`other_changed`).
+`flips` uses both: without them an `ok -> timeout` whose source diff is empty
+is indistinguishable from a proof that got slower, when the cause may have been
+a Makefile edit halving `WALL_TIMEOUT`.
+
 Usage:
     bin/trajectory.py check  [CORPUS] [--repo PATH]
     bin/trajectory.py repair [CORPUS] [--repo PATH] [--apply] [--heuristic]
     bin/trajectory.py replay [CORPUS] [--repo PATH] [--from N] [--to N]
     bin/trajectory.py progress [CORPUS] [--repo PATH]
+    bin/trajectory.py notes  [CORPUS] [--raw] [--loci]
+    bin/trajectory.py flips  [CORPUS]
     bin/trajectory.py extract CORPUS N DEST [--repo PATH]
 """
 
@@ -645,6 +654,68 @@ def cmd_notes(records, repo, args) -> int:
     return 0
 
 
+def limit_changes(prev: dict, rec: dict) -> list[str]:
+    """Watchdog budgets that differ between two attempts, as 'key old->new'."""
+    a, b = prev.get("limits") or {}, rec.get("limits") or {}
+    if not a or not b:
+        return []
+    return [f"{k} {a.get(k)}->{b.get(k)}" for k in sorted(set(a) | set(b))
+            if a.get(k) != b.get(k)]
+
+
+def cmd_flips(records, repo, args) -> int:
+    """Attribute every outcome change to something that actually changed.
+
+    The case this exists for: a build flips ok -> timeout and the theory was
+    never touched, because the Makefile halved WALL_TIMEOUT.  Recorded as
+    outcome plus source diff alone, that is indistinguishable from a proof
+    that got slower, and reads as a regression in the mathematics.  With the
+    budgets in the record it is a one-line attribution."""
+    rows = []
+    for i in range(1, len(records)):
+        prev, rec = records[i - 1], records[i]
+        if prev.get("outcome") == rec.get("outcome"):
+            continue
+        causes = []
+        if (rec.get("diff") or "").strip():
+            thys = sorted(theory_key(p) for p in paths_in_diff(rec["diff"])[0])
+            causes.append("sources: " + ", ".join(thys[:4]))
+        for ch in limit_changes(prev, rec):
+            causes.append("LIMIT " + ch)
+        for path, add, dele in (rec.get("other_changed") or []):
+            causes.append(f"non-source: {path} +{add}/-{dele}")
+        if prev.get("limits") is None or rec.get("limits") is None:
+            causes.append("limits not recorded for one side")
+        rows.append((i, prev, rec, causes))
+
+    if not rows:
+        print(f"{len(records)} records, no outcome changes.")
+        return 0
+
+    for i, prev, rec, causes in rows:
+        head = (f"#{i-1} {prev.get('outcome')} -> #{i} {rec.get('outcome')}"
+                f"  ({rec.get('elapsed_s')}s")
+        lim = rec.get("limits") or {}
+        if rec.get("outcome") == "timeout":
+            head += f", {rec.get('timeout_reason')}"
+            if lim.get("wall_timeout"):
+                head += f", wall {lim['wall_timeout']}s"
+        print(head + ")")
+        if not causes:
+            print("    UNEXPLAINED — no source change, no budget change, "
+                  "nothing else touched")
+        for c in causes:
+            print(f"    {c}")
+        if rec.get("note_fields", {}) and (rec.get("note_fields") or {}).get("diagnosis"):
+            print(f"    note: {rec['note_fields']['diagnosis'].splitlines()[0]}")
+
+    unexplained = sum(1 for *_, c in rows if not c)
+    blamed = sum(1 for *_, c in rows if any(x.startswith("LIMIT") for x in c))
+    print(f"\n{len(rows)} outcome changes; {blamed} involve a budget change, "
+          f"{unexplained} unexplained.")
+    return 0
+
+
 def paths_in_diff(diff: str) -> tuple[set[str], set[str]]:
     """Paths the patch reads (a/ side) and writes (b/ side)."""
     pre, post = set(), set()
@@ -695,6 +766,7 @@ def main() -> int:
                            ("replay", "apply payloads and verify the resulting blobs"),
                            ("progress", "classify whether each edit made progress"),
                            ("notes", "show attached reasoning, scored against outcomes"),
+                           ("flips", "attribute every outcome change to a cause"),
                            ("extract", "write one record's snapshot to a directory")):
         s = sub.add_parser(name, help=helptext)
         s.add_argument("corpus", nargs="?", default=str(DEFAULT_CORPUS))
@@ -731,7 +803,7 @@ def main() -> int:
         records = [json.loads(line) for line in fh if line.strip()]
 
     return {"check": cmd_check, "repair": cmd_repair, "replay": cmd_replay,
-            "progress": cmd_progress, "notes": cmd_notes,
+            "progress": cmd_progress, "notes": cmd_notes, "flips": cmd_flips,
             "extract": cmd_extract}[args.cmd](records, repo, args)
 
 

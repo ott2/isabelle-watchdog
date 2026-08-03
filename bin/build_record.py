@@ -433,18 +433,20 @@ def record(*, argv: list[str], outcome: str, exit_code: int,
            timeout_reason: str, elapsed_s: float, error_head: str,
            log_name: str, power: str = "unknown",
            battery_factor: float = 1.0,
-           error_loci: "list[list[str]] | None" = None) -> None:
+           error_loci: "list[list[str]] | None" = None,
+           limits: "dict | None" = None) -> None:
     """Capture one build attempt.  Never raises into the caller (the
     shared `run_guarded` swallows and warns on any failure)."""
     run_guarded("build-record", lambda: _record(
         argv, outcome, exit_code, timeout_reason,
         elapsed_s, error_head, log_name, power, battery_factor,
-        error_loci or []))
+        error_loci or [], limits))
 
 
 def _record(argv, outcome, exit_code, timeout_reason,
             elapsed_s, error_head, log_name,
-            power="unknown", battery_factor=1.0, error_loci=None) -> None:
+            power="unknown", battery_factor=1.0, error_loci=None,
+            limits=None) -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     instance = _instance_id()
     branch = _git(["rev-parse", "--abbrev-ref", "HEAD"]) or "DETACHED"
@@ -520,6 +522,13 @@ def _record(argv, outcome, exit_code, timeout_reason,
         # of the corpus and the error fields 0.5%, so there is no reason
         # to be sparing with the cheap half.
         "error_loci": [list(x) for x in error_loci] or None,
+        # The watchdog budgets actually in force, effective (post battery
+        # scaling).  Without them an outcome change cannot be attributed: a
+        # build that times out because the theory got slower and one that
+        # times out because the Makefile halved WALL_TIMEOUT record
+        # identically, and the second reads as a proof regression.  The
+        # harness's own parameters are part of the experiment's conditions.
+        "limits": limits,
         "git_head": head,                    # commit built against (episode baseline / mid-flight-commit marker)
         "head_dirty": tree != head_tree,     # False = rebuild of an unchanged tree
         "tree": tree,                        # source snapshot id (integrity / no-op anchor)
