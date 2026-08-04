@@ -257,11 +257,28 @@ def main() -> int:
 
     startup_timeout = activity_timeout + 20
 
+    # The budgets actually in force, recorded with the attempt.  Without them
+    # an outcome change is ambiguous in exactly the case that matters: "the
+    # proof got slower" and "the clock got tighter" produce identical records,
+    # so a Makefile edit that halves WALL_TIMEOUT looks like a regression in
+    # the theory.  These are the EFFECTIVE values, after battery scaling;
+    # divide by battery_factor_applied to recover what was configured.
+    limits = {
+        "activity_timeout": activity_timeout,
+        "wall_timeout": wall_timeout,
+        "startup_timeout": startup_timeout,
+        "loop_progress_threshold": loop_progress_threshold,
+        "build_progress_threshold": build_progress_threshold,
+        "battery_factor_applied": applied_factor,
+    }
+
     # --- Log file setup ---
     script_dir = Path(__file__).resolve().parent
     project_dir = script_dir.parent
-    log_dir = project_dir / "t" / "logs"
-    log_dir.mkdir(exist_ok=True)
+    # WATCHDOG_LOG_DIR lets a project that does not use the `t/` theory-tree
+    # layout say where logs go; unset reproduces the original behaviour exactly.
+    log_dir = Path(os.environ.get("WATCHDOG_LOG_DIR") or (project_dir / "t" / "logs"))
+    log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / os.environ.get("LOG_NAME", "last-build.log")
 
     # --- Start subprocess ---
@@ -417,7 +434,7 @@ def main() -> int:
     # affects the build's exit code.
     _record_attempt(args, outcome, exit_code, timeout_reason,
                     elapsed_s, error_head, power, applied_factor,
-                    error_loci)
+                    error_loci, limits)
 
     if outcome == "timeout":
         _print_summary_timeout(timeout_reason, lines, wall_timeout,
@@ -524,7 +541,8 @@ def _record_attempt(args: list[str], outcome: str, exit_code: int,
                     timeout_reason: str, elapsed_s: float,
                     error_head: str, power: str = "unknown",
                     battery_factor: float = 1.0,
-                    error_loci: "list[list[str]] | None" = None) -> None:
+                    error_loci: "list[list[str]] | None" = None,
+                    limits: "dict | None" = None) -> None:
     """Hand the attempt to build_record under the shared best-effort
     guard, which here additionally covers an `import build_record`
     failure (a guard inside build_record cannot catch its own import),
@@ -536,7 +554,7 @@ def _record_attempt(args: list[str], outcome: str, exit_code: int,
             timeout_reason=timeout_reason, elapsed_s=elapsed_s,
             error_head=error_head, power=power, battery_factor=battery_factor,
             log_name=os.environ.get("LOG_NAME", "last-build.log"),
-            error_loci=error_loci or [],
+            error_loci=error_loci or [], limits=limits,
         )
     common.run_guarded("build-record", go)
 
