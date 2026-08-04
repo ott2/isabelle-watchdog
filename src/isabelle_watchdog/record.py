@@ -82,7 +82,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from guard import run_guarded
+from .guard import run_guarded
 
 def _project_dir() -> Path:
     """The repository whose sources this build is about.

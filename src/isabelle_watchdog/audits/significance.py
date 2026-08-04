@@ -39,27 +39,23 @@ Usage:  bin/oneshot-significance.py [-i BUILDS_JSONL] [-B REPLICATES]
 from __future__ import annotations
 
 import argparse
-import importlib.util
 
-import corpus
 import math
 import random
 import sys
 from pathlib import Path
 
-BIN = Path(__file__).resolve().parent
+# `attempts` and `corpus` are siblings in this package now.  They used to be
+# loaded through importlib.util.spec_from_file_location, because
+# `bin/attempts.py` was a script whose name argparse-dispatched rather than
+# a module anything could import.  Packaging removed that obstacle.
+from .. import attempts as A
+from .. import corpus
+
 PRE_NTR = ["base", "ae", "ar", "art"]
 SEED = 20260729  # fixed so the interval is reproducible run to run
 
 
-def _load_attempts():
-    spec = importlib.util.spec_from_file_location("attempts", BIN / "attempts.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-A = _load_attempts()
 
 
 def trials(log: Path) -> list[tuple[str, str, bool]]:

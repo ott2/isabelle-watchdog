@@ -1,6 +1,12 @@
 __pycache__/
 *.pyc
 
+# Build artefacts
+build/
+dist/
+*.egg-info/
+.venv/
+
 # Corpora live in their own repositories and are symlinked into a project's
 # log directory; nothing a run produces belongs here.
 *.jsonl

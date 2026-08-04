@@ -47,7 +47,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-import corpus
+from . import corpus
 
 # This module was kept deliberately import-free while it lived in an
 # application repo, so that it could survive being split out.  It has now

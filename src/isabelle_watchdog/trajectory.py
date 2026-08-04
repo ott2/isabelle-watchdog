@@ -118,7 +118,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-import corpus
+from . import corpus
 
 HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
 
@@ -820,13 +820,15 @@ FILTERS_DOC_ONLY = ("list", "episodes", "lengths")
 
 
 def _attempts():
-    """bin/attempts.py, whose filename is not importable as a module."""
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "attempts", Path(__file__).resolve().parent / "attempts.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    """The reading and measuring views.
+
+    Was an importlib.spec_from_file_location load, back when `attempts.py`
+    was a script rather than a module.  Loading a file that way gives it no
+    parent package, so its own `from . import corpus` cannot resolve -- the
+    shim outlived the problem it solved and became one.
+    """
+    from . import attempts
+    return attempts
 
 
 def build_parser() -> argparse.ArgumentParser:

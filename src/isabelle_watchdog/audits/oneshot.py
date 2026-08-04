@@ -28,24 +28,19 @@ Usage:  bin/audit-1shot.py [-i BUILDS_JSONL] [--examples N]
 from __future__ import annotations
 
 import argparse
-import importlib.util
 
-import corpus
 import sys
 from pathlib import Path
 
-BIN = Path(__file__).resolve().parent
+# `attempts` and `corpus` are siblings in this package now.  They used to be
+# loaded through importlib.util.spec_from_file_location, because
+# `bin/attempts.py` was a script whose name argparse-dispatched rather than
+# a module anything could import.  Packaging removed that obstacle.
+from .. import attempts as A
+from .. import corpus
 
 
-def _load_attempts():
-    """Import bin/attempts.py as a module (its name is not importable)."""
-    spec = importlib.util.spec_from_file_location("attempts", BIN / "attempts.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
-
-A = _load_attempts()
 
 
 def trajectories(log: Path) -> dict[str, list[tuple[int, bool]]]:

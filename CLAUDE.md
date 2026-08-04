@@ -5,8 +5,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this repository is
 
 The Isabelle build **watchdog** and the **build-trajectory** corpus tooling it
-feeds. A tool repo: nothing here proves anything, and no Isabelle theory, paper
-or prose belongs in it.
+feeds, packaged for PyPI as `isabelle-watchdog` (import `isabelle_watchdog`).
+A tool repo: nothing here proves anything, and no Isabelle theory, paper or
+prose belongs in it.
+
+    src/isabelle_watchdog/     the package
+        watchdog.py            process supervision       -> isabelle-watchdog
+        record.py              trajectory capture
+        corpus.py  guard.py    location/loading; the never-break-a-build guard
+        trajectory.py          the single reader CLI     -> trajectory
+        attempts.py            its reading/measuring views (a module, not a CLI)
+        build.py               note-carrying entry point -> isabelle-build
+        export.py  legacy_convert.py
+        audits/                validation suite for the readers' statistics
+    tests/                     test_error_loci.py
+    scripts/                   shell guards, not packaged
+    docs/logging-design.md     the design doc the code cites by section
 
 Consolidated from the two application projects that grew it, with history —
 `git log` reaches back to 2026-04-23. `~/projects/claudecode/ndtht` contributed
@@ -15,7 +29,8 @@ capture side. Both still hold their own copies; this repo is now the trunk.
 
 **Reading history across the merge:** `git log -- <path>` uses history
 simplification and at the merge follows only the parent whose version won, so
-`isabelle-watchdog.py` looks like 2 commits when it has 22. Use
+`watchdog.py` looks like 2 commits when it has 22 (and `--follow` across the
+`bin/` → `src/` rename). Use
 `git log --full-history -- <path>`.
 
 ## The rule this codebase keeps re-learning
@@ -30,34 +45,42 @@ installed.** Every path bug found during consolidation was one variable:
 | `trajectory --repo` | `<tool>` | tool repo *is* a git repo, so the guard passed and `check` reported everything `unverified` |
 | `build_record.PROJECT_DIR` | `<tool>` | **recorded diffs of the tooling instead of the proof** |
 | `build.SESSION` | `"SPSlowdown"` | only ever right for 43sp |
+| `trajectory._attempts()` | `spec_from_file_location` | no parent package, so `attempts`' own relative import failed |
 
 The `build_record` one is the instructive failure. It did not error — it wrote
 a faithful, well-formed diff of the wrong repository, and `trajectory.py check`
 then certified every such record `sound`, because the payload genuinely
 regenerates from the trees it names. A corpus of perfectly-verified diffs of
 the wrong project is harder to notice than a crash and worse to inherit.
-`bin/corpus.py` states the rule; anything new that needs a project path should
-go through `corpus.project_root()`.
+`corpus.py` states the rule; anything new that needs a project path should go
+through `corpus.project_root()`. The one path that *is* legitimately
+`__file__`-relative is a reference to a sibling module — that names the tool,
+which is the question being asked.
 
 ## Architecture
 
 Four layers. Understanding the stack means reading all four.
 
 ```
-bin/build                one call: carries the note AND runs the build
-  └─ isabelle-watchdog.py    supervises `isabelle build`; decides ok|fail|timeout
-       └─ build_record.record(...)   appends one JSON line per attempt
-            └─ builds.jsonl          the corpus (a symlink to a separate repo)
-                 └─ trajectory.py    the single reader; never writes
+build.py                 one call: carries the note AND runs the build
+  └─ watchdog.py             supervises `isabelle build`; decides ok|fail|timeout
+       └─ record.record(...)      appends one JSON line per attempt
+            └─ builds.jsonl       the corpus (a symlink to a separate repo)
+                 └─ trajectory.py the single reader; never writes
 ```
 
-`bin/guard.py` sits beside the top two: `run_guarded` swallows any failure in
-capture and warns, so instrumentation can never change a build's exit code.
-Two call sites guard deliberately different scopes — `build_record` guards its
-record logic, the watchdog additionally guards the `import build_record` that a
-guard inside `build_record` cannot cover. Do not collapse them into one.
+`build.py` reaches the watchdog with `python -m isabelle_watchdog.watchdog`
+rather than a path, so the subprocess uses the installed copy. The subprocess
+boundary itself stays: the watchdog installs signal handlers and reaps a
+process tree, which is not something to run inside a caller's interpreter.
 
-### 1. `isabelle-watchdog.py` — process supervision
+`guard.py` sits beside the top two: `run_guarded` swallows any failure in
+capture and warns, so instrumentation can never change a build's exit code.
+Two call sites guard deliberately different scopes — `record` guards its own
+record logic, the watchdog additionally guards the `import` itself, which a
+guard inside `record` cannot cover. Do not collapse them into one.
+
+### 1. `watchdog.py` — process supervision
 
 Three independent kill conditions, each a distinct diagnosis: **activity** (no
 stdout for `WATCHDOG_TIMEOUT`), **wall** (`WALL_TIMEOUT` total), and **loop**
@@ -81,7 +104,7 @@ time rather than bypassing the budget, so the cost-regression signal survives.
 
 Exit codes: `0` success, `124` watchdog kill, otherwise the child's.
 
-### 2. `build_record.py` — trajectory capture
+### 2. `record.py` — trajectory capture
 
 One JSON line per attempt. Design commitments, all load-bearing:
 
@@ -140,14 +163,14 @@ An **episode** is a maximal run of attempts ending in a success. Boundaries are
 successes, **not** commits — a mid-flight commit is just an attempt whose
 `git_head` moved.
 
-### 4. `bin/build` — the entry point
+### 4. `build.py` — the entry point
 
 One call carrying the note and running the build, `git commit -m` shaped. The
 alternative (write a note file, then build) is two steps with state between
 them; its failure modes are a build with no note or — worse — a pending note
 attaching to a later attempt, since misattributed reasoning is
 indistinguishable from the real thing. It also collapses to a single permission
-rule (`bin/build *`) in a harness that gates by command prefix.
+rule (`isabelle-build *`) in a harness that gates by command prefix.
 
 Capture happens in the *watchdog*, so any path through it is recorded. Running
 `isabelle build` directly is the one way to lose an attempt: the sources are
@@ -173,7 +196,7 @@ confusing Isabelle error seconds later, a missing one is a clear message now.
 | `BUILD_NOTE` / `BUILD_NOTE_FILE` | — | note text / pending-note path |
 | `TRAJECTORY_CORPUS` | — | read a specific corpus, ignoring the above |
 
-Corpus resolution (`bin/corpus.py`): `$TRAJECTORY_CORPUS`, then
+Corpus resolution (`corpus.py`): `$TRAJECTORY_CORPUS`, then
 `$WATCHDOG_LOG_DIR/builds.jsonl` — the same variable the writers honour, so a
 reader lands where the writer wrote — then the known layouts (`t/logs`,
 `results/isabelle-logs`) under the current project. Several matches is an
@@ -183,29 +206,47 @@ error, not a silent preference.
 
 ```sh
 # build (from the project being built, not from here)
-BUILD_SESSION=MySession bin/build -m 'diagnosis: X; change: Y; expect: ok'
-bin/build --lint -m '...'              # check the note, do not build
-bin/build -- -o quick_and_dirty        # extra args to isabelle build
+BUILD_SESSION=MySession isabelle-build -m 'diagnosis: X; change: Y; expect: ok'
+isabelle-build --lint -m '...'         # check the note, do not build
+isabelle-build -- -o quick_and_dirty   # extra args to isabelle build
 
 # read the corpus — CORPUS is optional everywhere
-bin/trajectory.py --help               # all thirteen, grouped
-bin/trajectory.py check                # regenerate every payload, compare
-bin/trajectory.py repair --apply [--heuristic]
-bin/trajectory.py replay [--from N] [--to N]
-bin/trajectory.py extract N DEST       # materialise attempt N's sources
-bin/trajectory.py lengths --fit --by-project
-bin/trajectory.py classify BUILD_ID -v
+trajectory --help                      # all thirteen, grouped
+trajectory check                       # regenerate every payload, compare
+trajectory repair --apply [--heuristic]
+trajectory replay [--from N] [--to N]
+trajectory extract N DEST              # materialise attempt N's sources
+trajectory lengths --fit --by-project
+trajectory classify BUILD_ID -v
 ```
 
-`bin/check-snapshot-untracked.sh` is the regression guard for the capture
+`scripts/check-snapshot-untracked.sh` is the regression guard for the capture
 allowlist and checks **both** directions — build-relevant source gets in,
 scratch and gitignored paths stay out. It is the closest thing to a test suite
 the capture layer has; its probe paths are still ndtht-shaped (`t/base/...`).
 
-The six `audit-*.py` / `recount-lengths.py` / `oneshot-significance.py` scripts
-are the validation suite for the readers: each interrogates one measurement
-decision (is the 1-shot rate measuring search or bookkeeping? is a timeout a
-proof event or load?). They import `attempts.py` by path via `importlib`.
+`audits/` is the validation suite for the readers: each module interrogates one
+measurement decision (is the 1-shot rate measuring search or bookkeeping? is a
+timeout a proof event or load?) and re-derives the quantity a second way, so
+agreement is evidence rather than tautology. Run one with
+`python -m isabelle_watchdog.audits.<name> -i CORPUS`.
+
+### Packaging
+
+`hatchling`, src-layout, version single-sourced from
+`src/isabelle_watchdog/__init__.py` (`[tool.hatch.version]`). No runtime
+dependencies, deliberately: this runs beside a build, so anything it imports is
+something that can break one.
+
+```sh
+python3 -m venv /tmp/v && /tmp/v/bin/pip install .   # or -e .
+/tmp/v/bin/trajectory --help
+```
+
+**Test against an install, not `PYTHONPATH=src`.** Two failures showed up only
+under a real install and would have passed otherwise: `trajectory._attempts()`
+loading `attempts.py` via `spec_from_file_location` (no parent package, so its
+own relative import failed), and a `readme = "README.md"` that did not exist.
 
 ### Verifying a change
 
@@ -235,8 +276,9 @@ backup and sharing story from the tools.
   episode labels `tooling` or `none`. This is why the 43sp corpus attributes
   nothing. Generalising it moves published numbers, so it needs its own change
   with both corpora re-measured.
-- `bin/check-snapshot-untracked.sh` probes `t/base/...` paths.
-- `bin/convert-legacy-trajectory.py` was a one-shot migration off the git-chain
+- `scripts/check-snapshot-untracked.sh` probes `t/base/...` paths and is not
+  yet wired into `tests/`.
+- `legacy_convert.py` was a one-shot migration off the git-chain
   prototype; kept as a record of how the initial dataset was produced, not on
   any live path.
 

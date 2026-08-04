@@ -72,7 +72,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-import guard  # run_guarded — capture must never break the build
+from . import guard  # run_guarded — capture must never break the build
 
 # ---------------------------------------------------------------------------
 # Config
@@ -549,13 +549,17 @@ def _record_attempt(args: list[str], outcome: str, exit_code: int,
                     battery_factor: float = 1.0,
                     error_loci: "list[list[str]] | None" = None,
                     limits: "dict | None" = None) -> None:
-    """Hand the attempt to build_record under the shared best-effort
-    guard, which here additionally covers an `import build_record`
-    failure (a guard inside build_record cannot catch its own import),
-    so a missing/broken capture module can never cost a build."""
+    """Hand the attempt to the recorder under the shared best-effort guard,
+    which here additionally covers the `import` itself (a guard inside
+    `record` cannot catch its own import failure), so a missing or broken
+    capture module can never cost a build.
+
+    The import stays inside the guard, and inside the function, for that
+    reason -- hoisting it to the top of the module would put it outside the
+    guard's reach and make an unimportable recorder fatal to every build."""
     def go() -> None:
-        import build_record
-        build_record.record(
+        from . import record as recorder
+        recorder.record(
             argv=args, outcome=outcome, exit_code=exit_code,
             timeout_reason=timeout_reason, elapsed_s=elapsed_s,
             error_head=error_head, power=power, battery_factor=battery_factor,

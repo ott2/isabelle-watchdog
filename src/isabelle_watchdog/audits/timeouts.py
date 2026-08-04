@@ -49,26 +49,22 @@ Usage:  bin/audit-timeouts.py [-i BUILDS_JSONL]
 from __future__ import annotations
 
 import argparse
-import importlib.util
 
-import corpus
 import re
 import statistics
 import sys
 from collections import Counter
 from pathlib import Path
 
-BIN = Path(__file__).resolve().parent
+# `attempts` and `corpus` are siblings in this package now.  They used to be
+# loaded through importlib.util.spec_from_file_location, because
+# `bin/attempts.py` was a script whose name argparse-dispatched rather than
+# a module anything could import.  Packaging removed that obstacle.
+from .. import attempts as A
+from .. import corpus
 
 
-def _load(name: str):
-    spec = importlib.util.spec_from_file_location(name, BIN / f"{name}.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
-
-A = _load("attempts")
 # `attempts.project()` labels an episode with the development it belongs to,
 # and emits three labels that are not developments: work on the tooling, work
 # it could not attribute, and work spanning several.  A load audit is about

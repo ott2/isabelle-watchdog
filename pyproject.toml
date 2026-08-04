@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "isabelle-watchdog"
+dynamic = ["version"]
+description = "Isabelle build watchdog, and the build-trajectory corpus it records"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Andras Salamon" }]
+keywords = ["isabelle", "theorem-proving", "build", "watchdog", "trajectory", "dataset"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Software Development :: Build Tools",
+]
+
+# No runtime dependencies, deliberately.  This runs beside a build, and
+# anything it pulls in is something that can break one.  The only external
+# tool it needs is `git`, which the projects it records already require.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/salamon/isabelle-watchdog"
+Source = "https://github.com/salamon/isabelle-watchdog"
+
+[project.scripts]
+isabelle-watchdog = "isabelle_watchdog.watchdog:main"
+isabelle-build = "isabelle_watchdog.build:main"
+trajectory = "isabelle_watchdog.trajectory:main"
+
+[tool.hatch.version]
+path = "src/isabelle_watchdog/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/isabelle_watchdog"]
+
+[tool.hatch.build.targets.sdist]
+# The design document is the reason half this code looks the way it does --
+# the module comments cite it by section number -- so it ships with the
+# source rather than living only in the repository.
+include = ["src/", "docs/", "scripts/", "README.md", "LICENSE"]

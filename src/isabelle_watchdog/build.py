@@ -43,13 +43,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Where the tooling is, which is genuinely `__file__`-relative -- this is the
-# one path that should be, because it names a sibling script rather than
-# anything about the project being built.
-TOOL_DIR = Path(__file__).resolve().parent
-WATCHDOG = TOOL_DIR / "isabelle-watchdog.py"
-
-sys.path.insert(0, str(TOOL_DIR))
 
 
 def project_dir() -> Path:
@@ -125,7 +118,7 @@ def main() -> int:
     log_dir = os.environ.get("WATCHDOG_LOG_DIR") or str(project / "t" / "logs")
     os.environ.setdefault("WATCHDOG_LOG_DIR", log_dir)
 
-    from build_record import lint_note, NOTE_FILE
+    from .record import lint_note, NOTE_FILE
 
     note = read_note(args)
     if note is None and args.lint:
@@ -152,7 +145,13 @@ def main() -> int:
         for c in lint_note(note):
             print(f"note: {c}", file=sys.stderr)
 
-    cmd = [sys.executable, str(WATCHDOG), "isabelle", "build",
+    # `-m` rather than a path to the script: the watchdog is a module in this
+    # package now, and asking Python to resolve it means the subprocess uses
+    # the same installed copy as this process rather than whatever sits next
+    # to __file__.  The subprocess boundary itself stays -- the watchdog
+    # installs signal handlers and reaps a process tree, which is not
+    # something to run inside a caller's interpreter.
+    cmd = [sys.executable, "-m", "isabelle_watchdog.watchdog", "isabelle", "build",
            "-d", args.dir, "-v", *args.rest, args.session]
     return subprocess.run(cmd, cwd=project, env=env).returncode
 
