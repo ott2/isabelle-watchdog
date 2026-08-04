@@ -76,8 +76,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-PROJECT_DIR = Path(__file__).resolve().parent.parent
-BUILDS_JSONL = PROJECT_DIR / "t" / "logs" / "builds.jsonl"
+import corpus
+
+# This module was kept deliberately import-free while it lived in an
+# application repo, so that it could survive being split out.  It has now
+# been split out, and `corpus` travels with it; the property that still
+# matters -- reading any log with no git object store -- is unaffected.
 
 # outcome -> terminal-glyph (kept ASCII; the dataset itself is the point)
 MARK = {"ok": "OK  ", "fail": "FAIL", "timeout": "TIME"}
@@ -87,18 +91,6 @@ CLASS_MARK = {"code": "code", "doc": "doc ", "none": "--  "}
 
 
 # ---------------------------------------------------------------- loading
-
-def _load(path: Path) -> list[dict]:
-    if not path.exists():
-        print(f"no attempts recorded yet ({path} absent)", file=sys.stderr)
-        return []
-    out = []
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if line:
-            out.append(json.loads(line))
-    return out
-
 
 def _trunc(s: str, n: int) -> str:
     return s if s is None or len(s) <= n else s[: n - 1] + "…"
@@ -806,46 +798,10 @@ def cmd_classify(recs: list[dict], build_id: str, verbose: bool) -> None:
         print("  (empty delta — a rebuild of an unchanged tree)")
 
 
-def _episodes(recs: list[dict]) -> list[list[dict]]:
-    """Maximal runs of non-ok attempts closed by an ok (§12.4).  A trailing
-    run with no closing ok is returned as an open episode.
-
-    Segmentation is chronological, **not** per working copy, even on a
-    pooled log (several instances unioned by concatenation,
-    logging-design.md §16.5).  That is deliberate: worktrees are used
-    sequentially here, so an unfinished run on one instance genuinely
-    continues on the next — in the main→stac/wip pool the handoff shows the
-    same session failing at the same `by` line on either side of the seam,
-    one repair, two working copies.  Splitting by instance would cut that
-    trajectory in half.
-
-    The assumption that fails is *concurrent* instances, whose records
-    interleave; then a run really would splice unrelated work.
-    `interleaving(recs)` measures it, and the views warn when it is
-    non-zero.
-    """
-    episodes: list[list[dict]] = []
-    cur: list[dict] = []
-    for rec in recs:
-        cur.append(rec)
-        if rec["outcome"] == "ok":
-            episodes.append(cur)
-            cur = []
-    if cur:
-        episodes.append(cur)
-    return episodes
-
-
-def interleaving(recs: list[dict]) -> tuple[int, int]:
-    """(instances, interleave excess) for a possibly-pooled log.
-
-    Sequential handoff between n instances costs exactly n-1 switches
-    between consecutive records; anything beyond that is genuine
-    concurrency, which chronological episode segmentation cannot model.
-    """
-    ids = [r.get("instance_id") for r in recs]
-    switches = sum(1 for a, b in zip(ids, ids[1:]) if a != b)
-    return len(set(ids)), max(0, switches - (len(set(ids)) - 1))
+# Episode segmentation and the pooled-log interleave check are shared with
+# the integrity frontend, so they have exactly one definition; see corpus.py.
+_episodes = corpus.episodes
+interleaving = corpus.interleaving
 
 
 def cmd_episodes(recs: list[dict], n: int, include_all: bool,
@@ -1201,7 +1157,9 @@ def main() -> int:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("-i", "--input", metavar="FILE",
                         default=argparse.SUPPRESS,
-                        help=f"builds.jsonl to read (default {BUILDS_JSONL})")
+                        help="builds.jsonl to read (default: $TRAJECTORY_CORPUS, "
+                             "else $WATCHDOG_LOG_DIR/builds.jsonl, else the "
+                             "known layouts under the current project)")
     common.add_argument("--all", action="store_true",
                         default=argparse.SUPPRESS,
                         help="include doc-only deltas (default: code only)")
@@ -1260,13 +1218,15 @@ def main() -> int:
     ns = p.parse_args()
     given = getattr(ns, "input", None)
     include_all = getattr(ns, "all", False)
-    path = Path(given) if given else BUILDS_JSONL
-    if given and not path.exists():
-        print(f"FAIL: no such build log: {path}", file=sys.stderr)
+    try:
+        path = corpus.resolve(given)
+    except corpus.CorpusError as e:
+        print(f"FAIL: {e}", file=sys.stderr)
         return 1
-    recs = _load(path)
+    recs = corpus.load(path)
     if not recs:
-        return 1 if given else 0
+        print(f"no attempts recorded yet ({path} is empty)", file=sys.stderr)
+        return 1
 
     if ns.cmd == "show":
         cmd_show(recs, ns.build_id, ns.full)

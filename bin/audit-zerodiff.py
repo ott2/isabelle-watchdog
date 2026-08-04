@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+
+import corpus
 import re
 import sys
 from collections import Counter
@@ -57,9 +59,16 @@ def era(rec: dict) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("-i", "--input", default=str(A.BUILDS_JSONL))
+    ap.add_argument("-i", "--input", default=None)
     ns = ap.parse_args()
-    recs = A._load(Path(ns.input))
+    # Resolve once, here: the default is not a constant any more
+    # (bin/corpus.py -- it depends on where the operator is standing).
+    try:
+        ns.input = corpus.resolve(ns.input)
+    except corpus.CorpusError as e:
+        print(f'FAIL: {e}', file=sys.stderr)
+        return 1
+    recs = corpus.load(corpus.resolve(ns.input))
     eps = A._episodes(recs)
 
     print(f"records: {len(recs)} in {len(eps)} episodes "

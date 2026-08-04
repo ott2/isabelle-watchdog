@@ -50,6 +50,8 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+
+import corpus
 import re
 import statistics
 import sys
@@ -67,7 +69,24 @@ def _load(name: str):
 
 
 A = _load("attempts")
-PROOF_SESSIONS = ["base", "ae", "ar", "ntr", "art"]
+# `attempts.project()` labels an episode with the development it belongs to,
+# and emits three labels that are not developments: work on the tooling, work
+# it could not attribute, and work spanning several.  A load audit is about
+# proof sessions, so those three come out.
+SYNTHETIC_SESSIONS = {"tooling", "none", "mixed"}
+
+
+def proof_sessions(eps) -> list[str]:
+    """The developments this corpus actually contains.
+
+    Was the literal list ["base", "ae", "ar", "ntr", "art"] -- ndtht's five.
+    That is a correct answer to "which sessions are proof work" only in ndtht;
+    anywhere else it selects nothing, and the audit then reports on an empty
+    population and divides by zero rather than saying so.  Deriving it keeps
+    ndtht's five (they are exactly the non-synthetic labels its corpus
+    carries) and makes every other corpus work.
+    """
+    return sorted({s for s, _ in eps} - SYNTHETIC_SESSIONS)
 
 
 def episodes(log: Path) -> list[tuple[str, list[dict]]]:
@@ -79,7 +98,7 @@ def episodes(log: Path) -> list[tuple[str, list[dict]]]:
     is auditing would be measuring a different corpus and saying nothing.
     """
     out = []
-    for ep in A._episodes(A._load(log)):
+    for ep in A._episodes(corpus.load(log)):
         if ep[-1]["outcome"] != "ok":
             continue
         if A.attempt_length(ep) is None or not A.proof_bearing(ep):
@@ -97,15 +116,30 @@ def rate(lengths: list[int]) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("-i", "--input", default=str(A.BUILDS_JSONL))
+    ap.add_argument("-i", "--input", default=None)
     ns = ap.parse_args()
+    # Resolve once, here: the default is not a constant any more
+    # (bin/corpus.py -- it depends on where the operator is standing).
+    try:
+        ns.input = corpus.resolve(ns.input)
+    except corpus.CorpusError as e:
+        print(f'FAIL: {e}', file=sys.stderr)
+        return 1
     log = Path(ns.input)
-    eps = [(s, e) for s, e in episodes(log) if s in PROOF_SESSIONS]
+    all_labelled = episodes(log)
+    sessions = proof_sessions(all_labelled)
+    if not sessions:
+        print(f"no proof sessions in {log}: every episode is labelled "
+              f"{'/'.join(sorted(SYNTHETIC_SESSIONS))}.\n"
+              "This audit is about load across developments, so there is "
+              "nothing here to report on.", file=sys.stderr)
+        return 1
+    eps = [(s, e) for s, e in all_labelled if s in sessions]
 
     print("1. outcome mix among non-green attempts\n")
     print("   sess |  fail  timeout  timeout-share | runs with a timeout")
     print("   -----+-------------------------------+--------------------")
-    for sess in PROOF_SESSIONS:
+    for sess in sessions:
         mine = [e for s, e in eps if s == sess]
         c = Counter(r["outcome"] for e in mine for r in e)
         bad = c["fail"] + c["timeout"]
@@ -121,7 +155,7 @@ def main() -> int:
           "runs with any timeout dropped")
     print("   -----+---------------+--------------------------+"
           "------------------------------")
-    for sess in PROOF_SESSIONS:
+    for sess in sessions:
         mine = [e for s, e in eps if s == sess]
         base = [len(e) for e in mine]
         # A timeout is not evidence the edit was wrong: charge nothing for it.
@@ -132,7 +166,7 @@ def main() -> int:
         print(f"   {sess:4} | {rate(base)} | {rate(notime)}"
               f"            | {rate(clean)}")
 
-    pre = [e for s, e in eps if s in PROOF_SESSIONS and s != "ntr"]
+    pre = [e for s, e in eps if s in sessions and s != "ntr"]
     ntr = [e for s, e in eps if s == "ntr"]
     for name, group in (("pre-ntr", pre), ("ntr", ntr)):
         base = [len(e) for e in group]
@@ -146,7 +180,7 @@ def main() -> int:
     print("\n3. load conditions\n")
     print("   sess | on battery | mean elapsed | instances | concurrent excess")
     print("   -----+------------+--------------+-----------+------------------")
-    for sess in PROOF_SESSIONS:
+    for sess in sessions:
         recs = [r for s, e in eps if s == sess for r in e]
         if not recs:
             continue
@@ -161,7 +195,7 @@ def main() -> int:
     print("   Also the timeout reasons, since `loop_progress` is divergent")
     print("   search — the case `Failed to finish proof` is often mistaken")
     print("   for, and it is already counted separately.\n")
-    for sess in PROOF_SESSIONS:
+    for sess in sessions:
         rs = [r for s, e in eps if s == sess for r in e]
         c = Counter(r.get("timeout_reason") for r in rs
                     if r["outcome"] == "timeout")
@@ -171,7 +205,7 @@ def main() -> int:
                   f"  ({100 * c['loop_progress'] / len(rs):4.1f}% of "
                   f"{len(rs):3} attempts divergent)")
     print()
-    for sess in PROOF_SESSIONS:
+    for sess in sessions:
         fails = [r["elapsed_s"] for s, e in eps if s == sess
                  for r in e if r["outcome"] == "fail"]
         tos = [r["elapsed_s"] for s, e in eps if s == sess
@@ -196,7 +230,7 @@ def main() -> int:
           "\n   initial-method.\n")
     print("   sess |  fail | finish-proof | initial-method | unmatched")
     print("   -----+-------+--------------+----------------+----------")
-    for sess in PROOF_SESSIONS:
+    for sess in sessions:
         heads = [(r.get("error_head") or "").lower()
                  for s, e in eps if s == sess
                  for r in e if r["outcome"] == "fail"]
@@ -222,6 +256,9 @@ def main() -> int:
           "\n   rises with length for free.\n")
     all_eps = [e for _, e in eps]
     recs = [r for e in all_eps for r in e]
+    if not recs:
+        print("   no attempts in the selected sessions.\n")
+        return 0
     p = sum(1 for r in recs
             if r.get("timeout_reason") == "loop_progress") / len(recs)
     print(f"   per-attempt loop_progress rate overall: {100 * p:.2f}%\n")

@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+
+import corpus
 import sys
 from pathlib import Path
 
@@ -55,7 +57,7 @@ def trajectories(log: Path) -> dict[str, list[tuple[int, bool]]]:
     was lost.  This tool re-derives the *rate* under the filter and without
     it; it does not re-implement either rule."""
     by: dict[str, list[tuple[int, bool]]] = {}
-    for ep in A._episodes(A._load(log)):
+    for ep in A._episodes(corpus.load(log)):
         if ep[-1]["outcome"] != "ok":
             continue
         k = A.attempt_length(ep)
@@ -71,11 +73,18 @@ def pct(n: int, d: int) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("-i", "--input", default=str(A.BUILDS_JSONL),
+    ap.add_argument("-i", "--input", default=None,
                     help="builds.jsonl to read")
     ap.add_argument("--examples", type=int, default=0, metavar="N",
                     help="show N no-theory trajectories booked against a session")
     ns = ap.parse_args()
+    # Resolve once, here: the default is not a constant any more
+    # (bin/corpus.py -- it depends on where the operator is standing).
+    try:
+        ns.input = corpus.resolve(ns.input)
+    except corpus.CorpusError as e:
+        print(f'FAIL: {e}', file=sys.stderr)
+        return 1
 
     by_sess = trajectories(Path(ns.input))
 
@@ -102,7 +111,7 @@ def main() -> int:
         print(f"\n  no-theory trajectories booked against a session "
               f"(first {ns.examples}):")
         shown = 0
-        for ep in A._episodes(A._load(Path(ns.input))):
+        for ep in A._episodes(corpus.load(corpus.resolve(ns.input))):
             if ep[-1]["outcome"] != "ok":
                 continue
             if not sum(1 for r in ep if A.rec_class(r) == "code"):

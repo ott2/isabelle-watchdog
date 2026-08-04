@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+
+import corpus
 import sys
 from collections import Counter
 from pathlib import Path
@@ -94,10 +96,17 @@ def rung(ep: list[dict]) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("-i", "--input", default=str(A.BUILDS_JSONL))
+    ap.add_argument("-i", "--input", default=None)
     ns = ap.parse_args()
+    # Resolve once, here: the default is not a constant any more
+    # (bin/corpus.py -- it depends on where the operator is standing).
+    try:
+        ns.input = corpus.resolve(ns.input)
+    except corpus.CorpusError as e:
+        print(f'FAIL: {e}', file=sys.stderr)
+        return 1
 
-    recs = A._load(Path(ns.input))
+    recs = corpus.load(corpus.resolve(ns.input))
     if not recs:
         return 1
 

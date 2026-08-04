@@ -40,6 +40,8 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+
+import corpus
 import math
 import random
 import sys
@@ -67,7 +69,7 @@ def trials(log: Path) -> list[tuple[str, str, bool]]:
     `attempts.proof_bearing`, so this agrees with the table by construction
     rather than by a second copy of the rule that can drift from it."""
     out = []
-    for ep in A._episodes(A._load(log)):
+    for ep in A._episodes(corpus.load(log)):
         if ep[-1]["outcome"] != "ok":
             continue
         k = A.attempt_length(ep)
@@ -116,9 +118,16 @@ def day_bootstrap(rows: list, B: int) -> list[float]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("-i", "--input", default=str(A.BUILDS_JSONL))
+    ap.add_argument("-i", "--input", default=None)
     ap.add_argument("-B", type=int, default=10000, help="bootstrap replicates")
     ns = ap.parse_args()
+    # Resolve once, here: the default is not a constant any more
+    # (bin/corpus.py -- it depends on where the operator is standing).
+    try:
+        ns.input = corpus.resolve(ns.input)
+    except corpus.CorpusError as e:
+        print(f'FAIL: {e}', file=sys.stderr)
+        return 1
 
     rows = trials(Path(ns.input))
     pre = [r for r in rows if r[0] in PRE_NTR]

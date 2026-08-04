@@ -102,10 +102,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+import corpus
+
 HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
 
-PROJECT_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_CORPUS = PROJECT_DIR / "results" / "isabelle-logs" / "builds.jsonl"
+# The subcommands that read payloads back out of the object store, and so
+# genuinely need `--repo`.  The rest read the corpus alone; requiring a
+# repository of them made a reader of a shared or archived corpus supply one
+# it had no reason to have.
+NEEDS_REPO = ("check", "repair", "replay", "extract")
 
 NOTE_REGENERATED = ("payload restored from a re-diff of the recorded base and "
                     "snapshot tree objects; only the lost tail was appended")
@@ -365,47 +370,47 @@ def cmd_repair(records, repo, args) -> int:
     # resolve() first: a corpus is usually a symlink into a trajectory repo, and
     # writing through the link would replace the *link* with a regular file and
     # orphan the real one.  The atomic rename below must target the real path.
-    corpus = Path(args.corpus).resolve()
+    corpus_path = Path(args.corpus).resolve()
 
     # Corpora normally live in their own git repo, which is a better backup than
     # a .bak file -- so only fall back to one when git cannot serve as the net.
-    net = git_safety_net(corpus)
+    net = git_safety_net(corpus_path)
     backup = None
     if net is None or args.backup:
-        backup = corpus.with_suffix(".jsonl.bak")
-        shutil.copy2(corpus, backup)
+        backup = corpus_path.with_suffix(".jsonl.bak")
+        shutil.copy2(corpus_path, backup)
 
-    tmp = corpus.with_suffix(".jsonl.new")
+    tmp = corpus_path.with_suffix(".jsonl.new")
     with open(tmp, "w") as fh:
         for rec in records:
             fh.write(json.dumps(rec) + "\n")
-    tmp.replace(corpus)
+    tmp.replace(corpus_path)
 
-    print(f"\nwrote {corpus}\n  {len(changed)} records repaired")
+    print(f"\nwrote {corpus_path}\n  {len(changed)} records repaired")
     if backup:
         print(f"  backup at {backup}")
     else:
         # Relative to the repo ROOT, not the corpus's own directory: a corpus
         # usually sits in a subdirectory, so the bare filename would not resolve.
         try:
-            rel = corpus.relative_to(net)
+            rel = corpus_path.relative_to(net)
         except ValueError:
-            rel = corpus
+            rel = corpus_path
         print(f"  revert with: git -C {net} checkout -- {rel}")
     return 0
 
 
-def git_safety_net(corpus: Path) -> Path | None:
-    """The repo root that can restore `corpus`, or None if git cannot.
+def git_safety_net(corpus_path: Path) -> Path | None:
+    """The repo root that can restore `corpus_path`, or None if git cannot.
 
     Requires the file to be both tracked *and* unmodified: a tracked file that
     is already dirty has a committed state that is not the pre-repair state, so
     reverting to it would discard whatever else is pending."""
-    d = corpus.parent
-    if git(d, ["ls-files", "--error-unmatch", corpus.name]).returncode != 0:
+    d = corpus_path.parent
+    if git(d, ["ls-files", "--error-unmatch", corpus_path.name]).returncode != 0:
         return None
-    if git(d, ["diff", "--quiet", "--", corpus.name]).returncode != 0:
-        print(f"note: {corpus.name} is already modified relative to git, so the "
+    if git(d, ["diff", "--quiet", "--", corpus_path.name]).returncode != 0:
+        print(f"note: {corpus_path.name} is already modified relative to git, so the "
               "committed\n      copy is not the pre-repair state -- writing a .bak too.")
         return None
     root = git(d, ["rev-parse", "--show-toplevel"]).stdout.strip()
@@ -769,9 +774,15 @@ def main() -> int:
                            ("flips", "attribute every outcome change to a cause"),
                            ("extract", "write one record's snapshot to a directory")):
         s = sub.add_parser(name, help=helptext)
-        s.add_argument("corpus", nargs="?", default=str(DEFAULT_CORPUS))
-        s.add_argument("--repo", default=str(PROJECT_DIR),
-                       help="source git repository the diffs came from")
+        s.add_argument("corpus", nargs="?", default=None,
+                       help="builds.jsonl to read (default: $TRAJECTORY_CORPUS, "
+                            "else $WATCHDOG_LOG_DIR/builds.jsonl, else the "
+                            "known layouts under the current project)")
+        if name in NEEDS_REPO:
+            s.add_argument("--repo", default=None,
+                           help="source git repository the diffs came from "
+                                "(default: the git top level of the current "
+                                "directory)")
         if name == "repair":
             s.add_argument("--apply", action="store_true", help="write the corpus back")
             s.add_argument("--heuristic", action="store_true",
@@ -791,16 +802,19 @@ def main() -> int:
             s.add_argument("dest", help="destination directory")
     args = ap.parse_args()
 
-    corpus, repo = Path(args.corpus), Path(args.repo).expanduser()
-    if not corpus.exists():
-        print(f"no corpus at {corpus}", file=sys.stderr)
-        return 2
-    if not (repo / ".git").exists():
-        print(f"{repo} is not a git repository (use --repo)", file=sys.stderr)
+    try:
+        path = corpus.resolve(args.corpus)
+        repo = (corpus.resolve_repo(getattr(args, "repo", None))
+                if args.cmd in NEEDS_REPO else None)
+    except corpus.CorpusError as e:
+        print(f"FAIL: {e}", file=sys.stderr)
         return 2
 
-    with open(corpus) as fh:
-        records = [json.loads(line) for line in fh if line.strip()]
+    # `repair` re-derives the path from args so it can resolve() symlinks
+    # itself; hand it the resolved one rather than the None it may have been
+    # given.
+    args.corpus = str(path)
+    records = corpus.load(path)
 
     return {"check": cmd_check, "repair": cmd_repair, "replay": cmd_replay,
             "progress": cmd_progress, "notes": cmd_notes, "flips": cmd_flips,

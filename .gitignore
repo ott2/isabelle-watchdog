@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+# Corpora live in their own repositories and are symlinked into a project's
+# log directory; nothing a run produces belongs here.
+*.jsonl
+*.jsonl.bak
+*.jsonl.new

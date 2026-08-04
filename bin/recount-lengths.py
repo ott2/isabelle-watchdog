@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+
+import corpus
 import math
 import sys
 from pathlib import Path
@@ -103,15 +105,22 @@ def mean(xs: list[int]) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("-i", "--input", default=str(A.BUILDS_JSONL))
+    ap.add_argument("-i", "--input", default=None)
     ap.add_argument("--split", metavar="SESS",
                     help="also pool SESS against the other proof sessions "
                          "and compare (e.g. --split ntr)")
     ns = ap.parse_args()
+    # Resolve once, here: the default is not a constant any more
+    # (bin/corpus.py -- it depends on where the operator is standing).
+    try:
+        ns.input = corpus.resolve(ns.input)
+    except corpus.CorpusError as e:
+        print(f'FAIL: {e}', file=sys.stderr)
+        return 1
 
     scopes: dict[str, dict[str, list[int]]] = {
         "code": {}, "proof": {}, "attempt": {}}
-    for ep in A._episodes(A._load(Path(ns.input))):
+    for ep in A._episodes(corpus.load(corpus.resolve(ns.input))):
         if ep[-1]["outcome"] != "ok":
             continue
         sess = A.project(ep)
