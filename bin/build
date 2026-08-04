@@ -43,18 +43,37 @@ import subprocess
 import sys
 from pathlib import Path
 
-PROJECT_DIR = Path(__file__).resolve().parent.parent
-WATCHDOG = PROJECT_DIR / "bin" / "isabelle-watchdog.py"
-ISABELLE_DIR = PROJECT_DIR / "isabelle"
-SESSION = "SPSlowdown"
-# The entry point owns this rather than inheriting it.  It was the Makefile's
-# to export, which meant `bin/build` run directly quietly recorded into the
-# recorder's built-in default (t/logs/) — a second corpus, a second instance
-# id, and a build that looks unrecorded because the records are somewhere
-# else.  Configuration belongs to the command, not to one of its wrappers.
-LOG_DIR = PROJECT_DIR / "results" / "isabelle-logs"
+# Where the tooling is, which is genuinely `__file__`-relative -- this is the
+# one path that should be, because it names a sibling script rather than
+# anything about the project being built.
+TOOL_DIR = Path(__file__).resolve().parent
+WATCHDOG = TOOL_DIR / "isabelle-watchdog.py"
 
-sys.path.insert(0, str(PROJECT_DIR / "bin"))
+sys.path.insert(0, str(TOOL_DIR))
+
+
+def project_dir() -> Path:
+    """The project being built: the git top level of the current directory.
+
+    Not `__file__`-relative.  While this script lived in the application that
+    happened to name the right thing; from its own repository it names the
+    tooling, and every path below would be wrong in the same silent way the
+    recorder's PROJECT_DIR was.
+    """
+    p = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                       capture_output=True, text=True)
+    return Path(p.stdout.strip()) if p.returncode == 0 else Path.cwd()
+
+
+# The session to build.  There is no defensible default -- it was
+# "SPSlowdown" because this script was written inside 43sp -- so it is
+# required, from $BUILD_SESSION or --session.  A wrong session name is a
+# confusing Isabelle error several seconds later; a missing one should be a
+# clear message now.
+DEFAULT_SESSION = os.environ.get("BUILD_SESSION")
+# Where the session's ROOT lives, relative to the project.  `.` suits a
+# project whose ROOT is at the top; 43sp used `isabelle/`, ndtht used `t/`.
+DEFAULT_SESSION_DIR = os.environ.get("BUILD_SESSION_DIR", ".")
 
 
 def read_note(args) -> str | None:
@@ -80,11 +99,31 @@ def main() -> int:
                     help="read the note from a file ('-' for stdin)")
     ap.add_argument("--lint", action="store_true",
                     help="report on the note's format and exit without building")
-    ap.add_argument("--session", default=SESSION)
-    ap.add_argument("--dir", default=str(ISABELLE_DIR))
+    ap.add_argument("--session", default=DEFAULT_SESSION,
+                    help="Isabelle session to build "
+                         "(default: $BUILD_SESSION; required)")
+    ap.add_argument("--dir", default=DEFAULT_SESSION_DIR,
+                    help="directory holding the session ROOT, relative to the "
+                         "project (default: $BUILD_SESSION_DIR, else '.')")
     ap.add_argument("rest", nargs="*", metavar="...",
                     help="extra arguments passed through to isabelle build")
     args = ap.parse_args()
+
+    if not args.session and not args.lint:
+        print("no session to build: pass --session, or set $BUILD_SESSION.\n"
+              "(There is no default -- it would only ever be right for one "
+              "project.)", file=sys.stderr)
+        return 2
+
+    project = project_dir()
+    # The entry point owns the log location rather than inheriting it.  It was
+    # a Makefile's to export, which meant `bin/build` run directly quietly
+    # recorded into the recorder's built-in default -- a second corpus, a
+    # second instance id, and a build that looks unrecorded because the
+    # records are somewhere else.  Configuration belongs to the command, not
+    # to one of its wrappers.
+    log_dir = os.environ.get("WATCHDOG_LOG_DIR") or str(project / "t" / "logs")
+    os.environ.setdefault("WATCHDOG_LOG_DIR", log_dir)
 
     from build_record import lint_note, NOTE_FILE
 
@@ -104,7 +143,7 @@ def main() -> int:
         return 1 if complaints else 0
 
     env = dict(os.environ)
-    env.setdefault("WATCHDOG_LOG_DIR", str(LOG_DIR))
+    env["WATCHDOG_LOG_DIR"] = log_dir
     if note is not None:
         env["BUILD_NOTE"] = note
         # A note given here supersedes whatever was pending, and the pending
@@ -115,7 +154,7 @@ def main() -> int:
 
     cmd = [sys.executable, str(WATCHDOG), "isabelle", "build",
            "-d", args.dir, "-v", *args.rest, args.session]
-    return subprocess.run(cmd, cwd=PROJECT_DIR, env=env).returncode
+    return subprocess.run(cmd, cwd=project, env=env).returncode
 
 
 if __name__ == "__main__":

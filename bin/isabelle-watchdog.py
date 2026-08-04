@@ -9,12 +9,18 @@ Usage: isabelle-watchdog.py command [args...]
 
 Environment:
     WATCHDOG_TIMEOUT          Kill after N seconds of stalled stdout (default: 20).
-    WALL_TIMEOUT              Absolute wall-clock limit (default: 40).  The 40 s
-                              ceiling is project policy: a build hitting the wall
-                              is a cost-regression signal (.claude/memory/
-                              feedback_no_buildclean_reflex.md), not a tunable.
-                              Override via env var only when investigating that
-                              regression.
+    WALL_TIMEOUT              Absolute wall-clock limit (default: 40).  The
+                              tight ceiling is the point, not an oversight: a
+                              build that hits it is either looping or has got
+                              measurably more expensive, and both are signal.
+                              Raising it to make a red build go green trades a
+                              fast, specific failure for a slow, vague one.
+                              Raise it deliberately, per project, when a proof
+                              genuinely has irreducible elaboration cost --
+                              and keep the raise on the watchdog path, since
+                              an un-watchdogged build records no attempt at
+                              all, not even the success that closes an
+                              episode.
     BATTERY_FACTOR            On a laptop running on battery (detected via
                               `pmset -g ps`, macOS only) the machine runs
                               ~this-many times slower, so both WATCHDOG_TIMEOUT
