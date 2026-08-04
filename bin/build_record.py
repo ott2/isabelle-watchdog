@@ -84,7 +84,27 @@ from pathlib import Path
 
 from guard import run_guarded
 
-PROJECT_DIR = Path(__file__).resolve().parent.parent
+def _project_dir() -> Path:
+    """The repository whose sources this build is about.
+
+    Was `Path(__file__).parent.parent` -- correct only while this script sat
+    inside the application it recorded.  From its own repository that names
+    the *tooling*, and the failure is silent in the worst way: the recorder
+    happily snapshots the wrong repo, writes a faithful diff of it, and
+    `trajectory.py check` then calls every such record `sound`, because the
+    payload really does regenerate.  A corpus of perfectly-verified diffs of
+    the wrong project is harder to notice than a crash and worse to inherit.
+
+    The build ran in the project directory, so ask git where that is.  $PWD
+    is the one thing that reliably distinguishes "the proof I am building"
+    from "the tool I am building it with".
+    """
+    p = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                       capture_output=True, text=True)
+    return Path(p.stdout.strip()) if p.returncode == 0 else Path.cwd()
+
+
+PROJECT_DIR = _project_dir()
 # WATCHDOG_LOG_DIR (same variable the watchdog honours) lets a project that
 # does not use the `t/` theory-tree layout say where logs go; unset reproduces
 # the original behaviour exactly.
