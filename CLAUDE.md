@@ -27,11 +27,16 @@ Consolidated from the two application projects that grew it, with history —
 52 commits and the analysis side; `~/projects/43sp` contributed 7 and the
 capture side. Both still hold their own copies; this repo is now the trunk.
 
-**Reading history across the merge:** `git log -- <path>` uses history
-simplification and at the merge follows only the parent whose version won, so
-`watchdog.py` looks like 2 commits when it has 22 (and `--follow` across the
-`bin/` → `src/` rename). Use
-`git log --full-history -- <path>`.
+**Reading history needs `--follow`, and sometimes `--full-history`.** Two
+things hide commits from a plain `git log -- <path>`: the `bin/` → `src/`
+rename (needs `--follow`), and history simplification at the consolidation
+merge, which follows only the parent whose version won (needs
+`--full-history`). Use `--follow` by default:
+
+```sh
+git log --follow -- src/isabelle_watchdog/watchdog.py   # 24, back to 2026-04-23
+git log -- src/isabelle_watchdog/watchdog.py            # 1 — believe the former
+```
 
 ## The rule this codebase keeps re-learning
 
