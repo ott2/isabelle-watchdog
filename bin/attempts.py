@@ -1,53 +1,24 @@
 #!/usr/bin/env python3
-"""attempts.py — inspect the build-attempt trajectory.
+"""attempts.py — the reading and measuring views over a trajectory corpus.
 
-Reads the records written by bin/build_record.py (t/logs/builds.jsonl by
-default) and presents them.  Each record carries its own incremental diff
-inline, so this tool needs no git object store and runs standalone against
-any builds.jsonl — point it anywhere with -i/--input.
+An implementation module, not a command: `bin/trajectory.py` is the entry
+point for all thirteen views, and `list` / `show` / `episodes` / `classify` /
+`lengths` / `size` are the ones defined here.  They were a separate script
+until the two frontends were reconciled; the split had no meaning for a
+caller, who only ever wanted a verb.
 
-  attempts.py list [-n N]        recent attempts, one line each
-  attempts.py show BUILD_ID [--full]
-                                 full record + the diff this attempt made
-  attempts.py episodes [-n N] [--diffs] [--full]
-                                 segment into episodes: runs of failing
-                                 attempts closed by a success (§12.4).
-                                 --diffs interleaves each attempt's diff
-                                 with its outcome (--full = full diff,
-                                 else a stat summary) — associate change
-                                 with outcome across a whole fail→fix run.
-  attempts.py lengths [-n N] [--fit] [--by-project] [--csv|--json]
-                                 histogram of trajectory (episode) lengths:
-                                 how many 1-step, 2-step, … runs.
-                                 --fit separates the two regimes — the
-                                 one-shot spike and the repair tail — and
-                                 scores a power law against a geometric
-                                 null on the same support.  --by-project
-                                 splits by development (t/ae, t/ar, t/ntr,
-                                 t/art, t/base): separate results built in
-                                 different eras, so their one-shot rate and
-                                 tail exponent are a *dynamic* difficulty
-                                 measure no static lemma count captures.
-                                 --csv/--json for plotting.
-  attempts.py classify BUILD_ID [-v]
-                                 why a delta was judged code or doc-only
-                                 (per-file verdict; -v shows the evidence)
-  attempts.py size [--compare DIR...] [--json]
-                                 byte accounting for a project-size
-                                 breakdown that does not count the git
-                                 tree.  Every record carries its diff
-                                 inline (§16), so the corpus is the only
-                                 copy of what it describes; the hashes
-                                 beside them are pointers into a store
-                                 that accounting excludes.  Compression is
-                                 the only real reduction, and it is bigger
-                                 than any refinement of "relevant" would be.
+Each record carries its own incremental diff inline, so nothing here needs a
+git object store -- these views run against any builds.jsonl, including a
+pooled or archived one whose source repository is long gone.  That property is
+worth protecting: it is what makes a corpus readable by someone who has the
+data and not the project.
 
-Common options (accepted before *or* after the subcommand):
-
-  -i/--input FILE  read this builds.jsonl instead of the default
-  -n N             how many to show; **-n 0 shows all**
-  --all            do not filter out doc-only deltas (see below)
+The interesting piece is `lengths --fit`, which separates the two regimes of
+the trajectory histogram (the one-shot spike and the repair tail) and scores a
+power law against a geometric null on the same support, and `--by-project`,
+which splits by development rather than pooling -- separate results built in
+different eras, so their one-shot rate and tail exponent are a *dynamic*
+difficulty measure no static lemma count captures.
 
 Doc-only filtering (§ why the default view is smaller)
 ------------------------------------------------------
@@ -107,11 +78,10 @@ def _tail(seq: list, n: int) -> list:
 PROSE_SUFFIXES = {".md", ".tex", ".bib", ".txt", ".rst", ".bst", ".cls"}
 
 # Isabelle document commands: everything from here to the closing cartouche
-# is prose, not proof.  bin/prose-token.py has a sibling scanner over the
-# same vocabulary, but it cannot be reused: it computes prose spans over a
+# is prose, not proof.  ndtht's bin/prose-token.py has a sibling scanner over
+# the same vocabulary, but it cannot be reused: it computes prose spans over a
 # *whole file* from offset 0, whereas a diff hunk starts mid-file with an
-# unknown state that has to be seeded and can be wrong (insights/274).  This
-# tool also stays import-free so it runs standalone against any builds.jsonl.
+# unknown state that has to be seeded and can be wrong (insights/274).
 _DOC_CMDS = (r"text_raw|text|txt|chapter|subsubsection|subsection|section"
              r"|subparagraph|paragraph")
 
@@ -1149,100 +1119,20 @@ def cmd_lengths(recs: list[dict], n: int, include_all: bool, fmt: str,
 # --------------------------------------------------------------------- main
 
 def main() -> int:
-    # Shared options live on a parent parser attached to *both* the top
-    # level and every subparser, so `-i FILE list` and `list -i FILE` both
-    # work.  default=SUPPRESS is load-bearing: without it the subparser
-    # re-applies its own default and clobbers a value given before the
-    # subcommand, since both write the same namespace attribute.
-    common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("-i", "--input", metavar="FILE",
-                        default=argparse.SUPPRESS,
-                        help="builds.jsonl to read (default: $TRAJECTORY_CORPUS, "
-                             "else $WATCHDOG_LOG_DIR/builds.jsonl, else the "
-                             "known layouts under the current project)")
-    common.add_argument("--all", action="store_true",
-                        default=argparse.SUPPRESS,
-                        help="include doc-only deltas (default: code only)")
+    """Retired: these views are subcommands of bin/trajectory.py now.
 
-    p = argparse.ArgumentParser(
-        description=__doc__, parents=[common],
-        formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = p.add_subparsers(dest="cmd")
-
-    pl = sub.add_parser("list", parents=[common],
-                        help="recent attempts, one line each")
-    pl.add_argument("-n", type=int, default=30,
-                    help="how many to show; 0 shows all (default 30)")
-
-    ps = sub.add_parser("show", parents=[common],
-                        help="full record + the attempt's diff")
-    ps.add_argument("build_id")
-    ps.add_argument("--full", action="store_true",
-                    help="full diff instead of a stat summary")
-
-    pc = sub.add_parser("classify", parents=[common],
-                        help="why a delta counts as code or doc-only")
-    pc.add_argument("build_id")
-    pc.add_argument("-v", "--verbose", action="store_true",
-                    help="show the changed code projections behind the verdict")
-
-    pe = sub.add_parser("episodes", parents=[common],
-                        help="fail-runs closed by a success")
-    pe.add_argument("-n", type=int, default=10,
-                    help="how many to show; 0 shows all (default 10)")
-    pe.add_argument("--diffs", action="store_true",
-                    help="interleave each attempt's diff under its outcome")
-    pe.add_argument("--full", action="store_true",
-                    help="with --diffs, full diff instead of a stat summary")
-
-    pg = sub.add_parser("lengths", parents=[common],
-                        help="histogram of trajectory lengths (the power-law view)")
-    pg.add_argument("-n", type=int, default=0,
-                    help="use only the last N trajectories; 0 = all (default)")
-    pg.add_argument("--csv", action="store_true", help="emit CSV for plotting")
-    pg.add_argument("--json", action="store_true", help="emit JSON")
-    pg.add_argument("--fit", action="store_true",
-                    help="fit the two regimes: one-shot spike + repair tail, "
-                         "power law vs geometric on the same KS statistic")
-    pg.add_argument("--by-project", action="store_true",
-                    help="split by development (t/ae, t/ar, t/ntr, t/art, "
-                         "t/base) — they are separate results, not one pool")
-
-    pz = sub.add_parser("size", parents=[common],
-                        help="byte accounting: what this corpus adds to a "
-                             "project-size breakdown")
-    pz.add_argument("--compare", nargs="*", default=[], metavar="DIR",
-                    help="also size the git-tracked .thy under these trees")
-    pz.add_argument("--json", action="store_true", help="emit JSON")
-
-    ns = p.parse_args()
-    given = getattr(ns, "input", None)
-    include_all = getattr(ns, "all", False)
-    try:
-        path = corpus.resolve(given)
-    except corpus.CorpusError as e:
-        print(f"FAIL: {e}", file=sys.stderr)
-        return 1
-    recs = corpus.load(path)
-    if not recs:
-        print(f"no attempts recorded yet ({path} is empty)", file=sys.stderr)
-        return 1
-
-    if ns.cmd == "show":
-        cmd_show(recs, ns.build_id, ns.full)
-    elif ns.cmd == "classify":
-        cmd_classify(recs, ns.build_id, ns.verbose)
-    elif ns.cmd == "episodes":
-        cmd_episodes(recs, ns.n, include_all, diffs=ns.diffs, full=ns.full)
-    elif ns.cmd == "size":
-        cmd_size(recs, path, ns.compare, "json" if ns.json else "text")
-    elif ns.cmd == "lengths":
-        cmd_lengths(recs, ns.n, include_all,
-                    "csv" if ns.csv else "json" if ns.json else "text",
-                    do_fit=ns.fit, by_project=ns.by_project)
-    else:  # list (default)
-        cmd_list(recs, getattr(ns, "n", 30), include_all)
-    return 0
+    The two frontends grew in different projects and split the same thirteen
+    verbs over two scripts, so using them meant knowing which script had which
+    verb -- and, until bin/corpus.py, meant two different answers to "which
+    corpus?".  Everything here is still the implementation; only the entry
+    point moved.
+    """
+    argv = " ".join(sys.argv[1:])
+    print(f"attempts.py is a module now; its views are subcommands of "
+          f"trajectory.py:\n\n    bin/trajectory.py {argv or 'list'}\n\n"
+          f"`bin/trajectory.py --help` lists all thirteen, grouped.",
+          file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":

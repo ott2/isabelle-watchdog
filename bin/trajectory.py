@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Diagnose, repair and replay a build-trajectory corpus.
+"""Read, measure and repair a build-trajectory corpus.
 
 Works against any corpus written by `build_record.py`, in any project: the
 source repository is named with `--repo`, and every base tree is resolved from
 the record's own `git_head`, so a corpus that starts partway into a project's
 history -- or that re-baselines on mid-flight commits -- is handled correctly.
+
+The measuring and reading commands are implemented in `attempts.py` and the
+integrity ones here; the split is historical (two projects, two scripts) and
+is not something a caller should have to know.  `trajectory.py --help` groups
+all thirteen by the question they answer.
 
 BASE TREE PER RECORD.  `build_record` anchors each diff on the previous
 attempt's snapshot tree, *except* when HEAD has moved since (a commit landed
@@ -81,14 +86,25 @@ in force (`limits`) and the non-source files that changed (`other_changed`).
 is indistinguishable from a proof that got slower, when the cause may have been
 a Makefile edit halving `WALL_TIMEOUT`.
 
+CORPUS is optional everywhere: it defaults to $TRAJECTORY_CORPUS, then
+$WATCHDOG_LOG_DIR/builds.jsonl (the variable the watchdog and the recorder
+already honour, so a reader lands where the writer wrote), then the known
+layouts under the project the caller is standing in.  See bin/corpus.py.
+
 Usage:
-    bin/trajectory.py check  [CORPUS] [--repo PATH]
-    bin/trajectory.py repair [CORPUS] [--repo PATH] [--apply] [--heuristic]
-    bin/trajectory.py replay [CORPUS] [--repo PATH] [--from N] [--to N]
-    bin/trajectory.py progress [CORPUS] [--repo PATH]
-    bin/trajectory.py notes  [CORPUS] [--raw] [--loci]
-    bin/trajectory.py flips  [CORPUS]
-    bin/trajectory.py extract CORPUS N DEST [--repo PATH]
+    bin/trajectory.py check    [CORPUS] [--repo PATH]
+    bin/trajectory.py repair   [CORPUS] [--repo PATH] [--apply] [--heuristic]
+    bin/trajectory.py replay   [CORPUS] [--repo PATH] [--from N] [--to N]
+    bin/trajectory.py extract  [CORPUS] N DEST [--repo PATH]
+    bin/trajectory.py list     [CORPUS] [-n N] [--all]
+    bin/trajectory.py show     [CORPUS] BUILD_ID [--full]
+    bin/trajectory.py episodes [CORPUS] [-n N] [--diffs] [--full] [--all]
+    bin/trajectory.py notes    [CORPUS] [--raw] [--loci]
+    bin/trajectory.py classify [CORPUS] BUILD_ID [-v]
+    bin/trajectory.py lengths  [CORPUS] [--fit] [--by-project] [--csv|--json]
+    bin/trajectory.py size     [CORPUS] [--compare DIR...] [--json]
+    bin/trajectory.py progress [CORPUS]
+    bin/trajectory.py flips    [CORPUS]
 """
 
 from __future__ import annotations
@@ -762,45 +778,177 @@ def cmd_extract(records, repo, args) -> int:
     return 0
 
 
+# --------------------------------------------------------------------- CLI
+
+# The subcommands came from two scripts written in two projects, and the two
+# sets do not overlap by a single name -- thirteen distinct verbs over one
+# file format.  That is the argument for one command rather than two: nobody
+# choosing between `attempts show` and `trajectory extract` was ever choosing
+# between tools, only trying to remember which script had the verb.
+#
+# Grouped by the question asked, not by the script of origin.  `progress` and
+# `flips` came from the integrity tool and `lengths` from the statistics one,
+# but all three measure the corpus rather than audit it.
+GROUPS = (
+    ("integrity", "is the corpus intact, and what exactly happened?",
+     ("check", "repair", "replay", "extract")),
+    ("reading", "what does a particular attempt or run say?",
+     ("list", "show", "episodes", "notes", "classify")),
+    ("measuring", "what does the corpus say about the work?",
+     ("lengths", "size", "progress", "flips")),
+)
+
+HELP = {
+    "check":    "classify every record (read-only)",
+    "repair":   "regenerate repairable payloads",
+    "replay":   "apply payloads and verify the resulting blobs",
+    "extract":  "write one record's snapshot to a directory",
+    "list":     "recent attempts, one line each",
+    "show":     "full record + the attempt's diff",
+    "episodes": "fail-runs closed by a success",
+    "notes":    "show attached reasoning, scored against outcomes",
+    "classify": "why a delta counts as code or doc-only",
+    "lengths":  "histogram of trajectory lengths (the power-law view)",
+    "size":     "byte accounting for a project-size breakdown",
+    "progress": "classify whether each edit made progress",
+    "flips":    "attribute every outcome change to a cause",
+}
+
+# Views that count trajectories, and so have to decide whether a prose-only
+# edit is an attempt.  The rest read individual records and never ask.
+FILTERS_DOC_ONLY = ("list", "episodes", "lengths")
+
+
+def _attempts():
+    """bin/attempts.py, whose filename is not importable as a module."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "attempts", Path(__file__).resolve().parent / "attempts.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def build_parser() -> argparse.ArgumentParser:
+    epilog = "\n".join(
+        [""] + [f"{title} -- {gloss}\n" +
+                "\n".join(f"    {c:<10} {HELP[c]}" for c in cmds)
+                for title, gloss, cmds in GROUPS])
+    # The module docstring is the design rationale, several screens of it, and
+    # printing all of that for `--help` buries the thing the reader wanted.
+    # The first paragraph says what the tool is; the epilog says what it does.
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n\n")[0], epilog=epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    # The grouped epilog is the command list, so argparse's own flat one would
+    # just repeat it in a worse order.  Omitting `help=` (rather than setting
+    # it to SUPPRESS, which argparse prints literally here) is what keeps a
+    # subcommand out of that listing while leaving it callable.
+    sub = ap.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
+
+    for _, _, cmds in GROUPS:
+        for name in cmds:
+            s = sub.add_parser(name, description=HELP[name])
+            s.add_argument("corpus", nargs="?", default=None,
+                           help="builds.jsonl to read (default: "
+                                "$TRAJECTORY_CORPUS, else "
+                                "$WATCHDOG_LOG_DIR/builds.jsonl, else the "
+                                "known layouts under the current project)")
+            if name in NEEDS_REPO:
+                s.add_argument("--repo", default=None,
+                               help="source git repository the diffs came "
+                                    "from (default: the git top level of the "
+                                    "current directory)")
+            if name in FILTERS_DOC_ONLY:
+                s.add_argument("--all", action="store_true",
+                               help="include doc-only deltas "
+                                    "(default: code only)")
+            if name == "repair":
+                s.add_argument("--apply", action="store_true",
+                               help="write the corpus back")
+                s.add_argument("--heuristic", action="store_true",
+                               help="also infer lost context lines where "
+                                    "objects are gone")
+                s.add_argument("--backup", action="store_true",
+                               help="write a .bak even when git can restore "
+                                    "the corpus")
+            if name == "replay":
+                s.add_argument("--from", dest="start", type=int)
+                s.add_argument("--to", dest="stop", type=int)
+            if name == "notes":
+                s.add_argument("--raw", action="store_true",
+                               help="print notes verbatim instead of by section")
+                s.add_argument("--loci", action="store_true",
+                               help="also show the error loci each attempt "
+                                    "reported")
+            if name == "extract":
+                s.add_argument("n", help="record index")
+                s.add_argument("dest", help="destination directory")
+            if name in ("list", "episodes"):
+                s.add_argument("-n", type=int,
+                               default=30 if name == "list" else 10,
+                               help="how many to show; 0 shows all")
+            if name == "episodes":
+                s.add_argument("--diffs", action="store_true",
+                               help="interleave each attempt's diff under its "
+                                    "outcome")
+                s.add_argument("--full", action="store_true",
+                               help="with --diffs, full diff instead of a stat "
+                                    "summary")
+            if name in ("show", "classify"):
+                s.add_argument("build_id")
+            if name == "show":
+                s.add_argument("--full", action="store_true",
+                               help="full diff instead of a stat summary")
+            if name == "classify":
+                s.add_argument("-v", "--verbose", action="store_true",
+                               help="show the changed code projections behind "
+                                    "the verdict")
+            if name == "lengths":
+                s.add_argument("-n", type=int, default=0,
+                               help="use only the last N trajectories; "
+                                    "0 = all (default)")
+                s.add_argument("--csv", action="store_true",
+                               help="emit CSV for plotting")
+                s.add_argument("--json", action="store_true", help="emit JSON")
+                s.add_argument("--fit", action="store_true",
+                               help="fit the two regimes: one-shot spike + "
+                                    "repair tail, power law vs geometric")
+                s.add_argument("--by-project", action="store_true",
+                               help="split by development -- separate results, "
+                                    "not one pool")
+            if name == "size":
+                s.add_argument("--compare", nargs="*", default=[], metavar="DIR",
+                               help="also size the git-tracked .thy under these "
+                                    "trees")
+                s.add_argument("--json", action="store_true", help="emit JSON")
+    return ap
+
+
+def dispatch_attempts(name, records, path, args) -> int:
+    """Adapt the statistics commands, whose signatures predate this parser."""
+    A = _attempts()
+    every = getattr(args, "all", False)
+    if name == "list":
+        A.cmd_list(records, args.n, every)
+    elif name == "show":
+        A.cmd_show(records, args.build_id, args.full)
+    elif name == "classify":
+        A.cmd_classify(records, args.build_id, args.verbose)
+    elif name == "episodes":
+        A.cmd_episodes(records, args.n, every, diffs=args.diffs, full=args.full)
+    elif name == "lengths":
+        A.cmd_lengths(records, args.n, every,
+                      "csv" if args.csv else "json" if args.json else "text",
+                      do_fit=args.fit, by_project=args.by_project)
+    elif name == "size":
+        A.cmd_size(records, path, args.compare,
+                   "json" if args.json else "text")
+    return 0
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = ap.add_subparsers(dest="cmd", required=True)
-    for name, helptext in (("check", "classify every record (read-only)"),
-                           ("repair", "regenerate repairable payloads"),
-                           ("replay", "apply payloads and verify the resulting blobs"),
-                           ("progress", "classify whether each edit made progress"),
-                           ("notes", "show attached reasoning, scored against outcomes"),
-                           ("flips", "attribute every outcome change to a cause"),
-                           ("extract", "write one record's snapshot to a directory")):
-        s = sub.add_parser(name, help=helptext)
-        s.add_argument("corpus", nargs="?", default=None,
-                       help="builds.jsonl to read (default: $TRAJECTORY_CORPUS, "
-                            "else $WATCHDOG_LOG_DIR/builds.jsonl, else the "
-                            "known layouts under the current project)")
-        if name in NEEDS_REPO:
-            s.add_argument("--repo", default=None,
-                           help="source git repository the diffs came from "
-                                "(default: the git top level of the current "
-                                "directory)")
-        if name == "repair":
-            s.add_argument("--apply", action="store_true", help="write the corpus back")
-            s.add_argument("--heuristic", action="store_true",
-                           help="also infer lost context lines where objects are gone")
-            s.add_argument("--backup", action="store_true",
-                           help="write a .bak even when git can restore the corpus")
-        if name == "replay":
-            s.add_argument("--from", dest="start", type=int)
-            s.add_argument("--to", dest="stop", type=int)
-        if name == "notes":
-            s.add_argument("--raw", action="store_true",
-                           help="print notes verbatim instead of by section")
-            s.add_argument("--loci", action="store_true",
-                           help="also show the error loci each attempt reported")
-        if name == "extract":
-            s.add_argument("n", help="record index")
-            s.add_argument("dest", help="destination directory")
-    args = ap.parse_args()
+    args = build_parser().parse_args()
 
     try:
         path = corpus.resolve(args.corpus)
@@ -815,10 +963,16 @@ def main() -> int:
     # given.
     args.corpus = str(path)
     records = corpus.load(path)
+    if not records:
+        print(f"no attempts recorded yet ({path} is empty)", file=sys.stderr)
+        return 1
 
-    return {"check": cmd_check, "repair": cmd_repair, "replay": cmd_replay,
-            "progress": cmd_progress, "notes": cmd_notes, "flips": cmd_flips,
-            "extract": cmd_extract}[args.cmd](records, repo, args)
+    own = {"check": cmd_check, "repair": cmd_repair, "replay": cmd_replay,
+           "progress": cmd_progress, "notes": cmd_notes, "flips": cmd_flips,
+           "extract": cmd_extract}
+    if args.cmd in own:
+        return own[args.cmd](records, repo, args)
+    return dispatch_attempts(args.cmd, records, path, args)
 
 
 if __name__ == "__main__":
