@@ -66,7 +66,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from isabelle_query import common  # run_guarded (best-effort capture guard)
+import guard  # run_guarded — capture must never break the build
 
 # ---------------------------------------------------------------------------
 # Config
@@ -414,10 +414,10 @@ def main() -> int:
         exit_code = proc.returncode
         outcome = "ok" if exit_code == 0 else "fail"
         if outcome == "fail":
-            db_error = common.run_guarded(
+            db_error = guard.run_guarded(
                 "db-error", lambda: _fetch_db_error(args)) or ""
             if db_error:
-                common.run_guarded(
+                guard.run_guarded(
                     "db-error-log",
                     lambda: _append_full_error(log_path, db_error))
                 err_lines = db_error.splitlines()
@@ -556,7 +556,7 @@ def _record_attempt(args: list[str], outcome: str, exit_code: int,
             log_name=os.environ.get("LOG_NAME", "last-build.log"),
             error_loci=error_loci or [], limits=limits,
         )
-    common.run_guarded("build-record", go)
+    guard.run_guarded("build-record", go)
 
 
 # ---------------------------------------------------------------------------

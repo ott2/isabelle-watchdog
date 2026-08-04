@@ -82,7 +82,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from isabelle_query.common import run_guarded
+from guard import run_guarded
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 # WATCHDOG_LOG_DIR (same variable the watchdog honours) lets a project that
