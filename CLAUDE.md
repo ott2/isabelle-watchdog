@@ -168,6 +168,28 @@ An **episode** is a maximal run of attempts ending in a success. Boundaries are
 successes, **not** commits — a mid-flight commit is just an attempt whose
 `git_head` moved.
 
+**Attribution is derived, not declared** (`attempts.Attribution`). A *session
+directory* is any directory holding a `.thy` — which makes ndtht's `t/{ae,ar,…}`
+and 43sp's flat `isabelle/` fall out of one rule, and stops `bin/` becoming a
+phantom development since it never holds a theory. The build-target → directory
+map is learned from `session` lines in captured ROOT diffs (authoritative:
+Isabelle's own declaration), falling back to which directory a build's edits
+touched (noisy, so it needs a 3× dominance margin). Because it is fitted from
+the whole corpus, entry points call `attempts.fit_attribution(records, path)`
+once after loading; `trajectory.py` does it for all thirteen subcommands.
+
+What genuinely cannot be derived — a directory rename, a session built
+*against* rather than worked *on* — goes in an optional
+`<corpus>.attribution.json` beside the data, never in this package:
+
+```json
+{"aliases": {"aem": "ae"}, "targets": {"HOAU_Spike": null}}
+```
+
+A target mapped to `null` is a *declared exclusion*, and stays distinguishable
+from one that is merely absent — absence is what a rename looks like, and an
+oversight should not read as a decision.
+
 ### 4. `build.py` — the entry point
 
 One call carrying the note and running the build, `git commit -m` shaped. The
@@ -276,11 +298,6 @@ backup and sharing story from the tools.
 
 ## Known follow-up work
 
-- **`attempts.project()` hard-codes ndtht's layout** — `^t/([A-Za-z0-9_-]+)/`
-  is the first rung of the attribution ladder, so on any other project every
-  episode labels `tooling` or `none`. This is why the 43sp corpus attributes
-  nothing. Generalising it moves published numbers, so it needs its own change
-  with both corpora re-measured.
 - `scripts/check-snapshot-untracked.sh` probes `t/base/...` paths and is not
   yet wired into `tests/`.
 - `legacy_convert.py` was a one-shot migration off the git-chain

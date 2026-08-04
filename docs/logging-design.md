@@ -1028,6 +1028,25 @@ that direction backwards.
 
 ### 13.2.1 The attribution ladder, and bounding each route to its reach
 
+> **Superseded in part (2026-08-05).** The ladder's three routes are as
+> described below, but the *layout knowledge* each one needed is no longer
+> written down.  `attempts.SESSION_TARGETS`, `SESSION_ALIASES` and the
+> `^t/(...)/`  regexes named ndtht's tree inside a tool meant to read any
+> project's corpus, and anywhere else they matched nothing — labelling every
+> trajectory `tooling`, which reads as "no theory was touched" and is the
+> opposite of the truth.  The whole 43sp corpus was labelled that way.
+>
+> `attempts.Attribution` now derives all of it from the records: a **session
+> directory** is any directory holding a `.thy`, and the target→directory map
+> comes from `session` lines in captured ROOT diffs, falling back to which
+> directory a build's edits touched.  On this corpus the derivation reproduces
+> the hand-maintained table's labels exactly — 0 of 335 episodes move — and on
+> 43sp it attributes 16 of 19 where the table attributed none.  What genuinely
+> cannot be derived (a directory rename, a session built *against* rather than
+> worked *on*) goes in `<corpus>.attribution.json`, beside the data rather than
+> in the package.  `bin/derive-session-map.sh` is gone with the constant it
+> maintained.
+
 The two routes above left 12 multi-attempt trajectories attributed to
 nothing at all — every one of them 0% one-shot, so their absence flattered
 the headline.  They are the residue of both routes failing at once: no

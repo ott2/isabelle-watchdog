@@ -45,7 +45,7 @@ import math
 import re
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from . import corpus
 
@@ -281,231 +281,450 @@ def keep(recs: list[dict], include_all: bool) -> list[dict]:
 
 # ------------------------------------------------------- project attribution
 
-# The theory tree's top-level session directories are separate developments
-# — different results, different eras, in effect different projects — so
-# their trajectories should not be pooled into one distribution.  Attributed
-# from the *paths a trajectory's code deltas touch*, not from the build
-# target, because session names have been renamed twice (NDTHT_AE ->
-# Alphabet_Enlargement -> Multitape_Alphabet_Enlargement) while `t/<dir>`
-# has been stable throughout.
-# Hyphens and digits are in the class deliberately: `t/scratch-nae/` is a
-# real session directory, and a name class that cannot match it does not
-# leave those trajectories unlabelled — it drops them into 'tooling', which
-# reads as "no theory touched" and is the opposite of the truth.  23 of the
-# 24 t/scratch-nae runs were mislabelled that way.
-_PROJECT_DIR = re.compile(r"^t/([A-Za-z0-9_-]+)/")
-
-# Directories that were the *same development* under another name.
-# Attribution is by path (see above), so a directory rename is invisible to
-# it and has to be declared here.
+# A project's theory tree is often several *separate developments* — different
+# results, different eras, in effect different projects — and pooling their
+# trajectories into one distribution averages over the thing you wanted to
+# measure.  So each trajectory is attributed to the development it belongs to.
 #
-# The test is whether the work **graduated** into the session, not what the
-# directory was called — a "scratch" name proves nothing either way:
+# What a development *is*, mechanically, is a **session directory**: the
+# directory a `.thy` file lives in.  That is the one structural fact every
+# Isabelle project shares, and it is derivable from the corpus rather than
+# declared: the session directories are exactly the directories in which any
+# `.thy` appears.  In ndtht that yields `t/{ae,ar,art,base,ntr}`; in 43sp,
+# `isabelle/`.  Both are right, and neither had to be configured.
 #
-#   t/aem         NDTHT_AE_Machinery: t/ae split for build caching
-#                 (6f58ba5), folded back by ee630c4.
-#   t/scratch-nae the [nae-prove] reverse-arm toolkit, developed in a
-#                 staging tree and graduated by 68f95df ("graduate det-free
-#                 reverse-arm toolkit into NDTHT_AE").  Its lemmas are in
-#                 t/ae/AlphabetEnlargement_Reverse.thy today —
-#                 ae_ss5_window_ofs_agree among them.
+# This used to be `re.compile(r"^t/([A-Za-z0-9_-]+)/")` — ndtht's layout, in
+# a tool that is supposed to read any project's corpus.  Anywhere else it
+# matched nothing, and the consequence was not "unlabelled" but *wrong*:
+# every trajectory fell through to 'tooling', which reads as "no theory was
+# touched" and is the opposite of the truth.  The whole of the 43sp corpus
+# was labelled that way.
 #
-# t/scratch is deliberately absent, and is the contrast that makes the rule
-# concrete: NDTHT_Scratch was the [substrate-value-arity] fork-(a) *decision
-# prototype*, measuring whether a 'k-typed result transfers across a
-# fixed-arity isomorphism.  It answered the question and was retired as
-# spent (6f4d1fd); nothing graduated, and it no longer builds.  Search that
-# settled a design question is not search that built a session.
-SESSION_ALIASES = {"aem": "ae", "scratch-nae": "ae"}
+# Deriving the set also *bounds* attribution, which the `t/` prefix used to
+# do.  Without a bound, "the parent directory of a changed code file" would
+# make a session out of `bin/`; with it, only directories that actually hold
+# theories can name a development.
 
 
-# An Isabelle error head carries the path of the file it failed in.  That
-# survives when the diff does not, which is the only handle on an episode
-# whose edits the recorder missed entirely (§13.1's untracked-theory gap).
-_THY_IN_ERROR = re.compile(r"/t/([A-Za-z0-9_-]+)/[A-Za-z0-9_]+\.thy")
+def _is_theory(path: str) -> bool:
+    return path.endswith(".thy")
 
-# The watchdog's own error heads name a theory by *base* name and give the
-# line it was elaborating: `loop_progress: "by" line 190 of EncodingWrap_WF`.
-# That is proof-work evidence as good as a path, but it cannot attribute:
-# 11 base names have lived in more than one session directory across the
-# tree's re-layouts (`AlphabetReduction` in t/generic, t/base and t/ar), and
-# the record has no era to disambiguate with that this tool can read.  So it
-# feeds `proof_bearing` only, and attribution falls through to the command.
-# The leading `[A-Za-z]` is what keeps ML frames out: `line 308 of
-# "drule.ML"` and `line 144 of "~/…/Anti_Unify.ML"` both quote the file.
-_THY_BY_LINE = re.compile(r"\bline \d+ of ([A-Za-z][A-Za-z0-9_]*)")
 
-# Session *name* -> `t/<dir>`, for the last-resort attribution route below.
-# Names were renamed twice, so this is every pairing that has ever appeared
-# in a committed ROOT, derived rather than remembered:
-#
-#   git log --all --format=%H -- 't/*/ROOT' | while read sha; do
-#       git ls-tree -r --name-only $sha -- t/ | grep '/ROOT$' | while read f; do
-#           dir=${f#t/}; git show $sha:$f |
-#               sed -n 's/^session *"\?\([A-Za-z0-9_]*\).*/\1 '"${dir%/ROOT}"'/p'
-#       done; done | sort -u
-#
-# It is an allowlist, and that is load-bearing: a target that is not a `t/`
-# session must yield *no* attribution rather than a guess.  The HOAU spike is
-# the case that makes this concrete — it built `HOAU_Spike` from
-# `-d scratch/hoau` against the tree's existing sessions, so the session it
-# runs against is not the work it is about.
-#
-# Such a target maps to **None**, not to absence.  The two behave identically
-# in `command_dir` and differently in the audit, which is the point: absence
-# is what a renamed or newly-added session looks like, so leaving a
-# deliberate exclusion implicit makes an oversight indistinguishable from a
-# decision.  `bin/audit-attribution.py` fails on the first and passes on the
-# second.
-SESSION_TARGETS = {
-    "HOAU_Spike": None,       # built against t/ sessions; not about them
-    "Alphabet_Enlargement": "ae",
-    "Alphabet_Reduction": "ar",
-    "Alphabet_Roundtrip": "art",
-    "MTTM": "base",
-    "MTTM_Examples": "ex",
-    "Multitape_Alphabet_Enlargement": "ae",
-    "Multitape_Alphabet_Reduction": "ar",
-    "Multitape_Alphabet_Roundtrip": "art",
-    "Multitape_TM_Substrate": "base",
-    "NDTHT_AE": "ae",
-    "NDTHT_AE_Machinery": "aem",
-    "NDTHT_AR": "ar",
-    "NDTHT_Base": "base",
-    "NDTHT_Scratch": "scratch",
-    "NDTHT_ScratchAR": "scratch",
-    "NDTHT_ScratchNAE": "scratch-nae",
-    "Nondeterministic_Tape_Reduction": "ntr",
-    "Substrate_Characterization": "sc",
-}
+def session_dirs(recs: list[dict]) -> set[str]:
+    """The directories that hold a theory anywhere in this corpus.
+
+    Derived, not declared.  A directory earns the name by containing proof
+    source at some point in the corpus's history, so a session that was
+    renamed or moved is picked up under both names without anyone recording
+    the rename — which is exactly the bookkeeping the old hard-coded map
+    existed to do, and kept getting wrong.
+    """
+    out = set()
+    for rec in recs:
+        for path, _body in _split_files(rec.get("diff") or ""):
+            if _is_theory(path):
+                out.add(str(PurePosixPath(path).parent))
+    return out
+
+
+def _label(dirpath: str) -> str:
+    """Short name for a session directory: its last component.
+
+    `t/ae` -> `ae`, `isabelle` -> `isabelle`.  Two directories can share a
+    last component (`a/src` and `b/src`); `Attribution.learn` detects that
+    and keeps the full path for the colliding ones rather than merging two
+    developments into one line of a table.
+    """
+    return PurePosixPath(dirpath).name or dirpath
+
 
 # `isabelle build` flags that consume the following argument, so a target
 # scan does not mistake their values for session names.
 _FLAG_TAKES_ARG = {"-d", "-o", "-j", "-l", "-x", "-B", "-D", "-N", "-P", "-S"}
 
+# A theory path inside an Isabelle error head or locus.  Unanchored and
+# layout-free: it finds the `.thy` and lets the directory rule do the rest,
+# where the old `/t/([A-Za-z0-9_-]+)/[A-Za-z0-9_]+\.thy` could only see one
+# project's tree.
+_THY_PATH_IN_TEXT = re.compile(r"([^\s\"']*/)?([A-Za-z0-9_.\-]+\.thy)")
 
-def _alias(d: str) -> str:
-    return SESSION_ALIASES.get(d, d)
+# The watchdog's own error heads name a theory by *base* name and give the
+# line it was elaborating: `loop_progress: "by" line 190 of EncodingWrap_WF`.
+# That is proof-work evidence as good as a path, but it cannot attribute: a
+# base name can live in more than one session directory across a tree's
+# re-layouts (`AlphabetReduction` in t/generic, t/base and t/ar), and the
+# record has no era to disambiguate with that this tool can read.  So it
+# feeds `proof_bearing` only, and attribution falls through to the command.
+# The leading `[A-Za-z]` is what keeps ML frames out: `line 308 of
+# "drule.ML"` and `line 144 of "~/…/Anti_Unify.ML"` both quote the file.
+_THY_BY_LINE = re.compile(r"\bline \d+ of ([A-Za-z][A-Za-z0-9_]*)")
+
+# How much more often a target must co-occur with one session directory than
+# with any other before the pairing is believed.  You can build session X
+# while editing session Y, so the signal is noisy but very lopsided in
+# practice: in ndtht the true pairings win 286-to-1, 69-to-0 and 12-to-1.  A
+# near-tie is not weak evidence, it is *absence* of evidence, and must not
+# produce a label.
+_TARGET_DOMINANCE = 3
+
+# `session <Name>` at the head of a ROOT stanza.  Isabelle allows an optional
+# quoted form and a `= parent` tail; only the name is wanted.
+_ROOT_SESSION = re.compile(r'\s*session\s+"?([A-Za-z0-9_\']+)"?')
 
 
-def _locus_dir(theory: str) -> str | None:
-    """Session dir for one `error_loci` entry, whichever form it took.
+class Attribution:
+    """How this corpus's trajectories map to developments.
 
-    Post-2026-07-29 records carry the loci whole (§13.2.1), in two shapes
-    depending on which side reported them: a compile error gives a *path*,
-    `~/…/t/ae/Wrap_Defs.thy`; a watchdog kill gives Isabelle's
-    *session-qualified* name, `Alphabet_Enlargement.EncodingWrap_WF`.  The
-    qualifier is the session, which is why keeping it matters — the base
-    name alone is ambiguous across the tree's re-layouts.
+    Fitted from the records, because every fact it needs is in them.  What
+    cannot be derived — a directory rename, a session that is deliberately
+    *not* one of the project's developments — is supplied as an override,
+    and belongs to the project rather than to this tool: see `learn`.
     """
-    m = _THY_IN_ERROR.search(theory)
-    if m:
-        return _alias(m.group(1))
-    if "." in theory:
-        return _alias(SESSION_TARGETS.get(theory.split(".", 1)[0]) or "") or None
-    return None
 
+    def __init__(self, dirs: set[str], targets: dict, aliases: dict,
+                 collisions: set[str] | None = None):
+        self.dirs = dirs
+        self.targets = targets          # build target -> session dir, or None
+        self.aliases = aliases          # session dir label -> label
+        self.collisions = collisions or set()
 
-def error_dirs(ep: list[dict]) -> set[str]:
-    """Session dirs this episode's errors point at.
+    # ---------------------------------------------------------------- fitting
 
-    Prefers the structured `error_loci` and falls back to scraping the
-    prose head, so the two eras of record read the same way.
-    """
-    out = set()
-    for rec in ep:
-        for theory, _line in rec.get("error_loci") or []:
-            if (d := _locus_dir(theory)):
+    @classmethod
+    def learn(cls, recs: list[dict], overrides: dict | None = None
+              ) -> "Attribution":
+        """Fit from the corpus, then apply the project's own declarations.
+
+        `overrides` is a project's attribution facts, the ones no corpus can
+        show: `{"aliases": {"aem": "ae"}, "targets": {"HOAU_Spike": null}}`.
+        A target mapped to **null** is a declared exclusion — a session the
+        project builds *against* rather than works *on* — and is distinct
+        from a target that is merely absent, which is what an unmapped or
+        newly-renamed session looks like.  Keeping the two distinguishable is
+        why the exclusion is written down rather than left out.
+
+        Overrides are loaded from a JSON file beside the corpus, so they live
+        with the data they describe instead of in this package; see
+        `load_overrides`.
+        """
+        overrides = overrides or {}
+        dirs = session_dirs(recs)
+
+        # Two directories sharing a last component would collapse into one
+        # label, silently merging two developments.  Keep the full path for
+        # those, which is ugly and correct, rather than short and wrong.
+        seen: dict[str, list[str]] = {}
+        for d in dirs:
+            seen.setdefault(_label(d), []).append(d)
+        collisions = {d for group in seen.values() if len(group) > 1
+                      for d in group}
+
+        targets = cls._learn_targets(recs, dirs)
+        targets.update(overrides.get("targets") or {})
+        return cls(dirs, targets, overrides.get("aliases") or {}, collisions)
+
+    @staticmethod
+    def _learn_targets(recs: list[dict], dirs: set[str]) -> dict:
+        """Build target -> session directory, from two signals in the corpus.
+
+        1. **ROOT declarations** — authoritative.  `session X = ...` inside
+           `<dir>/ROOT` is Isabelle's own statement that X lives in `<dir>`;
+           nothing infers better than that, and the recorder already captures
+           ROOT files because they are on the source allowlist.  This is the
+           same fact ndtht's hand-maintained table was periodically
+           re-derived from git to obtain.
+        2. **Co-occurrence** — inference, for sessions whose ROOT was never
+           touched inside the corpus window.  A record that edits exactly one
+           session directory and names a target teaches one pairing.  Noisy
+           (you can build X while editing Y) but very lopsided: in ndtht the
+           true pairings win 286-to-1, 69-to-0 and 12-to-1, so a near-tie is
+           treated as absence of evidence rather than weak evidence.
+
+        Both are needed.  Co-occurrence alone misses a target that only ever
+        appears on builds with no captured diff -- ndtht's
+        `Multitape_Alphabet_Reduction` is exactly that, and losing it dropped
+        two trajectories from `ar` to unattributed.
+        """
+        out = {}
+
+        # (1) ROOT declarations.  Context and added lines both count: either
+        # way the file at that path declares that session.
+        for rec in recs:
+            for path, body in _split_files(rec.get("diff") or ""):
+                if PurePosixPath(path).name not in ("ROOT", "ROOTS"):
+                    continue
+                d = str(PurePosixPath(path).parent)
+                if d not in dirs:
+                    continue
+                for line in body:
+                    if line[:1] not in ("+", " "):
+                        continue
+                    m = _ROOT_SESSION.match(line[1:])
+                    if m:
+                        out[m.group(1)] = d
+
+        # (2) Co-occurrence, for whatever route 1 could not see.
+        tally: dict[str, dict[str, int]] = {}
+        for rec in recs:
+            touched = {str(PurePosixPath(p).parent)
+                       for p, _ in _split_files(rec.get("diff") or "")
+                       if _is_theory(p)}
+            touched &= dirs
+            if len(touched) != 1:
+                continue
+            d = next(iter(touched))
+            for t in _targets_of(rec):
+                if t in out:
+                    continue
+                tally.setdefault(t, {})
+                tally[t][d] = tally[t].get(d, 0) + 1
+
+        for t, counts in tally.items():
+            ranked = sorted(counts.items(), key=lambda kv: -kv[1])
+            best, n = ranked[0]
+            runner = ranked[1][1] if len(ranked) > 1 else 0
+            if n >= max(1, runner * _TARGET_DOMINANCE):
+                out[t] = best
+        return out
+
+    # --------------------------------------------------------------- labelling
+
+    def label(self, dirpath: str) -> str:
+        short = dirpath if dirpath in self.collisions else _label(dirpath)
+        return self.aliases.get(short, short)
+
+    def path_dir(self, path: str) -> str | None:
+        """Session directory for a changed source path, or None if outside.
+
+        Bounded by the derived set, which is what keeps `bin/` and
+        `document/` from becoming developments: a directory that has never
+        held a theory cannot name one.
+        """
+        d = str(PurePosixPath(path).parent)
+        return self.label(d) if d in self.dirs else None
+
+    def locus_dir(self, theory: str) -> str | None:
+        """Session dir for one `error_loci` entry, whichever form it took.
+
+        Post-2026-07-29 records carry the loci whole (§13.2.1), in two shapes
+        depending on which side reported them: a compile error gives a *path*,
+        `~/…/t/ae/Wrap_Defs.thy`; a watchdog kill gives Isabelle's
+        *session-qualified* name, `Alphabet_Enlargement.EncodingWrap_WF`.  The
+        qualifier is the session, which is why keeping it matters — the base
+        name alone is ambiguous across a tree's re-layouts.
+        """
+        m = _THY_PATH_IN_TEXT.search(theory)
+        if m and m.group(1):
+            d = str(PurePosixPath(m.group(1).rstrip("/")))
+            # An error path is absolute, or relative to somewhere else; match
+            # it against the corpus's directories by suffix.
+            for known in self.dirs:
+                if d == known or d.endswith("/" + known):
+                    return self.label(known)
+            return None
+        if "." in theory:
+            got = self.targets.get(theory.split(".", 1)[0])
+            return self.label(got) if got else None
+        return None
+
+    def command_dir(self, rec: dict) -> str | None:
+        """The session dir this build targeted, or None if unattributable.
+
+        Two readings, because a corpus contains cases where they disagree and
+        the command is right.  An explicit `-d <dir>` naming a known session
+        directory wins: ndtht's ten `-d t -d t/scratch-ar NDTHT_ScratchAR`
+        runs built a staging directory that was never committed, so no ROOT
+        records it.  Failing that, the target name is mapped.
+
+        None means *no evidence*, not 'nothing was built' — an unmapped
+        target is a session this corpus has never seen edited, which cannot
+        and should not be attributed to one of the project's developments.
+        """
+        cmd = rec.get("command") or []
+        dirs, i = [], 0
+        while i < len(cmd):
+            arg = cmd[i]
+            if arg == "-d":
+                dirs.append(cmd[i + 1] if i + 1 < len(cmd) else "")
+                i += 2
+            elif arg in _FLAG_TAKES_ARG:
+                i += 2
+            else:
+                i += 1
+        named = {self.label(d.strip("/")) for d in dirs
+                 if d.strip("/") in self.dirs}
+        if len(named) == 1:
+            return named.pop()
+        from_target = {self.targets[t] for t in _targets_of(rec)
+                       if self.targets.get(t)}
+        return self.label(from_target.pop()) if len(from_target) == 1 else None
+
+    # ------------------------------------------------------------- the ladder
+
+    def error_dirs(self, ep: list[dict]) -> set[str]:
+        """Session dirs this episode's errors point at.
+
+        Prefers the structured `error_loci` and falls back to scraping the
+        prose head, so the two eras of record read the same way.
+        """
+        out = set()
+        for rec in ep:
+            for theory, _line in rec.get("error_loci") or []:
+                if (d := self.locus_dir(theory)):
+                    out.add(d)
+            if (d := self.locus_dir(rec.get("error_head") or "")):
                 out.add(d)
-        m = _THY_IN_ERROR.search(rec.get("error_head") or "")
-        if m:
-            out.add(_alias(m.group(1)))
-    return out
+        return out
+
+    def project(self, ep: list[dict]) -> str:
+        """Which development a trajectory belongs to: a session dir,
+        'tooling' (no theory touched), or 'mixed' (several at once).
+
+        Three routes, tried strongest first, because they are not equally
+        good evidence and the weaker ones exist only to rescue records the
+        stronger ones cannot see:
+
+        1. **Diff paths** — authoritative: the files the attempt actually
+           edited.
+        2. **Error heads** — what the build failed *in*.  Weaker, since a
+           build can fail in a dependency it did not edit, but it is all that
+           survives an episode the recorder captured no diff for, and in
+           ndtht it recovers 23 of the 35 such episodes rather than losing
+           them.
+        3. **The build target** — weakest, and last for a reason: you can
+           build AE while editing base, so the target says what was *run*,
+           not what was worked on.  For a run with no diff and an error head
+           naming no file — a bare `wall timeout (40s wall)` — it is the only
+           signal there is, and 12 multi-attempt trajectories sat
+           unattributed on exactly that.
+        """
+        dirs, other = set(), False
+        for rec in ep:
+            for path, body in _split_files(rec.get("diff") or ""):
+                # Per *file*, not per record.  A record is code-class if any
+                # one of its files is, and taking every path from it books
+                # the doc files along for the ride: one ndtht run edited
+                # `bin/isabelle-watchdog.py` and `t/document/glossary.tex`
+                # together, and `t/document/` — a shared LaTeX include
+                # directory, not a session — became a phantom session of one
+                # trajectory.
+                if classify_file(path, body)[0] != "code":
+                    continue
+                if (d := self.path_dir(path)):
+                    dirs.add(d)
+                else:
+                    other = True
+        if not dirs:
+            dirs = self.error_dirs(ep)
+        # `other` is route 1 *succeeding*: paths were recorded and none was in
+        # a session directory.  The target must not override that — a build
+        # whose only captured edit is a `bin/` script is tooling work, and
+        # deferring to the target would relabel 9 such ndtht runs as proof
+        # search.
+        if not dirs and not other:
+            dirs = {d for rec in ep if (d := self.command_dir(rec))}
+        if len(dirs) == 1:
+            return dirs.pop()
+        if dirs:
+            return "mixed"
+        return "tooling" if other else "none"
 
 
-def command_dir(rec: dict) -> str | None:
-    """The `t/` session dir this build targeted, or None if unattributable.
-
-    Two readings, because the corpus contains a case where they disagree and
-    the command is right.  An explicit `-d t/<dir>` names the tree being
-    built and wins: the ten `-d t -d t/scratch-ar NDTHT_ScratchAR` runs built
-    a staging directory that was never committed, so no ROOT records it and
-    `SESSION_TARGETS` maps that name to the earlier `t/scratch` incarnation.
-    Failing that, the target name is mapped.
-
-    None means *no evidence*, not 'nothing was built' — an unmapped target is
-    a session outside the theory tree, which this cannot and should not
-    attribute to one of ours.
-    """
+def _targets_of(rec: dict) -> list[str]:
+    """Session names named on the build command line."""
     cmd = rec.get("command") or []
-    dirs, targets, i = [], [], 0
+    out, i = [], 0
     while i < len(cmd):
         arg = cmd[i]
-        if arg == "-d":
-            dirs.append(cmd[i + 1] if i + 1 < len(cmd) else "")
-            i += 2
-        elif arg in _FLAG_TAKES_ARG:
+        if arg in _FLAG_TAKES_ARG:
             i += 2
         elif arg.startswith("-") or arg in ("isabelle", "build"):
             i += 1
         else:
-            targets.append(arg)
+            out.append(arg)
             i += 1
-    sub = {d[2:].strip("/") for d in dirs if d.startswith("t/")}
-    if len(sub) == 1:
-        return _alias(sub.pop())
-    named = {SESSION_TARGETS[t] for t in targets if SESSION_TARGETS.get(t)}
-    return _alias(named.pop()) if len(named) == 1 else None
+    return out
+
+
+OVERRIDES_SUFFIX = ".attribution.json"
+
+
+def load_overrides(corpus_path) -> dict:
+    """A project's own attribution facts, read from beside its corpus.
+
+    `<corpus>.attribution.json`, e.g. `builds.jsonl.attribution.json`.  It
+    holds the things no corpus can show: which directories were the same
+    development under an earlier name, and which build targets are sessions
+    the project builds *against* rather than works *on*.
+
+        {"aliases": {"aem": "ae", "scratch-nae": "ae"},
+         "targets": {"HOAU_Spike": null, "NDTHT_ScratchAR": "scratch"}}
+
+    It lives with the corpus rather than in this package deliberately.  These
+    are facts about one project's history; a reader that shipped them would
+    be a reader that had to be edited every time a new project used it, which
+    is the mistake this whole module is a correction of.  Absent file, empty
+    dict, no attribution facts — which is the right default, since a project
+    with no renames needs none.
+    """
+    p = Path(str(corpus_path) + OVERRIDES_SUFFIX)
+    if not p.exists():
+        return {}
+    return json.loads(p.read_text())
+
+
+# The fitted attribution for the corpus currently being read.  Module-level
+# because attribution is a property of the *corpus*, not of an episode, while
+# every view asks the question one episode at a time; and every view loads the
+# whole corpus before asking.  `fit` is called once, from the entry points.
+_FITTED: "Attribution | None" = None
+
+
+def fit_attribution(recs: list[dict], corpus_path=None) -> Attribution:
+    """Derive the attribution for these records and make it the default.
+
+    Not `fit`: this module already had one, for the power-law fit of the
+    length distribution, defined further down.  The collision was silent --
+    Python simply kept the later definition -- and every attribution call
+    would have received the distribution fitter instead.
+    """
+    global _FITTED
+    overrides = load_overrides(corpus_path) if corpus_path else {}
+    _FITTED = Attribution.learn(recs, overrides)
+    return _FITTED
+
+
+def use_attribution(at: Attribution) -> Attribution:
+    """Install an attribution built by hand, instead of deriving one.
+
+    For callers that already know their corpus's shape -- and for tests,
+    which should state what they assume rather than inherit it from a table
+    inside this package.
+    """
+    global _FITTED
+    _FITTED = at
+    return at
+
+
+def fitted() -> Attribution:
+    if _FITTED is None:
+        raise RuntimeError(
+            "attribution has not been fitted; call "
+            "attempts.fit_attribution(records, path) "
+            "after loading a corpus")
+    return _FITTED
 
 
 def project(ep: list[dict]) -> str:
-    """Which development a trajectory belongs to: a `t/` session dir,
-    'tooling' (no theory touched), or 'mixed' (several sessions at once).
+    return fitted().project(ep)
 
-    Three routes, tried strongest first, because they are not equally good
-    evidence and the weaker ones exist only to rescue records the stronger
-    ones cannot see:
 
-    1. **Diff paths** — authoritative: the files the attempt actually edited.
-    2. **Error heads** — what the build failed *in*.  Weaker, since a build
-       can fail in a dependency it did not edit, but it is all that survives
-       an episode the recorder captured no diff for, and it recovers 23 of
-       the 35 such episodes rather than losing them.
-    3. **The build target** — weakest, and last for a reason: you can build
-       AE while editing base, so the target says what was *run*, not what was
-       worked on.  For a run with no diff and an error head naming no file —
-       a bare `wall timeout (40s wall)` — it is the only signal there is, and
-       12 multi-attempt trajectories sat unattributed on exactly that.
-    """
-    dirs, other = set(), False
-    for rec in ep:
-        for path, body in _split_files(rec.get("diff") or ""):
-            # Per *file*, not per record.  A record is code-class if any one
-            # of its files is, and taking every path from it books the doc
-            # files along for the ride: one run edited `bin/isabelle-watchdog.py`
-            # and `t/document/glossary.tex` together, and `t/document/` — the
-            # shared LaTeX include directory, not a session — became a phantom
-            # session of one trajectory.
-            if classify_file(path, body)[0] != "code":
-                continue
-            m = _PROJECT_DIR.match(path)
-            if m:
-                dirs.add(_alias(m.group(1)))
-            else:
-                other = True
-    if not dirs:
-        dirs = error_dirs(ep)
-    # `other` is route 1 *succeeding*: paths were recorded and none was under
-    # `t/`.  The target must not override that — a build of `-d t <session>`
-    # whose only captured edit is a `bin/` script is tooling work, and
-    # deferring to the target would relabel 9 such runs as proof search.
-    if not dirs and not other:
-        dirs = {d for rec in ep if (d := command_dir(rec))}
-    if len(dirs) == 1:
-        return dirs.pop()
-    if dirs:
-        return "mixed"
-    return "tooling" if other else "none"
+def error_dirs(ep: list[dict]) -> set[str]:
+    return fitted().error_dirs(ep)
+
+
+def command_dir(rec: dict) -> str | None:
+    return fitted().command_dir(rec)
 
 
 def is_attempt(rec: dict, prev: dict | None) -> bool:

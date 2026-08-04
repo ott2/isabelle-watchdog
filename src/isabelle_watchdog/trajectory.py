@@ -969,6 +969,13 @@ def main() -> int:
         print(f"no attempts recorded yet ({path} is empty)", file=sys.stderr)
         return 1
 
+    # Attribution is a property of the corpus -- which directories hold
+    # theories, which build target goes with which -- so it is derived once,
+    # here, and every view then asks about one episode at a time.  Passing
+    # the path too lets a project supply the facts no corpus can show
+    # (renames, deliberate exclusions) from a file beside its data.
+    _attempts().fit_attribution(records, path)
+
     own = {"check": cmd_check, "repair": cmd_repair, "replay": cmd_replay,
            "progress": cmd_progress, "notes": cmd_notes, "flips": cmd_flips,
            "extract": cmd_extract}

@@ -39,6 +39,7 @@ Usage:  bin/oneshot-significance.py [-i BUILDS_JSONL] [-B REPLICATES]
 from __future__ import annotations
 
 import argparse
+import collections
 
 import math
 import random
@@ -52,8 +53,37 @@ from pathlib import Path
 from .. import attempts as A
 from .. import corpus
 
-PRE_NTR = ["base", "ae", "ar", "art"]
+# Which developments to contrast.  Was `PRE_NTR = ["base", "ae", "ar", "art"]`
+# against a hard-coded "ntr" -- ndtht's question ("did the last development
+# start from a worse place?") frozen into a tool meant to read any corpus.
+# The generic form is one development against the rest, and the default picks
+# the largest by counted trajectories, which on ndtht is `ntr` and so
+# reproduces the original comparison exactly.  Override with --a / --b.
 SEED = 20260729  # fixed so the interval is reproducible run to run
+
+
+def choose_groups(rows, a_arg=None, b_arg=None):
+    """(name_a, group_a, name_b, group_b), or None if there is no contrast.
+
+    A corpus with one development supports no comparison at all.  That is
+    not a failure -- 43sp is a single session and the question simply does
+    not arise there -- so the caller reports it and stops rather than
+    treating it as a defect in the data.
+    """
+    sessions = collections.Counter(sess for sess, _, _ in rows)
+    real = [s for s in sessions if s not in ("tooling", "none", "mixed")]
+    if len(real) < 2 and not (a_arg and b_arg):
+        return None
+    if a_arg and b_arg:
+        a_set, b_set = set(a_arg.split(",")), set(b_arg.split(","))
+        name_a, name_b = a_arg, b_arg
+    else:
+        biggest = max(real, key=lambda s: sessions[s])
+        b_set = {biggest}
+        a_set = set(real) - b_set
+        name_a, name_b = "+".join(sorted(a_set)), biggest
+    return (name_a, [r for r in rows if r[0] in a_set],
+            name_b, [r for r in rows if r[0] in b_set])
 
 
 
@@ -90,7 +120,7 @@ def naive_z(a: list, b: list) -> tuple[float, float]:
     return z, math.erfc(abs(z) / math.sqrt(2))
 
 
-def day_bootstrap(rows: list, B: int) -> list[float]:
+def day_bootstrap(rows: list, B: int, a_set: set, b_set: set) -> list[float]:
     """Resample whole days with replacement; recompute the gap each time.
 
     Days are the candidate cluster: within a day the same lemma, the same
@@ -105,8 +135,8 @@ def day_bootstrap(rows: list, B: int) -> list[float]:
     gaps = []
     for _ in range(B):
         pool = [r for d in rng.choices(days, k=len(days)) for r in by_day[d]]
-        pre = [r for r in pool if r[0] in PRE_NTR]
-        ntr = [r for r in pool if r[0] == "ntr"]
+        pre = [r for r in pool if r[0] in a_set]
+        ntr = [r for r in pool if r[0] in b_set]
         if pre and ntr:
             gaps.append(rate(pre) - rate(ntr))
     return sorted(gaps)
@@ -116,6 +146,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-i", "--input", default=None)
     ap.add_argument("-B", type=int, default=10000, help="bootstrap replicates")
+    ap.add_argument("--a", metavar="S,S", help="comma-separated sessions for "
+                    "the first group (default: every development except the "
+                    "largest)")
+    ap.add_argument("--b", metavar="S,S", help="comma-separated sessions for "
+                    "the second group (default: the largest development)")
     ns = ap.parse_args()
     # Resolve once, here: the default is not a constant any more
     # (bin/corpus.py -- it depends on where the operator is standing).
@@ -124,27 +159,40 @@ def main() -> int:
     except corpus.CorpusError as e:
         print(f'FAIL: {e}', file=sys.stderr)
         return 1
+    # Attribution is derived from the whole corpus (see attempts.Attribution),
+    # so it is fitted once here before any episode is labelled.
+    A.fit_attribution(corpus.load(ns.input), ns.input)
 
     rows = trials(Path(ns.input))
-    pre = [r for r in rows if r[0] in PRE_NTR]
-    ntr = [r for r in rows if r[0] == "ntr"]
+    chosen = choose_groups(rows, ns.a, ns.b)
+    if chosen is None:
+        print("only one development in this corpus, so there are no two groups "
+              "to contrast.\nThis audit asks whether the one-shot rate differs "
+              "between developments;\na single-session project has no such "
+              "question.  Force a split with --a/--b.")
+        return 0
+    name_a, pre, name_b, ntr = chosen
+    a_set = {r[0] for r in pre}
+    b_set = {r[0] for r in ntr}
     if not pre or not ntr:
-        print("FAIL: need both groups; is this the merged log?", file=sys.stderr)
+        print(f"FAIL: no counted trajectories in {name_a!r} or {name_b!r}",
+              file=sys.stderr)
         return 1
 
     gap = rate(pre) - rate(ntr)
-    print("pre-ntr vs ntr one-shot rate\n")
-    print(f"  pre-ntr  {rate(pre):.3f}  n={len(pre)}   "
+    print(f"{name_a} vs {name_b} one-shot rate\n")
+    w = max(len(name_a), len(name_b), 7)
+    print(f"  {name_a:{w}}  {rate(pre):.3f}  n={len(pre)}   "
           f"({len({d for _, d, _ in pre})} days)")
-    print(f"  ntr      {rate(ntr):.3f}  n={len(ntr)}   "
+    print(f"  {name_b:{w}}  {rate(ntr):.3f}  n={len(ntr)}   "
           f"({len({d for _, d, _ in ntr})} days)")
-    print(f"  gap      {gap:.3f}")
+    print(f"  {'gap':{w}}  {gap:+.3f}")
 
     z, p = naive_z(pre, ntr)
     print(f"\n  naive two-proportion test:  z = {z:.2f}, p = {p:.1e}")
     print("    assumes every trajectory is an independent draw")
 
-    gaps = day_bootstrap(rows, ns.B)
+    gaps = day_bootstrap(rows, ns.B, a_set, b_set)
     lo, hi = gaps[int(0.025 * len(gaps))], gaps[int(0.975 * len(gaps))]
     crosses = sum(1 for g in gaps if g <= 0) / len(gaps)
     print(f"\n  day-clustered bootstrap ({len(gaps)} replicates):")
@@ -155,8 +203,8 @@ def main() -> int:
     print(f"    design effect (boot SE / naive SE)^2: "
           f"{(boot_se / naive_se) ** 2:.1f}x")
 
-    print("\n  per-session, since pre-ntr pools four unlike developments:")
-    for sess in PRE_NTR + ["ntr"]:
+    print(f"\n  per-session, since {name_a} pools unlike developments:")
+    for sess in sorted(a_set) + sorted(b_set):
         rs = [r for r in rows if r[0] == sess]
         if rs:
             print(f"    {sess:8} {rate(rs):.3f}  n={len(rs):4}  "

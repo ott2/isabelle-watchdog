@@ -113,6 +113,9 @@ def main() -> int:
     except corpus.CorpusError as e:
         print(f'FAIL: {e}', file=sys.stderr)
         return 1
+    # Attribution is derived from the whole corpus (see attempts.Attribution),
+    # so it is fitted once here before any episode is labelled.
+    A.fit_attribution(corpus.load(ns.input), ns.input)
 
     scopes: dict[str, dict[str, list[int]]] = {
         "code": {}, "proof": {}, "attempt": {}}

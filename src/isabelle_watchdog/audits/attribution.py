@@ -5,7 +5,7 @@
 strength (logging-design.md §13.2.1): the paths a trajectory's code deltas
 touch, then the file named in an Isabelle error head, then the session named
 on the `isabelle build` command line.  The last needs a declared map of
-historical session names, `attempts.SESSION_TARGETS`.
+session names, now derived from the corpus (`attempts.Attribution`).
 
 That map is the failure mode this guards.  It is an allowlist, so an
 unmapped target does not raise — it *declines*, and the trajectory quietly
@@ -19,11 +19,11 @@ with no error anywhere.  So this reports:
      genuinely not a `t/` session (the HOAU spike builds against the
      tree's sessions but is not about them).
 
-Exits non-zero on an unmapped target that a trajectory relied on.  Re-derive
-the map itself with `bin/derive-session-map.sh`, which reads it back out of
-every committed `t/*/ROOT`.
+Exits non-zero on an unmapped target that a trajectory actually relied on --
+i.e. one whose absence left a trajectory unattributed.  A target that is
+merely unmapped and unneeded is reported, not failed.
 
-Usage:  bin/audit-attribution.py [-i BUILDS_JSONL]
+Usage:  python -m isabelle_watchdog.audits.attribution [-i CORPUS]
 """
 
 from __future__ import annotations
@@ -69,14 +69,14 @@ def rung(ep: list[dict]) -> str:
     not by sharing its internals, so a change to one shows up as a
     disagreement here instead of propagating silently.
     """
+    at = A.fitted()
     dirs, other = set(), False
     for rec in ep:
         for path, body in A._split_files(rec.get("diff") or ""):
             if A.classify_file(path, body)[0] != "code":
                 continue
-            m = A._PROJECT_DIR.match(path)
-            if m:
-                dirs.add(A._alias(m.group(1)))
+            if (d := at.path_dir(path)):
+                dirs.add(d)
             else:
                 other = True
     if dirs:
@@ -84,7 +84,7 @@ def rung(ep: list[dict]) -> str:
     if A.error_dirs(ep):
         return "2 error head"
     if other:
-        return "-- outside t/"
+        return "-- outside any session dir"
     if {d for rec in ep if (d := A.command_dir(rec))}:
         return "3 build target"
     return "-- no evidence"
@@ -101,6 +101,9 @@ def main() -> int:
     except corpus.CorpusError as e:
         print(f'FAIL: {e}', file=sys.stderr)
         return 1
+    # Attribution is derived from the whole corpus (see attempts.Attribution),
+    # so it is fitted once here before any episode is labelled.
+    A.fit_attribution(corpus.load(ns.input), ns.input)
 
     recs = corpus.load(corpus.resolve(ns.input))
     if not recs:
@@ -109,21 +112,22 @@ def main() -> int:
     episodes = [ep for ep in A._episodes(recs) if ep[-1]["outcome"] == "ok"
                 and A.attempt_length(ep) is not None]
 
-    print("1. build targets in the corpus vs the declared map\n")
+    at = A.fitted()
+    print("1. build targets in the corpus vs the derived map\n")
     seen: Counter[str] = Counter()
     for rec in recs:
         for t in targets(rec):
             seen[t] += 1
     unmapped = []
     for t, n in sorted(seen.items(), key=lambda kv: -kv[1]):
-        if t not in A.SESSION_TARGETS:
+        if t not in at.targets:
             unmapped.append(t)
-            verdict = "NOT IN MAP"
-        elif A.SESSION_TARGETS[t] is None:
-            # A declared exclusion, not an oversight — see SESSION_TARGETS.
+            verdict = "NOT DERIVED"
+        elif at.targets[t] is None:
+            # A declared exclusion, not an oversight — see load_overrides.
             verdict = "-> (declared out of tree)"
         else:
-            verdict = "-> " + A._alias(A.SESSION_TARGETS[t])
+            verdict = "-> " + at.label(at.targets[t])
         print(f"   {n:5}  {t:34} {verdict}")
 
     print("\n2. which rung carried each trajectory\n")
@@ -149,8 +153,13 @@ def main() -> int:
     if biting:
         print(f"FAIL: {len(biting)} trajectories fell through to 'none' on "
               f"{len(unmapped)} unmapped target(s): {', '.join(unmapped)}")
-        print("      re-derive with bin/derive-session-map.sh if a session "
-              "was renamed")
+        print("      the target -> directory map is derived from the corpus: "
+              "from `session` lines\n      in captured ROOT diffs, else from "
+              "which directory a build's edits touched.\n      A target that "
+              "appears only on builds with no captured diff, and whose ROOT\n"
+              "      this corpus never saw edited, cannot be derived -- declare "
+              "it in\n      <corpus>.attribution.json if it should map "
+              "somewhere.")
         return 1
     # `tooling` and `none` are both unattributed but for opposite reasons:
     # the first is route 1 succeeding and saying "not a t/ path", the second
@@ -161,7 +170,7 @@ def main() -> int:
     print(f"PASS: {len(episodes)} trajectories; rungs "
           f"{by_rung.get('1 diff path', 0)}/{by_rung.get('2 error head', 0)}/"
           f"{by_rung.get('3 build target', 0)}, "
-          f"{n_tool} tooling (no t/ path), {n_none} no evidence")
+          f"{n_tool} tooling (outside any session dir), {n_none} no evidence")
     return 0
 
 

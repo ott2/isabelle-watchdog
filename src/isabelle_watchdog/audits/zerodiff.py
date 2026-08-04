@@ -44,7 +44,9 @@ FIX = "2026-07-27"          # untracked-source capture fix (logging-design 13.1)
 
 # An Isabelle error head carries the failing file's path, which survives even
 # when the diff does not — the one handle on an episode the recorder missed.
-_THY_IN_ERROR = re.compile(r"/t/([A-Za-z0-9_-]+)/([A-Za-z0-9_]+)\.thy")
+# Attribution of that path is `Attribution.locus_dir`'s job, derived from the
+# corpus; this file used to carry its own `/t/(...)/(...)\.thy` copy, which
+# meant a second place ndtht's layout was assumed and a second thing to fix.
 
 
 
@@ -64,6 +66,9 @@ def main() -> int:
     except corpus.CorpusError as e:
         print(f'FAIL: {e}', file=sys.stderr)
         return 1
+    # Attribution is derived from the whole corpus (see attempts.Attribution),
+    # so it is fitted once here before any episode is labelled.
+    A.fit_attribution(corpus.load(ns.input), ns.input)
     recs = corpus.load(corpus.resolve(ns.input))
     eps = A._episodes(recs)
 
@@ -142,17 +147,18 @@ def main() -> int:
     print("   failing episode can still be attributed to a session:\n")
     named = Counter()
     for ep in failing:
-        hits = {m.group(1) for r in ep
-                for m in [_THY_IN_ERROR.search(r.get("error_head") or "")]
-                if m}
+        at = A.fitted()
+        hits = {d for r in ep
+                if (d := at.locus_dir(r.get("error_head") or ""))}
         if hits:
             named[",".join(sorted(hits))] += 1
-    print(f"   {sum(named.values())} of {len(failing)} name a t/<sess>/*.thy:")
+    print(f"   {sum(named.values())} of {len(failing)} name a theory in a "
+          f"known session directory:")
     for k, v in named.most_common():
         print(f"      {k:14} {v}")
-    print("\n   (t/scratch-ar appears only here — it was never committed, so")
-    print("   it has no captured diff anywhere in the corpus and no git")
-    print("   history to say whether its work graduated.)")
+    print("\n   A session that appears only here was never committed, so it")
+    print("   has no captured diff anywhere in the corpus and no git history")
+    print("   to say whether its work graduated.")
     return 0
 
 
