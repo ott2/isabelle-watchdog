@@ -151,6 +151,9 @@ def main() -> int:
                     "largest)")
     ap.add_argument("--b", metavar="S,S", help="comma-separated sessions for "
                     "the second group (default: the largest development)")
+    ap.add_argument("--attribution", metavar="FILE", default=None,
+                    help="JSON of attribution facts this corpus cannot show "
+                         "(default: $TRAJECTORY_ATTRIBUTION)")
     ns = ap.parse_args()
     # Resolve once, here: the default is not a constant any more
     # (bin/corpus.py -- it depends on where the operator is standing).
@@ -161,7 +164,11 @@ def main() -> int:
         return 1
     # Attribution is derived from the whole corpus (see attempts.Attribution),
     # so it is fitted once here before any episode is labelled.
-    A.fit_attribution(corpus.load(ns.input), ns.input)
+    try:
+        A.fit_attribution(corpus.load(ns.input), ns.attribution)
+    except corpus.CorpusError as e:
+        print(f'FAIL: {e}', file=sys.stderr)
+        return 1
 
     rows = trials(Path(ns.input))
     chosen = choose_groups(rows, ns.a, ns.b)

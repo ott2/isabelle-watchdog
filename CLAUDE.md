@@ -179,16 +179,25 @@ the whole corpus, entry points call `attempts.fit_attribution(records, path)`
 once after loading; `trajectory.py` does it for all thirteen subcommands.
 
 What genuinely cannot be derived — a directory rename, a session built
-*against* rather than worked *on* — goes in an optional
-`<corpus>.attribution.json` beside the data, never in this package:
+*against* rather than worked *on* — comes from a file the caller **names**,
+via `--attribution FILE` or `$TRAJECTORY_ATTRIBUTION`:
 
 ```json
-{"aliases": {"aem": "ae"}, "targets": {"HOAU_Spike": null}}
+{"_note": "free-text, ignored", "aliases": {"aem": "ae"},
+ "targets": {"HOAU_Spike": null}}
 ```
 
-A target mapped to `null` is a *declared exclusion*, and stays distinguishable
-from one that is merely absent — absence is what a rename looks like, and an
-oversight should not read as a decision.
+Named, not discovered beside the corpus. A conventional sidecar path sounds
+convenient and is not: it makes overriding anything require *write access to
+the data*, so trying an alternative attribution — or reading a corpus someone
+sent you — means editing a dataset. It also lets a file nobody passed on the
+command line change published statistics.
+
+A named file must exist (a typo must not read as "no overrides"), and an
+unrecognised key is an error — `target` for `targets` would otherwise be
+accepted and do nothing. A target mapped to `null` is a *declared exclusion*,
+and stays distinguishable from one merely absent: absence is what a rename
+looks like, and an oversight should not read as a decision.
 
 ### 4. `build.py` — the entry point
 
@@ -222,6 +231,7 @@ confusing Isabelle error seconds later, a missing one is a clear message now.
 | `BUILD_SESSION` / `BUILD_SESSION_DIR` | — / `.` | session to build, and where its ROOT is |
 | `BUILD_NOTE` / `BUILD_NOTE_FILE` | — | note text / pending-note path |
 | `TRAJECTORY_CORPUS` | — | read a specific corpus, ignoring the above |
+| `TRAJECTORY_ATTRIBUTION` | — | attribution facts a corpus cannot show (`--attribution`) |
 
 Corpus resolution (`corpus.py`): `$TRAJECTORY_CORPUS`, then
 `$WATCHDOG_LOG_DIR/builds.jsonl` — the same variable the writers honour, so a

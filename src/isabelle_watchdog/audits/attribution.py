@@ -93,6 +93,9 @@ def rung(ep: list[dict]) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-i", "--input", default=None)
+    ap.add_argument("--attribution", metavar="FILE", default=None,
+                    help="JSON of attribution facts this corpus cannot show "
+                         "(default: $TRAJECTORY_ATTRIBUTION)")
     ns = ap.parse_args()
     # Resolve once, here: the default is not a constant any more
     # (bin/corpus.py -- it depends on where the operator is standing).
@@ -103,7 +106,11 @@ def main() -> int:
         return 1
     # Attribution is derived from the whole corpus (see attempts.Attribution),
     # so it is fitted once here before any episode is labelled.
-    A.fit_attribution(corpus.load(ns.input), ns.input)
+    try:
+        A.fit_attribution(corpus.load(ns.input), ns.attribution)
+    except corpus.CorpusError as e:
+        print(f'FAIL: {e}', file=sys.stderr)
+        return 1
 
     recs = corpus.load(corpus.resolve(ns.input))
     if not recs:
@@ -153,13 +160,15 @@ def main() -> int:
     if biting:
         print(f"FAIL: {len(biting)} trajectories fell through to 'none' on "
               f"{len(unmapped)} unmapped target(s): {', '.join(unmapped)}")
-        print("      the target -> directory map is derived from the corpus: "
-              "from `session` lines\n      in captured ROOT diffs, else from "
-              "which directory a build's edits touched.\n      A target that "
-              "appears only on builds with no captured diff, and whose ROOT\n"
-              "      this corpus never saw edited, cannot be derived -- declare "
-              "it in\n      <corpus>.attribution.json if it should map "
-              "somewhere.")
+        print("      The map is derived from the corpus: `session` lines in "
+              "captured ROOT diffs,\n      else which directory a build's "
+              "edits touched.  A target appearing only on\n      builds with "
+              "no captured diff, whose ROOT this corpus never saw edited, "
+              "cannot\n      be derived.  Declare it -- as a directory, or as "
+              "null if the project builds\n      against it rather than works "
+              "on it -- in a JSON file passed with\n      --attribution FILE "
+              "(or $TRAJECTORY_ATTRIBUTION):\n\n"
+              '          {"targets": {"%s": null}}\n' % unmapped[0])
         return 1
     # `tooling` and `none` are both unattributed but for opposite reasons:
     # the first is route 1 succeeding and saying "not a t/ path", the second

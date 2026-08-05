@@ -143,7 +143,56 @@ def test_learns_targets_from_root_and_co_occurrence():
     print("\nPASS: session dirs and target map derive from the corpus")
 
 
+def test_overrides_are_named_not_discovered(tmp=None):
+    """Attribution facts come from a path the caller gives, and a wrong path
+    is an error rather than a silent fallback to no overrides."""
+    import json, os, tempfile
+    d = Path(tempfile.mkdtemp())
+
+    good = d / "attr.json"
+    good.write_text(json.dumps({"_note": "ignored", "targets": {"Spike": None},
+                                "aliases": {"aem": "ae"}}))
+    got = A.load_overrides(good)
+    assert got["targets"] == {"Spike": None} and got["aliases"] == {"aem": "ae"}
+    print(f"   {good.name} -> targets={got['targets']} aliases={got['aliases']}")
+
+    # Nothing named, nothing loaded -- the right default for a project with
+    # no renames and no out-of-tree sessions.
+    os.environ.pop(A.ENV_ATTRIBUTION, None)
+    assert A.load_overrides(None) == {}
+    print("   nothing named -> {}")
+
+    # The env var is the other channel, for a project that always wants it.
+    os.environ[A.ENV_ATTRIBUTION] = str(good)
+    assert A.load_overrides(None)["targets"] == {"Spike": None}
+    os.environ.pop(A.ENV_ATTRIBUTION)
+    print(f"   ${A.ENV_ATTRIBUTION} -> same")
+
+    for bad, why in ((d / "absent.json", "a typo must not read as 'no overrides'"),
+                     (None, None)):
+        if bad is None:
+            continue
+        try:
+            A.load_overrides(bad)
+        except Exception as e:
+            print(f"   {bad.name} -> {type(e).__name__}: {e}")
+        else:
+            raise AssertionError(why)
+
+    # `target` for `targets` would otherwise be accepted and do nothing.
+    typo = d / "typo.json"
+    typo.write_text(json.dumps({"target": {"Spike": None}}))
+    try:
+        A.load_overrides(typo)
+    except Exception as e:
+        print(f"   {typo.name} -> {type(e).__name__}")
+    else:
+        raise AssertionError("a misspelled key must not be silently ignored")
+    print("\nPASS: overrides are named explicitly and fail loudly")
+
+
 if __name__ == "__main__":
     test_error_loci()
     test_derives_session_dirs_from_any_layout()
     test_learns_targets_from_root_and_co_occurrence()
+    test_overrides_are_named_not_discovered()

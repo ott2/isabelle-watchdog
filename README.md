@@ -80,6 +80,7 @@ build system a project already has.
 | `BUILD_SOURCE_PATHSPECS` | `*.thy *ROOT *ROOTS` | what counts as source |
 | `BUILD_SESSION` | — | session to build (`isabelle-build`) |
 | `TRAJECTORY_CORPUS` | — | read a specific corpus |
+| `TRAJECTORY_ATTRIBUTION` | — | attribution facts a corpus cannot show |
 
 The wall timeout is deliberately tight. A build that hits it is either looping
 or has become measurably more expensive, and both are worth knowing about;

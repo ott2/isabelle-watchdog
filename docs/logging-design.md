@@ -1043,9 +1043,10 @@ that direction backwards.
 > the hand-maintained table's labels exactly — 0 of 335 episodes move — and on
 > 43sp it attributes 16 of 19 where the table attributed none.  What genuinely
 > cannot be derived (a directory rename, a session built *against* rather than
-> worked *on*) goes in `<corpus>.attribution.json`, beside the data rather than
-> in the package.  `bin/derive-session-map.sh` is gone with the constant it
-> maintained.
+> worked *on*) comes from a file the caller names -- `--attribution FILE` or
+> `$TRAJECTORY_ATTRIBUTION` -- rather than one discovered beside the corpus,
+> so overriding an attribution never requires write access to the dataset.
+> `bin/derive-session-map.sh` is gone with the constant it maintained.
 
 The two routes above left 12 multi-attempt trajectories attributed to
 nothing at all — every one of them 0% one-shot, so their absence flattered

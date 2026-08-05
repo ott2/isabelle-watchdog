@@ -818,6 +818,11 @@ HELP = {
 # edit is an attempt.  The rest read individual records and never ask.
 FILTERS_DOC_ONLY = ("list", "episodes", "lengths")
 
+# Views that label a trajectory with the development it belongs to, and so can
+# be steered by a project's attribution overrides.  The integrity commands
+# never attribute, and offering them the flag would suggest otherwise.
+ATTRIBUTES = ("lengths", "episodes", "list", "classify", "show")
+
 
 def _attempts():
     """The reading and measuring views.
@@ -865,6 +870,12 @@ def build_parser() -> argparse.ArgumentParser:
                 s.add_argument("--all", action="store_true",
                                help="include doc-only deltas "
                                     "(default: code only)")
+            if name in ATTRIBUTES:
+                s.add_argument("--attribution", metavar="FILE", default=None,
+                               help="JSON of attribution facts this corpus "
+                                    "cannot show -- directory renames, and "
+                                    "targets built against rather than worked "
+                                    "on (default: $TRAJECTORY_ATTRIBUTION)")
             if name == "repair":
                 s.add_argument("--apply", action="store_true",
                                help="write the corpus back")
@@ -971,10 +982,14 @@ def main() -> int:
 
     # Attribution is a property of the corpus -- which directories hold
     # theories, which build target goes with which -- so it is derived once,
-    # here, and every view then asks about one episode at a time.  Passing
-    # the path too lets a project supply the facts no corpus can show
-    # (renames, deliberate exclusions) from a file beside its data.
-    _attempts().fit_attribution(records, path)
+    # here, and every view then asks about one episode at a time.  The facts
+    # no corpus can show come from a file the caller names, never from one
+    # discovered next to the data.
+    try:
+        _attempts().fit_attribution(records, getattr(args, "attribution", None))
+    except corpus.CorpusError as e:
+        print(f"FAIL: {e}", file=sys.stderr)
+        return 2
 
     own = {"check": cmd_check, "repair": cmd_repair, "replay": cmd_replay,
            "progress": cmd_progress, "notes": cmd_notes, "flips": cmd_flips,

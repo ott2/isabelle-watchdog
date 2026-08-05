@@ -58,6 +58,9 @@ def era(rec: dict) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-i", "--input", default=None)
+    ap.add_argument("--attribution", metavar="FILE", default=None,
+                    help="JSON of attribution facts this corpus cannot show "
+                         "(default: $TRAJECTORY_ATTRIBUTION)")
     ns = ap.parse_args()
     # Resolve once, here: the default is not a constant any more
     # (bin/corpus.py -- it depends on where the operator is standing).
@@ -68,7 +71,11 @@ def main() -> int:
         return 1
     # Attribution is derived from the whole corpus (see attempts.Attribution),
     # so it is fitted once here before any episode is labelled.
-    A.fit_attribution(corpus.load(ns.input), ns.input)
+    try:
+        A.fit_attribution(corpus.load(ns.input), ns.attribution)
+    except corpus.CorpusError as e:
+        print(f'FAIL: {e}', file=sys.stderr)
+        return 1
     recs = corpus.load(corpus.resolve(ns.input))
     eps = A._episodes(recs)
 

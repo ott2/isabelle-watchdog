@@ -72,6 +72,9 @@ def main() -> int:
                     help="builds.jsonl to read")
     ap.add_argument("--examples", type=int, default=0, metavar="N",
                     help="show N no-theory trajectories booked against a session")
+    ap.add_argument("--attribution", metavar="FILE", default=None,
+                    help="JSON of attribution facts this corpus cannot show "
+                         "(default: $TRAJECTORY_ATTRIBUTION)")
     ns = ap.parse_args()
     # Resolve once, here: the default is not a constant any more
     # (bin/corpus.py -- it depends on where the operator is standing).
@@ -82,7 +85,11 @@ def main() -> int:
         return 1
     # Attribution is derived from the whole corpus (see attempts.Attribution),
     # so it is fitted once here before any episode is labelled.
-    A.fit_attribution(corpus.load(ns.input), ns.input)
+    try:
+        A.fit_attribution(corpus.load(ns.input), ns.attribution)
+    except corpus.CorpusError as e:
+        print(f'FAIL: {e}', file=sys.stderr)
+        return 1
 
     by_sess = trajectories(Path(ns.input))
 

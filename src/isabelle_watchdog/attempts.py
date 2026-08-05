@@ -42,6 +42,7 @@ import argparse
 import gzip
 import json
 import math
+import os
 import re
 import subprocess
 import sys
@@ -646,31 +647,47 @@ def _targets_of(rec: dict) -> list[str]:
     return out
 
 
-OVERRIDES_SUFFIX = ".attribution.json"
+ENV_ATTRIBUTION = "TRAJECTORY_ATTRIBUTION"
 
 
-def load_overrides(corpus_path) -> dict:
-    """A project's own attribution facts, read from beside its corpus.
+def load_overrides(path=None) -> dict:
+    """A project's attribution facts, from a file it names.
 
-    `<corpus>.attribution.json`, e.g. `builds.jsonl.attribution.json`.  It
-    holds the things no corpus can show: which directories were the same
-    development under an earlier name, and which build targets are sessions
-    the project builds *against* rather than works *on*.
+    These are the things no corpus can show: which directories were the same
+    development under an earlier name, and which build targets are sessions a
+    project builds *against* rather than works *on*.
 
-        {"aliases": {"aem": "ae", "scratch-nae": "ae"},
-         "targets": {"HOAU_Spike": null, "NDTHT_ScratchAR": "scratch"}}
+        {"aliases": {"aem": "ae"},
+         "targets": {"HOAU_Spike": null}}
 
-    It lives with the corpus rather than in this package deliberately.  These
-    are facts about one project's history; a reader that shipped them would
-    be a reader that had to be edited every time a new project used it, which
-    is the mistake this whole module is a correction of.  Absent file, empty
-    dict, no attribution facts — which is the right default, since a project
-    with no renames needs none.
+    Named explicitly -- `--attribution PATH`, or $TRAJECTORY_ATTRIBUTION --
+    rather than discovered at a fixed place beside the corpus.  A conventional
+    sidecar sounds convenient and is not: it makes overriding anything require
+    *write access to the data*, so trying an alternative attribution, or
+    reading a corpus you were sent, means editing someone's dataset.  It also
+    changes published statistics from a file nobody passed on the command
+    line, which is the kind of action-at-a-distance this codebase has been
+    bitten by before.
+
+    A named file must exist -- a typo silently falling back to "no overrides"
+    would answer a different question and look like a real result.  Nothing
+    named, no overrides: the right default, since a project with no renames
+    and no out-of-tree sessions needs none.
     """
-    p = Path(str(corpus_path) + OVERRIDES_SUFFIX)
-    if not p.exists():
+    given = path or os.environ.get(ENV_ATTRIBUTION)
+    if not given:
         return {}
-    return json.loads(p.read_text())
+    p = Path(given).expanduser()
+    if not p.exists():
+        raise corpus.CorpusError(f"no such attribution file: {p}")
+    data = json.loads(p.read_text())
+    unknown = set(data) - {"aliases", "targets"} - {k for k in data
+                                                    if k.startswith("_")}
+    if unknown:
+        raise corpus.CorpusError(
+            f"{p}: unknown key(s) {sorted(unknown)}; expected 'aliases' "
+            f"and/or 'targets' (keys starting with '_' are ignored, for notes)")
+    return data
 
 
 # The fitted attribution for the corpus currently being read.  Module-level
@@ -680,7 +697,7 @@ def load_overrides(corpus_path) -> dict:
 _FITTED: "Attribution | None" = None
 
 
-def fit_attribution(recs: list[dict], corpus_path=None) -> Attribution:
+def fit_attribution(recs: list[dict], overrides_path=None) -> Attribution:
     """Derive the attribution for these records and make it the default.
 
     Not `fit`: this module already had one, for the power-law fit of the
@@ -689,7 +706,7 @@ def fit_attribution(recs: list[dict], corpus_path=None) -> Attribution:
     would have received the distribution fitter instead.
     """
     global _FITTED
-    overrides = load_overrides(corpus_path) if corpus_path else {}
+    overrides = load_overrides(overrides_path)
     _FITTED = Attribution.learn(recs, overrides)
     return _FITTED
 
