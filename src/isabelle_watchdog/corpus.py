@@ -90,7 +90,22 @@ def resolve(given: str | os.PathLike | None = None) -> Path:
             raise CorpusError(f"no such corpus: {path}")
         return path
 
-    found = [c for c in candidates() if c.exists()]
+    # Distinct *routes* to the same file are not an ambiguity.  Two of them
+    # coincide constantly: a project that sets WATCHDOG_LOG_DIR to one of the
+    # known layouts -- which 43sp's Makefile does, to `results/isabelle-logs`
+    # -- reaches the same corpus by both, and reporting that as a choice
+    # between two corpora made every reader unusable there.  Resolving also
+    # collapses the symlink case, which matters because a corpus normally
+    # *is* a symlink into a separate trajectory repository, so two projects
+    # can legitimately name one file.
+    found, seen = [], set()
+    for c in candidates():
+        if not c.exists():
+            continue
+        key = c.resolve()
+        if key not in seen:
+            seen.add(key)
+            found.append(c)
     if len(found) == 1:
         return found[0]
     if not found:
@@ -98,10 +113,11 @@ def resolve(given: str | os.PathLike | None = None) -> Path:
         raise CorpusError(
             "no corpus found. Name one explicitly, or set "
             f"${ENV_CORPUS} or ${ENV_LOG_DIR}.\n  tried:\n{tried}")
-    # Two layouts present under one project is ambiguous, and picking by
-    # priority would quietly answer about whichever the tool happened to
-    # prefer.  Both halves of a split corpus are a real possibility here.
-    listed = "\n".join(f"    {c}" for c in found)
+    # Genuinely different files, though: two layouts both populated under one
+    # project is ambiguous, and picking by priority would quietly answer about
+    # whichever this tool happened to rank first.  Both halves of a split
+    # corpus is a real possibility.
+    listed = "\n".join(f"    {c}  ->  {c.resolve()}" for c in found)
     raise CorpusError(
         f"several corpora found; name the one you mean:\n{listed}")
 

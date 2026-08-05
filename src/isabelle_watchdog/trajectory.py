@@ -818,10 +818,12 @@ HELP = {
 # edit is an attempt.  The rest read individual records and never ask.
 FILTERS_DOC_ONLY = ("list", "episodes", "lengths")
 
-# Views that label a trajectory with the development it belongs to, and so can
-# be steered by a project's attribution overrides.  The integrity commands
-# never attribute, and offering them the flag would suggest otherwise.
-ATTRIBUTES = ("lengths", "episodes", "list", "classify", "show")
+# Views that label a trajectory with the development it belongs to, and so
+# both need the fitted attribution and can be steered by a project's
+# overrides.  Only `lengths --by-project` does, among the subcommands here;
+# the audits attribute much more and fit for themselves.  Offering the flag
+# more widely would imply it did something, which is the fault `--repo` had.
+ATTRIBUTES = ("lengths",)
 
 
 def _attempts():
@@ -982,14 +984,16 @@ def main() -> int:
 
     # Attribution is a property of the corpus -- which directories hold
     # theories, which build target goes with which -- so it is derived once,
-    # here, and every view then asks about one episode at a time.  The facts
-    # no corpus can show come from a file the caller names, never from one
-    # discovered next to the data.
-    try:
-        _attempts().fit_attribution(records, getattr(args, "attribution", None))
-    except corpus.CorpusError as e:
-        print(f"FAIL: {e}", file=sys.stderr)
-        return 2
+    # here, and the view then asks about one episode at a time.  Only for the
+    # views that need it: fitting walks every diff in the corpus, which is
+    # wasted work for `check`, and a view that needs it but did not ask fails
+    # loudly (`fitted()` raises) rather than quietly labelling from nothing.
+    if args.cmd in ATTRIBUTES:
+        try:
+            _attempts().fit_attribution(records, args.attribution)
+        except corpus.CorpusError as e:
+            print(f"FAIL: {e}", file=sys.stderr)
+            return 2
 
     own = {"check": cmd_check, "repair": cmd_repair, "replay": cmd_replay,
            "progress": cmd_progress, "notes": cmd_notes, "flips": cmd_flips,
