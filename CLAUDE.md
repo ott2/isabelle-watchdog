@@ -107,6 +107,22 @@ budgets leaves a battery-slow-but-fine command crossing the unscaled loop
 threshold and being spuriously loop-killed. This normalises to AC-equivalent
 time rather than bypassing the budget, so the cost-regression signal survives.
 
+**The read loop is `select()` + `os.read()`, and both halves are load-bearing.**
+Two defects lived here until the supervision tests went in, and each made a
+kill condition silently unenforceable:
+
+- *Read the pipe raw.* `proc.stdout.readline()` goes through a buffered
+  reader, which pulls a whole chunk into userspace and hands back one line —
+  after which `select()` sees an empty pipe, reports not-ready, and the rest
+  of the chunk is stranded until more output arrives. A child that printed
+  four lines and went quiet had exactly one of them logged. The case it broke
+  is precisely a burst followed by a hang, which is when the error block and
+  the line-naming warnings arrive.
+- *Check the budgets every pass, not only when the pipe goes quiet.* With the
+  checks inside the `select()`-timed-out branch, a child emitting more than a
+  line a second kept the pipe permanently ready and was never measured against
+  the wall clock at all.
+
 Exit codes: `0` success, `124` watchdog kill, otherwise the child's.
 
 ### 2. `record.py` — trajectory capture

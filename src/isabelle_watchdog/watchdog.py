@@ -292,10 +292,14 @@ def main() -> int:
     if shutil.which("stdbuf"):
         cmd = ["stdbuf", "-oL"] + cmd
 
+    # bufsize=0: the read loop below polls the pipe with select() and reads it
+    # with os.read(), so nothing may sit in a userspace buffer where select()
+    # cannot see it.  See the read loop for what that cost.
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        bufsize=0,
     )
 
     # --- Collection state ---
@@ -317,77 +321,105 @@ def main() -> int:
     with open(log_path, "w") as log_f:
         log_f.write(f"=== {datetime.now():%Y-%m-%d %H:%M:%S}  {' '.join(args)}\n")
 
+        def consume(raw: bytes) -> None:
+            """Everything one line of the child's output can tell us."""
+            nonlocal build_started, last_progress_theory, last_progress_pct
+            nonlocal loop_key, loop_count, loop_elapsed
+            try:
+                text = raw.decode("utf-8", errors="replace")
+            except Exception:
+                text = raw.decode("latin-1")
+            stripped = strip_ansi(text.rstrip("\n\r"))
+
+            # Log everything
+            log_f.write(stripped + "\n")
+            log_f.flush()
+            lines.append(stripped)
+
+            # Phase detection
+            if BUILD_PHASE_RE.match(stripped):
+                build_started = True
+
+            # Track latest in-progress theory for STUCK message
+            m = THEORY_PROGRESS_RE.match(stripped)
+            if m and m.group(3) and m.group(3) != "100":
+                last_progress_theory = m.group(2)
+                last_progress_pct = m.group(3)
+
+            # Long-running-command (loop-on-line) detection.
+            # Isabelle's per-command warning fires every ~2s
+            # while a tactic is still searching.  N+ consecutive
+            # matches on the same (theory, line, command) triple
+            # = the tactic is in a search loop on that line; we
+            # surface the line in the timeout summary so the
+            # culprit doesn't have to be grepped out of the log.
+            mloop = LOOP_RE.match(stripped)
+            if mloop:
+                command, elapsed, lineno, theory = mloop.groups()
+                key = (theory, lineno, command)
+                if key == loop_key:
+                    loop_count += 1
+                else:
+                    loop_key = key
+                    loop_count = 1
+                loop_elapsed = elapsed
+
         # --- Read loop with select ---
+        #
+        # Read the pipe RAW (os.read on the fd) and split lines here, rather
+        # than calling `proc.stdout.readline()`.  A buffered reader pulls a
+        # whole chunk into userspace and hands back one line; select() then
+        # sees an empty pipe and reports not-ready, so the rest of that chunk
+        # is stranded until more output arrives.  A child that printed four
+        # lines and went quiet had exactly one of them logged, and the other
+        # three were never matched against anything — no error head, no loci,
+        # no loop warning.  The case where that mattered most was the one it
+        # broke: a burst of output followed by a hang.
         fd = proc.stdout.fileno()
+        pending = b""
         while True:
             ready, _, _ = select.select([fd], [], [], 1.0)
 
             if ready:
-                raw = proc.stdout.readline()
-                if not raw:
+                chunk = os.read(fd, 65536)
+                if not chunk:
                     break  # EOF
-                try:
-                    text = raw.decode("utf-8", errors="replace")
-                except Exception:
-                    text = raw.decode("latin-1")
-                text = text.rstrip("\n\r")
-                stripped = strip_ansi(text)
-
-                # Log everything
-                log_f.write(stripped + "\n")
-                log_f.flush()
-                lines.append(stripped)
+                pending += chunk
+                *complete, pending = pending.split(b"\n")
+                for raw in complete:
+                    consume(raw)
                 last_activity = time.monotonic()
 
-                # Phase detection
-                if BUILD_PHASE_RE.match(stripped):
-                    build_started = True
+            # Budgets are checked on EVERY pass, not only when the pipe went
+            # quiet.  A child that keeps talking kept select() permanently
+            # ready, so the branch holding these checks never ran and the wall
+            # clock was never enforced at all — `while :; do echo tick; done`
+            # ran unbounded under a 3-second budget.  The activity check is
+            # unaffected by moving: `last_activity` was just reset above.
+            now = time.monotonic()
 
-                # Track latest in-progress theory for STUCK message
-                m = THEORY_PROGRESS_RE.match(stripped)
-                if m and m.group(3) and m.group(3) != "100":
-                    last_progress_theory = m.group(2)
-                    last_progress_pct = m.group(3)
+            # Wall-clock
+            if now - wall_start >= wall_timeout:
+                timeout_reason = "wall"
+                break
 
-                # Long-running-command (loop-on-line) detection.
-                # Isabelle's per-command warning fires every ~2s
-                # while a tactic is still searching.  N+ consecutive
-                # matches on the same (theory, line, command) triple
-                # = the tactic is in a search loop on that line; we
-                # surface the line in the timeout summary so the
-                # culprit doesn't have to be grepped out of the log.
-                mloop = LOOP_RE.match(stripped)
-                if mloop:
-                    cmd, elapsed, lineno, theory = mloop.groups()
-                    key = (theory, lineno, cmd)
-                    if key == loop_key:
-                        loop_count += 1
-                    else:
-                        loop_key = key
-                        loop_count = 1
-                    loop_elapsed = elapsed
-            else:
-                # No data — check timeouts
-                now = time.monotonic()
+            # Loop-on-line: a single tactic emitted N+ consecutive
+            # progress warnings on the same line — it's searching
+            # in a loop, not making progress.
+            if loop_count >= loop_progress_threshold:
+                timeout_reason = "loop_progress"
+                break
 
-                # Wall-clock
-                if now - wall_start >= wall_timeout:
-                    timeout_reason = "wall"
-                    break
+            # Activity
+            idle = now - last_activity
+            limit = activity_timeout if build_started else startup_timeout
+            if idle >= limit:
+                timeout_reason = "activity"
+                break
 
-                # Loop-on-line: a single tactic emitted N+ consecutive
-                # progress warnings on the same line — it's searching
-                # in a loop, not making progress.
-                if loop_count >= loop_progress_threshold:
-                    timeout_reason = "loop_progress"
-                    break
-
-                # Activity
-                idle = now - last_activity
-                limit = activity_timeout if build_started else startup_timeout
-                if idle >= limit:
-                    timeout_reason = "activity"
-                    break
+        # A final line with no trailing newline is still a line.
+        if pending:
+            consume(pending)
 
         log_f.write(f"=== finished {datetime.now():%Y-%m-%d %H:%M:%S}"
                     f"  timeout={timeout_reason or 'none'}\n")
