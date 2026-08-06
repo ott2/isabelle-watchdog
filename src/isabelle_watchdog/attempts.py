@@ -311,6 +311,24 @@ def _is_theory(path: str) -> bool:
     return path.endswith(".thy")
 
 
+# `diff --git a/OLD b/NEW` with OLD != NEW is a rename: the recorder computes
+# every payload with `git diff -M`, so a theory that moves between directories
+# says so in the corpus rather than having to be remembered.
+_DIFF_HEADER = re.compile(r"^diff --git a/(.*?) b/(.*)$", re.M)
+
+
+def _theory_moves(diff: str) -> list[tuple[str, str]]:
+    """(old dir, new dir) for every theory that changed directory."""
+    out = []
+    for old, new in _DIFF_HEADER.findall(diff or ""):
+        if old == new or not (_is_theory(old) and _is_theory(new)):
+            continue
+        od, nd = str(PurePosixPath(old).parent), str(PurePosixPath(new).parent)
+        if od != nd:
+            out.append((od, nd))
+    return out
+
+
 def session_dirs(recs: list[dict]) -> set[str]:
     """The directories that hold a theory anywhere in this corpus.
 
@@ -420,9 +438,70 @@ class Attribution:
         collisions = {d for group in seen.values() if len(group) > 1
                       for d in group}
 
+        aliases, moved = cls._learn_aliases(recs)
+        # A directory that a theory moved *out of* was a session directory
+        # too, even if nothing in the corpus window shows a theory sitting
+        # there; otherwise the records from before the move attribute to
+        # nothing.
+        dirs |= moved
+        aliases.update(overrides.get("aliases") or {})
+
         targets = cls._learn_targets(recs, dirs)
         targets.update(overrides.get("targets") or {})
-        return cls(dirs, targets, overrides.get("aliases") or {}, collisions)
+        return cls(dirs, targets, aliases, collisions)
+
+    @staticmethod
+    def _learn_aliases(recs: list[dict]) -> tuple[dict, set]:
+        """Directories that are the same development, from theories moving.
+
+        A session that exists only to make builds faster -- ndtht split the
+        settled part of `t/ae` into `t/aem` so the part being worked on
+        re-checked quickly, then merged it back -- is not a second
+        development, and counting it as one splits a single trajectory in
+        two.  Naming such sessions in a config file is a kludge, as it should
+        be: the split and the merge are *edits*, and the recorder captures
+        edits with `git diff -M`, so both show up as theories changing
+        directory.
+
+        Directories connected by theory moves are one development.  Its name
+        is wherever the theories ended up -- the last move wins -- so a split
+        followed by a merge back resolves to the original, and a split that
+        is still live resolves to the new home.
+
+        Untested against real data: neither corpus contains a move (ndtht's
+        `aem` predates its corpus window entirely), so this is exercised only
+        by the synthetic cases in tests/.  It is here because the alternative
+        is a hand-maintained list, which is the thing being removed.
+        """
+        parent: dict[str, str] = {}
+
+        def find(x: str) -> str:
+            parent.setdefault(x, x)
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        pairs = [(od, nd) for rec in recs
+                 for od, nd in _theory_moves(rec.get("diff") or "")]
+        for od, nd in pairs:
+            ro, rn = find(od), find(nd)
+            if ro != rn:
+                parent[ro] = rn
+
+        # Records are chronological, so the last destination named for a group
+        # is where that development currently lives.
+        latest: dict[str, str] = {}
+        for _od, nd in pairs:
+            latest[find(nd)] = nd
+
+        moved = {d for pair in pairs for d in pair}
+        out = {}
+        for d in moved:
+            dest = latest.get(find(d))
+            if dest and _label(d) != _label(dest):
+                out[_label(d)] = _label(dest)
+        return out, moved
 
     @staticmethod
     def _learn_targets(recs: list[dict], dirs: set[str]) -> dict:
@@ -528,6 +607,32 @@ class Attribution:
             return self.label(got) if got else None
         return None
 
+    def loaded_outside(self, rec: dict) -> bool:
+        """Did this build load its sessions from outside the project's tree?
+
+        A session is only this project's work if it lives in the project.  A
+        build that says `-d scratch/hoau` and names `HOAU_Spike` is building
+        something defined elsewhere -- typically a spike or a downstream
+        project scoped against these theories for convenience -- and its
+        trajectory is not a trajectory of this development, however much of
+        this development it happens to import.
+
+        ndtht's HOAU_Spike is exactly that, and it used to need a declaration
+        (`{"targets": {"HOAU_Spike": null}}`) because nothing looked at where
+        the session came from.  Its eight builds all pass `-d scratch/hoau`,
+        which reaches no session directory of this corpus, while every
+        in-project build passes `-d t`, which reaches all five.  The
+        distinction was in the data the whole time.
+
+        A build with no `-d` at all says nothing either way -- the session is
+        being found some other way -- so this returns False rather than
+        guessing.
+        """
+        dirs = _load_dirs(rec)
+        if not dirs:
+            return False
+        return not any(_reaches(d, s) for d in dirs for s in self.dirs)
+
     def command_dir(self, rec: dict) -> str | None:
         """The session dir this build targeted, or None if unattributable.
 
@@ -541,19 +646,10 @@ class Attribution:
         target is a session this corpus has never seen edited, which cannot
         and should not be attributed to one of the project's developments.
         """
-        cmd = rec.get("command") or []
-        dirs, i = [], 0
-        while i < len(cmd):
-            arg = cmd[i]
-            if arg == "-d":
-                dirs.append(cmd[i + 1] if i + 1 < len(cmd) else "")
-                i += 2
-            elif arg in _FLAG_TAKES_ARG:
-                i += 2
-            else:
-                i += 1
-        named = {self.label(d.strip("/")) for d in dirs
-                 if d.strip("/") in self.dirs}
+        if self.loaded_outside(rec):
+            return None
+        dirs = _load_dirs(rec)
+        named = {self.label(d) for d in dirs if d in self.dirs}
         if len(named) == 1:
             return named.pop()
         from_target = {self.targets[t] for t in _targets_of(rec)
@@ -629,6 +725,39 @@ class Attribution:
         if dirs:
             return "mixed"
         return "tooling" if other else "none"
+
+
+def _load_dirs(rec: dict) -> list[str]:
+    """The `-d` values on a build command: where sessions were loaded from."""
+    cmd = rec.get("command") or []
+    out, i = [], 0
+    while i < len(cmd):
+        if cmd[i] == "-d" and i + 1 < len(cmd):
+            out.append(cmd[i + 1].strip("/"))
+            i += 2
+        elif cmd[i] in _FLAG_TAKES_ARG:
+            i += 2
+        else:
+            i += 1
+    return out
+
+
+def _reaches(load_dir: str, session_dir: str) -> bool:
+    """Does `-d load_dir` bring `session_dir` into scope?
+
+    Compared component-wise from any suffix of the load path, because a `-d`
+    may be repo-relative (`-d t`) or absolute (`-d /Users/.../43sp/isabelle`)
+    while session directories are always repo-relative.  Three 43sp records
+    use the absolute form, and a plain string comparison read them as loading
+    from outside the project -- dropping two trajectories that were correctly
+    attributed before.
+    """
+    dp, sp = [c for c in load_dir.split("/") if c], session_dir.split("/")
+    for i in range(len(dp)):
+        tail = dp[i:]
+        if tail == sp[:len(tail)] or sp == tail[:len(sp)]:
+            return True
+    return False
 
 
 def _targets_of(rec: dict) -> list[str]:

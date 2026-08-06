@@ -143,6 +143,74 @@ def test_learns_targets_from_root_and_co_occurrence():
     print("\nPASS: session dirs and target map derive from the corpus")
 
 
+def _move(old: str, new: str) -> str:
+    """A rename as `git diff -M` writes it."""
+    return (f"diff --git a/{old} b/{new}\nsimilarity index 100%\n"
+            f"rename from {old}\nrename to {new}\n")
+
+
+def test_out_of_tree_builds_need_no_declaration():
+    """A build that loads its sessions from outside the project's tree is not
+    this project's work, and says so on its own command line.
+
+    ndtht's HOAU_Spike was a preliminary investigation scoped against these
+    theories for convenience and later split out.  It used to need a config
+    entry; all eight of its builds pass `-d scratch/hoau`, which reaches no
+    session directory, while every in-project build passes `-d t`, which
+    reaches all of them."""
+    recs = [_rec(_diff("t/ae/A.thy")), _rec(_diff("t/ntr/B.thy"))]
+    at = A.Attribution.learn(recs)
+
+    inside = _rec(command=["isabelle", "build", "-d", "t", "Some_Session"])
+    outside = _rec(command=["isabelle", "build", "-d", "scratch/hoau", "Spike"])
+    assert at.loaded_outside(inside) is False
+    assert at.loaded_outside(outside) is True
+    assert at.command_dir(outside) is None
+    print("   -d t            -> in tree")
+    print("   -d scratch/hoau -> out of tree, attributes to nothing")
+
+    # No -d says nothing either way, and must not be read as a verdict.
+    assert at.loaded_outside(_rec(command=["isabelle", "build", "X"])) is False
+    print("   no -d           -> no opinion")
+
+    # A `-d` may be absolute while session directories are repo-relative.
+    # Three 43sp records use the absolute form, and comparing strings rather
+    # than path components read them as out-of-tree.
+    abs_d = _rec(command=["isabelle", "build", "-d",
+                          "/Users/x/projects/proj/t", "Some_Session"])
+    assert at.loaded_outside(abs_d) is False
+    print("   -d /abs/path/t  -> in tree (suffix match)")
+    # ...but a genuinely different directory still does not match.
+    assert at.loaded_outside(
+        _rec(command=["isabelle", "build", "-d", "/other/proj/spikes", "S"])) is True
+    print("   -d /other/proj/spikes -> out of tree")
+
+
+def test_a_session_split_for_build_speed_is_one_development():
+    """A directory that exists only to make builds faster is not a second
+    development.  The split and the merge back are edits, and `git diff -M`
+    records them, so the corpus says so without anyone declaring it."""
+    # ae split into aem, then merged back: the theories end up in ae.
+    recs = [_rec(_diff("t/ae/Settled.thy")),
+            _rec(_move("t/ae/Settled.thy", "t/aem/Settled.thy")),
+            _rec(_diff("t/ae/Active.thy")),
+            _rec(_move("t/aem/Settled.thy", "t/ae/Settled.thy"))]
+    at = A.Attribution.learn(recs)
+    print("   split then merged back -> aliases:", at.aliases)
+    assert at.aliases.get("aem") == "ae", at.aliases
+    assert at.path_dir("t/aem/Settled.thy") == "ae", "records from the split era"
+    assert at.path_dir("t/ae/Active.thy") == "ae"
+
+    # A split that is still live resolves the other way: the work now lives
+    # in the new directory, so that is the development's name.
+    recs = [_rec(_diff("t/old/A.thy")),
+            _rec(_move("t/old/A.thy", "t/new/A.thy"))]
+    at = A.Attribution.learn(recs)
+    print("   moved and stayed       -> aliases:", at.aliases)
+    assert at.aliases.get("old") == "new", at.aliases
+    print("\nPASS: out-of-tree and split sessions derive from the corpus")
+
+
 def test_overrides_are_named_not_discovered(tmp=None):
     """Attribution facts come from a path the caller gives, and a wrong path
     is an error rather than a silent fallback to no overrides."""
@@ -195,4 +263,6 @@ if __name__ == "__main__":
     test_error_loci()
     test_derives_session_dirs_from_any_layout()
     test_learns_targets_from_root_and_co_occurrence()
+    test_out_of_tree_builds_need_no_declaration()
+    test_a_session_split_for_build_speed_is_one_development()
     test_overrides_are_named_not_discovered()

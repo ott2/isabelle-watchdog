@@ -168,19 +168,40 @@ An **episode** is a maximal run of attempts ending in a success. Boundaries are
 successes, **not** commits — a mid-flight commit is just an attempt whose
 `git_head` moved.
 
-**Attribution is derived, not declared** (`attempts.Attribution`). A *session
-directory* is any directory holding a `.thy` — which makes ndtht's `t/{ae,ar,…}`
-and 43sp's flat `isabelle/` fall out of one rule, and stops `bin/` becoming a
-phantom development since it never holds a theory. The build-target → directory
-map is learned from `session` lines in captured ROOT diffs (authoritative:
-Isabelle's own declaration), falling back to which directory a build's edits
-touched (noisy, so it needs a 3× dominance margin). Because it is fitted from
-the whole corpus, entry points call `attempts.fit_attribution(records, path)`
-once after loading; `trajectory.py` does it for all thirteen subcommands.
+**Attribution is derived, not declared** (`attempts.Attribution`), on four
+signals — all of them already in the corpus:
 
-What genuinely cannot be derived — a directory rename, a session built
-*against* rather than worked *on* — comes from a file the caller **names**,
-via `--attribution FILE` or `$TRAJECTORY_ATTRIBUTION`:
+| question | signal |
+|---|---|
+| what is a development? | a directory holding a `.thy`. ndtht's `t/{ae,ar,…}` and 43sp's flat `isabelle/` fall out of one rule, and `bin/` never becomes one |
+| which target is which? | `session` lines in captured ROOT diffs (Isabelle's own declaration), else which directory a build's edits touched (3× dominance margin, since you can build X while editing Y) |
+| is this even our work? | the `-d` load path. A build reaching no session directory is building something defined elsewhere |
+| are two directories one development? | a `.thy` that changed directory. The recorder diffs with `-M`, so a split or a merge-back is recorded as a rename |
+
+The last two replace what used to be hand-maintained lists. ndtht's
+`HOAU_Spike` — a preliminary investigation scoped against `t/` for convenience,
+later split out — loads from `-d scratch/hoau`, which reaches no session
+directory, while every in-project build passes `-d t`, which reaches all five.
+A temporary session like `t/aem` (the settled half of `t/ae`, split out so the
+active half re-checked quickly, later merged back) is one development because
+its theories moved: the last move wins, so a split-and-merge resolves to the
+original and a still-live split resolves to the new home. **Neither corpus
+needs a declaration file.**
+
+`-d` is matched component-wise from any suffix, because a load path may be
+absolute while session directories are repo-relative — three 43sp records use
+the absolute form.
+
+Because it is fitted from the whole corpus, `trajectory.py` calls
+`attempts.fit_attribution(records, path)` after loading, for the subcommands
+that attribute (`lengths`); the audits fit for themselves. A view that needs
+attribution without asking fails loudly rather than labelling from an empty
+map.
+
+For anything still not derivable, there is an escape hatch — a file the caller
+**names**, via `--attribution FILE` or `$TRAJECTORY_ATTRIBUTION`. Neither
+corpus currently needs one; reach for it only after checking the signal is
+genuinely absent from the data rather than merely unlooked-for:
 
 ```json
 {"_note": "free-text, ignored", "aliases": {"aem": "ae"},

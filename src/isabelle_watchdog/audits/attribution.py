@@ -125,9 +125,17 @@ def main() -> int:
     for rec in recs:
         for t in targets(rec):
             seen[t] += 1
+    # A target every one of whose builds loaded from outside the project's
+    # session directories is not this project's work, and its absence from the
+    # map is the correct answer rather than a gap to be filled.
+    outside = {t for t in seen
+               if all(at.loaded_outside(r) for r in recs
+                      if t in targets(r))}
     unmapped = []
     for t, n in sorted(seen.items(), key=lambda kv: -kv[1]):
-        if t not in at.targets:
+        if t in outside and t not in at.targets:
+            verdict = "-> (loaded from outside the tree)"
+        elif t not in at.targets:
             unmapped.append(t)
             verdict = "NOT DERIVED"
         elif at.targets[t] is None:
