@@ -101,7 +101,8 @@ build, and anything it depends on is something that can break one.
 ## Status
 
 Alpha. The record schema is still moving; `trajectory check` will tell you if a
-corpus written by an older version has drifted.
+corpus written by an older version has drifted, and
+[`CHANGELOG.md`](CHANGELOG.md) says explicitly which releases changed it.
 
 The design is documented at length in [`docs/logging-design.md`](docs/logging-design.md),
 which the code comments cite by section number.

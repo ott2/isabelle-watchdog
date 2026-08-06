@@ -62,4 +62,4 @@ packages = ["src/isabelle_watchdog"]
 # The design document is the reason half this code looks the way it does --
 # the module comments cite it by section number -- so it ships with the
 # source rather than living only in the repository.
-include = ["src/", "docs/", "tests/", "README.md", "LICENSE"]
+include = ["src/", "docs/", "tests/", "README.md", "CHANGELOG.md", "LICENSE"]

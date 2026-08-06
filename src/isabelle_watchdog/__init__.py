@@ -21,6 +21,13 @@ plain git and JSON, generic over what is being built.  Nothing below the
 watchdog imports it, and it should stay that way.
 """
 
-__version__ = "0.1.0.dev0"
+# The single source of the version; pyproject.toml reads it from here
+# (`[tool.hatch.version]`).  Kept in the package rather than stated statically
+# in pyproject so that `isabelle_watchdog.__version__` works when the package
+# is imported from a source tree that was never installed -- which is how the
+# watchdog is often run, and how its own tests run it.  Deriving it from
+# `importlib.metadata` instead would raise `PackageNotFoundError` in exactly
+# that case.
+__version__ = "0.2.0"
 
 __all__ = ["__version__"]
