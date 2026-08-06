@@ -65,16 +65,29 @@ def project_root(start: Path | None = None) -> Path:
     return Path(p.stdout.strip()) if p.returncode == 0 else start
 
 
-def candidates() -> list[Path]:
-    """Every place a corpus might be, in descending order of authority."""
+def configured() -> list[Path]:
+    """Corpora the operator *named*, in descending order of authority.
+
+    These are instructions, not discoveries, so they short-circuit the search
+    the way an explicit path argument does.
+    """
     out: list[Path] = []
     if os.environ.get(ENV_CORPUS):
         out.append(Path(os.environ[ENV_CORPUS]).expanduser())
     if os.environ.get(ENV_LOG_DIR):
         out.append(Path(os.environ[ENV_LOG_DIR]).expanduser() / BASENAME)
-    root = project_root()
-    out.extend(root / layout / BASENAME for layout in LEGACY_LAYOUTS)
     return out
+
+
+def discovered() -> list[Path]:
+    """Corpora found by looking, under the project the caller is standing in."""
+    root = project_root()
+    return [root / layout / BASENAME for layout in LEGACY_LAYOUTS]
+
+
+def candidates() -> list[Path]:
+    """Every place a corpus might be, in descending order of authority."""
+    return configured() + discovered()
 
 
 def resolve(given: str | os.PathLike | None = None) -> Path:
@@ -90,16 +103,27 @@ def resolve(given: str | os.PathLike | None = None) -> Path:
             raise CorpusError(f"no such corpus: {path}")
         return path
 
-    # Distinct *routes* to the same file are not an ambiguity.  Two of them
-    # coincide constantly: a project that sets WATCHDOG_LOG_DIR to one of the
-    # known layouts -- which 43sp's Makefile does, to `results/isabelle-logs`
-    # -- reaches the same corpus by both, and reporting that as a choice
-    # between two corpora made every reader unusable there.  Resolving also
-    # collapses the symlink case, which matters because a corpus normally
-    # *is* a symlink into a separate trajectory repository, so two projects
-    # can legitimately name one file.
+    # A named corpus wins outright, in the order it was named.  $TRAJECTORY_
+    # CORPUS exists precisely to read a pooled or archived corpus that no
+    # writer owns, and it could not do that while it merely *competed* with
+    # whatever the project happened to have on disk: standing in a project
+    # with its own builds.jsonl, pointing the variable at the pool reported
+    # "several corpora found" and refused to read either.  Ambiguity is a
+    # property of *guessing*, and neither of these is a guess.
+    for c in configured():
+        if c.exists():
+            return c
+
+    # Distinct *routes* to the same file are not an ambiguity either.  Two of
+    # the discovered layouts coincide constantly: a project that sets
+    # WATCHDOG_LOG_DIR to one of them -- which 43sp's Makefile does, to
+    # `results/isabelle-logs` -- reaches the same corpus by both, and
+    # reporting that as a choice between two corpora made every reader
+    # unusable there.  Resolving also collapses the symlink case, which
+    # matters because a corpus normally *is* a symlink into a separate
+    # trajectory repository, so two projects can legitimately name one file.
     found, seen = [], set()
-    for c in candidates():
+    for c in discovered():
         if not c.exists():
             continue
         key = c.resolve()

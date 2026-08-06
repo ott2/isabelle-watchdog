@@ -270,11 +270,23 @@ confusing Isabelle error seconds later, a missing one is a clear message now.
 | `TRAJECTORY_CORPUS` | — | read a specific corpus, ignoring the above |
 | `TRAJECTORY_ATTRIBUTION` | — | attribution facts a corpus cannot show (`--attribution`) |
 
-Corpus resolution (`corpus.py`): `$TRAJECTORY_CORPUS`, then
-`$WATCHDOG_LOG_DIR/builds.jsonl` — the same variable the writers honour, so a
-reader lands where the writer wrote — then the known layouts (`t/logs`,
-`results/isabelle-logs`) under the current project. Several matches is an
-error, not a silent preference.
+Corpus resolution (`corpus.py`) has two tiers, and the distinction is the
+whole of it: **a corpus the operator named wins outright; ambiguity is a
+property of guessing.**
+
+1. *named* — `$TRAJECTORY_CORPUS`, then `$WATCHDOG_LOG_DIR/builds.jsonl` (the
+   same variable the writers honour, so a reader lands where the writer
+   wrote). The first that exists is the answer; one that does not exist yet is
+   simply not a candidate, since a project sets `WATCHDOG_LOG_DIR` before its
+   first build has written anything.
+2. *discovered* — the known layouts (`t/logs`, `results/isabelle-logs`) under
+   the current project. Two distinct files here is an error, not a silent
+   preference; two routes to the *same* file is not an ambiguity at all.
+
+Treating the named ones as mere candidates broke exactly what
+`$TRAJECTORY_CORPUS` is for: standing in a project with its own `builds.jsonl`
+and pointing the variable at a pooled corpus reported "several corpora found"
+and refused to read either.
 
 ## Commands
 
