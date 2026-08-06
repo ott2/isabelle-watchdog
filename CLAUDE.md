@@ -18,7 +18,7 @@ prose belongs in it.
         build.py               note-carrying entry point -> isabelle-build
         export.py  legacy_convert.py
         audits/                validation suite for the readers' statistics
-    tests/                     test_error_loci.py
+    tests/                     run.sh; error-loci + attribution, Isabelle e2e
     scripts/                   shell guards, not packaged
     docs/logging-design.md     the design doc the code cites by section
 
@@ -305,6 +305,26 @@ python3 -m venv /tmp/v && /tmp/v/bin/pip install .   # or -e .
 under a real install and would have passed otherwise: `trajectory._attempts()`
 loading `attempts.py` via `spec_from_file_location` (no parent package, so its
 own relative import failed), and a `readme = "README.md"` that did not exist.
+
+### Tests
+
+```sh
+./tests/run.sh            # everything
+./tests/run.sh --fast     # skip the Isabelle integration test
+```
+
+Plain scripts, no framework — the package has no runtime dependencies and its
+tests should not add one. They raise `unittest.SkipTest`, which pytest honours
+if you have it.
+
+`test_isabelle_integration.py` drives a **real** `isabelle build` in a scratch
+git repo: a green build, a false lemma (so a locus is extracted from genuine
+Isabelle output), and an axiom that rewrites `f x → f (Suc x)` forever. The
+last is the one worth its ~2m45s: it asserts `timeout_reason == "loop_progress"`
+and that the named line is the looping `by`, so it fails if Isabelle ever stops
+re-emitting its progress warning and the three coupled constants stop lining
+up. Skips cleanly without Isabelle or a prebuilt HOL heap — building HOL to run
+a test would cost more than the test is worth.
 
 ### Verifying a change
 
