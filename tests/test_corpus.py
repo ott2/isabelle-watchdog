@@ -164,6 +164,190 @@ def test_two_genuinely_different_corpora_refuse_to_choose(repo, monkeypatch):
         corpus.resolve()
 
 
+# ------------------------------------------------------------- the marker file
+
+def marker(root: Path, text: str) -> Path:
+    p = root / corpus.MARKER_NAME
+    p.write_text(text)
+    return p
+
+
+def test_a_marker_names_the_log_directory(repo, monkeypatch):
+    monkeypatch.chdir(repo.root)
+    p = touch(repo.root / "records/builds.jsonl")
+    marker(repo.root, "records\n")
+    assert corpus.resolve().resolve() == p.resolve()
+
+
+def test_a_marker_may_comment_itself(repo, monkeypatch):
+    """Same shape as `.isabelle-query`, deliberately: a project already
+    carrying one marker should not learn a second convention."""
+    monkeypatch.chdir(repo.root)
+    p = touch(repo.root / "records/builds.jsonl")
+    marker(repo.root, "# where this project keeps its build trajectories\n"
+                      "\n"
+                      "records\n")
+    assert corpus.resolve().resolve() == p.resolve()
+
+
+def test_a_marker_beats_discovery(repo, monkeypatch):
+    """A statement outranks a guess, whoever made it."""
+    monkeypatch.chdir(repo.root)
+    declared = touch(repo.root / "records/builds.jsonl")
+    touch(repo.root / "t/logs/builds.jsonl")
+    marker(repo.root, "records\n")
+    assert corpus.resolve().resolve() == declared.resolve()
+
+
+def test_the_operators_variable_beats_the_projects_marker(repo, monkeypatch):
+    """Both are declarations; the operator at the command line is the later
+    word, so a pooled corpus stays readable from inside a project that
+    declares its own."""
+    monkeypatch.chdir(repo.root)
+    pooled = touch(repo.root / "pooled/builds.jsonl")
+    touch(repo.root / "records/builds.jsonl")
+    marker(repo.root, "records\n")
+    monkeypatch.setenv("WATCHDOG_LOG_DIR", str(repo.root / "pooled"))
+    assert corpus.resolve().resolve() == pooled.resolve()
+
+
+def test_a_marker_is_found_from_a_subdirectory(repo, monkeypatch):
+    monkeypatch.chdir(repo.root / "thy")
+    p = touch(repo.root / "records/builds.jsonl")
+    marker(repo.root, "records\n")
+    assert corpus.resolve().resolve() == p.resolve()
+
+
+def test_the_search_stops_at_the_project_root(tmp_path, monkeypatch):
+    """Unlike `.isabelle-query`'s unbounded walk, and for a reason: projects
+    are routinely nested, and overshooting here does not merely read the wrong
+    thing -- it would pool two repositories' trajectories into one corpus.
+    """
+    from helpers import Repo
+    outer = tmp_path / "projects"
+    outer.mkdir()
+    marker(outer, "shared-logs\n")
+    inner = Repo(outer / "inner")
+    monkeypatch.chdir(inner.root)
+    p = touch(inner.root / "t/logs/builds.jsonl")
+    assert corpus.find_marker() is None
+    assert corpus.resolve().resolve() == p.resolve()
+
+
+def test_a_marker_naming_nothing_is_an_error(repo, monkeypatch):
+    """Not a no-op.  Silently ignoring an empty declaration reproduces the bug
+    the marker exists to prevent -- a project that believes it has said where
+    its records go, and a writer that puts them somewhere else."""
+    monkeypatch.chdir(repo.root)
+    marker(repo.root, "# only a comment\n")
+    with pytest.raises(corpus.CorpusError, match="names no log directory"):
+        corpus.resolve()
+
+
+def test_a_marker_may_name_an_absolute_path(repo, tmp_path, monkeypatch):
+    monkeypatch.chdir(repo.root)
+    p = touch(tmp_path / "elsewhere/builds.jsonl")
+    marker(repo.root, f"{tmp_path / 'elsewhere'}\n")
+    assert corpus.resolve().resolve() == p.resolve()
+
+
+# ------------------------------------------------- where a writer puts records
+
+def test_an_existing_corpus_is_appended_to_not_shadowed(repo, monkeypatch):
+    """The 43sp incident.
+
+    Its corpus is in `results/isabelle-logs/`, named by a Makefile variable.
+    A build run outside make had no variable, and the writer went straight to
+    its built-in `t/logs` default -- minting a second corpus, with its own
+    instance id, in a project that already had one.  Nothing errors, and each
+    half is internally consistent, so `trajectory check` calls both sound.
+    """
+    monkeypatch.chdir(repo.root)
+    touch(repo.root / "results/isabelle-logs/builds.jsonl")
+    assert corpus.resolve_log_dir().resolve() \
+        == (repo.root / "results/isabelle-logs").resolve()
+
+
+def test_a_project_with_no_corpus_gets_the_default(repo, monkeypatch):
+    """A default is a last resort, not a first guess -- but it is still a
+    default: every corpus began by being created somewhere."""
+    monkeypatch.chdir(repo.root)
+    assert corpus.resolve_log_dir().resolve() \
+        == (repo.root / corpus.DEFAULT_LAYOUT).resolve()
+
+
+def test_the_writer_honours_the_marker_before_it_looks(repo, monkeypatch):
+    """The tier discovery cannot reach: a fresh clone has no corpus to find,
+    so without the marker its first build mints one in the default place
+    rather than the project's."""
+    monkeypatch.chdir(repo.root)
+    marker(repo.root, "records\n")
+    assert corpus.resolve_log_dir().resolve() == (repo.root / "records").resolve()
+
+
+def test_the_writer_refuses_to_choose_between_two_corpora(repo, monkeypatch):
+    """Guessing would split an irreplaceable dataset in a way nothing
+    downstream can detect."""
+    monkeypatch.chdir(repo.root)
+    touch(repo.root / "t/logs/builds.jsonl")
+    touch(repo.root / "results/isabelle-logs/builds.jsonl")
+    with pytest.raises(corpus.CorpusError, match="several corpora"):
+        corpus.resolve_log_dir()
+
+
+def test_the_reader_override_does_not_redirect_writes(repo, tmp_path, monkeypatch):
+    """`$TRAJECTORY_CORPUS` is for reading someone else's dataset.  Honouring
+    it here would mean looking at a pooled corpus silently redirects your next
+    build's records into it."""
+    monkeypatch.chdir(repo.root)
+    pooled = touch(tmp_path / "pooled.jsonl")
+    monkeypatch.setenv("TRAJECTORY_CORPUS", str(pooled))
+    assert corpus.resolve_log_dir().resolve() \
+        == (repo.root / corpus.DEFAULT_LAYOUT).resolve()
+    assert corpus.resolve() == pooled
+
+
+def arrange_nothing(root, mp):
+    """A project that has never been built: the writer creates the default."""
+    return "t/logs"
+
+
+def arrange_existing_elsewhere(root, mp):
+    """43sp: a corpus in the other known layout, and nothing to point at it."""
+    touch(root / "results/isabelle-logs/builds.jsonl")
+    return "results/isabelle-logs"
+
+
+def arrange_marker(root, mp):
+    """A fresh clone of a project that declares its layout."""
+    marker(root, "records\n")
+    return "records"
+
+
+def arrange_variable(root, mp):
+    mp.setenv("WATCHDOG_LOG_DIR", str(root / "chosen"))
+    return "chosen"
+
+
+@pytest.mark.parametrize("arrange", [arrange_nothing, arrange_existing_elsewhere,
+                                     arrange_marker, arrange_variable])
+def test_writer_and_reader_agree(repo, monkeypatch, arrange):
+    """The invariant the whole module exists for, over every tier.
+
+    Both halves of it have been wrong in production, one after the other: the
+    reader ignored where the writer had been told to write, and then the
+    writer ignored where the reader could plainly see the corpus was.
+    """
+    monkeypatch.chdir(repo.root)
+    expected = arrange(repo.root, monkeypatch)
+    written = corpus.resolve_log_dir()
+    assert written.resolve() == (repo.root / expected).resolve()
+    # A real build, from here: the writer creates the file, the reader finds
+    # that same file with no further configuration.
+    touch(written / corpus.BASENAME)
+    assert corpus.resolve().resolve() == (written / corpus.BASENAME).resolve()
+
+
 # ------------------------------------------------------------------ the repo
 
 def test_resolve_repo_defaults_to_the_project_standing_in(repo, monkeypatch):

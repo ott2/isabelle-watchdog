@@ -304,3 +304,57 @@ def test_a_broken_recorder_does_not_change_the_exit_code(watchdog, tmp_path, log
     assert run.code == 7, run
     assert run.records == []                       # nothing captured...
     assert "build-record: skipped" in run.out      # ...and it says so
+
+
+# ------------------------------------------------------- where the records land
+
+def test_the_watchdog_finds_the_project_corpus_unaided(watchdog, repo):
+    """The 43sp incident, end to end and through both writers.
+
+    With `WATCHDOG_LOG_DIR` unset -- a build run outside the Makefile that
+    owns it -- the watchdog and the recorder each have to decide where the
+    records go, and they used to decide by falling back to a built-in default
+    rather than by looking.  In a project whose corpus is the *other* known
+    layout that mints a second one: new instance id, empty history, and every
+    record in it perfectly valid, so nothing downstream reports a problem.
+    """
+    (repo.root / "results/isabelle-logs").mkdir(parents=True)
+    (repo.root / "results/isabelle-logs/builds.jsonl").write_text("")
+    run = watchdog("sh", "-c", 'echo "Session Probe"', WATCHDOG_LOG_DIR=None)
+    assert run.code == 0, run
+
+    corpus = repo.root / "results/isabelle-logs/builds.jsonl"
+    assert corpus.read_text().strip(), f"nothing was appended.\n{run}"
+    # Not merely "the right one won" -- the wrong one must not come into
+    # existence, because a stray empty corpus is what a later reader trips on.
+    assert not (repo.root / "t/logs/builds.jsonl").exists()
+
+
+def test_the_watchdog_log_lands_in_the_project_not_the_install(watchdog, repo):
+    """`last-build.log` was placed relative to `__file__`.
+
+    That named the project only while this script lived inside it; installed,
+    it names site-packages.  The recorder's copy of the bug was fixed during
+    consolidation and this one was missed -- it misplaces a log file rather
+    than a payload, so nothing errors and no record ever looks wrong.
+    """
+    run = watchdog("sh", "-c", 'echo "Session Probe"', WATCHDOG_LOG_DIR=None)
+    assert run.code == 0, run
+    assert (repo.root / "t/logs/last-build.log").exists(), run
+
+
+def test_creating_a_corpus_says_so(watchdog, repo):
+    """The floor under the two tiers above.
+
+    Resolution can only see layouts it knows and markers that were committed,
+    so a project keeping its records somewhere else entirely still gets a
+    fresh corpus minted.  One line naming the file is what turns that from
+    silent into obvious -- "creating" where the operator expected "appending"
+    is the whole of the bug.
+    """
+    first = watchdog("sh", "-c", 'echo "Session Probe"', WATCHDOG_LOG_DIR=None)
+    assert "creating a new corpus" in first.out, first
+    # Once per corpus, not once per build: a line every time would be noise,
+    # and noise is not read.
+    second = watchdog("sh", "-c", 'echo "Session Probe"', WATCHDOG_LOG_DIR=None)
+    assert "creating a new corpus" not in second.out, second

@@ -11,6 +11,69 @@ still regenerates.
 
 ## [Unreleased]
 
+**No record-schema change.**
+
+### Fixed
+
+- **A writer with nothing configured created a corpus instead of finding
+  one.** With `$WATCHDOG_LOG_DIR` unset, all three writers fell straight to a
+  built-in `t/logs` default. In a project whose corpus is the other known
+  layout — 43sp's is `results/isabelle-logs`, named by a Makefile variable, so
+  any build run outside make had no variable — that minted a *second* corpus:
+  new instance id, empty history, and every record in it perfectly valid.
+  Appending to the wrong file is loud; creating the wrong file is silent and
+  looks exactly like a first build, and `trajectory check` calls both halves
+  sound because each is. `corpus.resolve_log_dir()` now looks before it
+  creates, using the same tiers the readers use, and the default is reached
+  only by a project that genuinely has no corpus.
+
+  The reader's half of this was fixed in 0.2.0 — readers honour
+  `$WATCHDOG_LOG_DIR` so they land where the writer wrote. That left the
+  writer guessing, which is the worse half: a reader that guesses reports the
+  wrong number, a writer that guesses makes one.
+- **The watchdog placed `last-build.log` relative to `__file__`.** That named
+  the project only while the script lived inside it; installed, it named
+  `site-packages/t/logs`. The recorder's copy of this bug was fixed during
+  consolidation and this one was missed, because it misplaces a log file
+  rather than a payload — nothing errors and no record ever looks wrong.
+  `export.py`'s defaults had it too.
+
+### Added
+
+- **`.isabelle-watchdog`**, a committed project marker naming the log
+  directory — first non-blank, non-comment line, relative to the marker. Same
+  file shape and same search as `.isabelle-query`, deliberately: a project
+  already carrying one marker should not learn a second convention. This is
+  the tier discovery cannot reach, since discovery can only find a corpus that
+  already exists and so says nothing about a fresh clone, or about a layout
+  the tool has never seen. The search stops at the project root, unlike
+  `.isabelle-query`'s unbounded walk: projects are routinely nested, and
+  overshooting here would pool two repositories' trajectories into one corpus.
+  A marker that names nothing is an error rather than a no-op.
+- **One line to stderr when a corpus is created.** Resolution only sees
+  layouts it knows and markers that were committed, so a project keeping
+  records somewhere else entirely still gets a fresh one minted. "creating"
+  where the operator expected "appending" is the whole of the bug, and it
+  fires once per corpus rather than once per build.
+
+### Changed
+
+- Two discovered corpora now make a *writer* refuse, before the build starts,
+  rather than silently picking one. This is not the failure `guard.py` exists
+  to swallow — a capture that breaks is instrumentation failing and the build
+  must survive it, whereas this is a configuration error decided before
+  anything runs, with the fix in the message. Guessing would split an
+  irreplaceable dataset in a way nothing downstream can detect.
+- `$TRAJECTORY_CORPUS` remains reader-only, now explicitly: honouring it in
+  `resolve_log_dir()` would mean that pointing a view at someone else's
+  dataset silently redirects your next build's records into it.
+- The watchdog publishes its resolved log directory into the environment
+  before importing the recorder, so the two writers in one run share one
+  answer rather than deriving two that agree by construction.
+- `trajectory-export` resolves its input through `corpus.resolve()` instead of
+  a module-level default, and `--out` defaults to `trajectories/` beside the
+  corpus it actually read.
+
 ## [0.2.0] — 2026-08-06
 
 The first version meant to be installed by the projects it records rather than

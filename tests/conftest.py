@@ -130,7 +130,13 @@ def package_env(**extra: object) -> dict:
     # budget and turn a 3-second timeout test into a 6-second one.  The
     # scaling itself is tested deliberately, with a stub `pmset`.
     env.setdefault("BATTERY_FACTOR", "1.0")
-    env.update({k: str(v) for k, v in extra.items()})
+    # None *unsets*, so a test can ask for the resolution a real operator gets
+    # rather than the one the fixtures find convenient.  Most of the contract
+    # is only interesting when it is unset.
+    env.update({k: str(v) for k, v in extra.items() if v is not None})
+    for k, v in extra.items():
+        if v is None:
+            env.pop(k, None)
     return env
 
 
@@ -173,10 +179,14 @@ def watchdog(repo: Repo, logs: Path):
     """
     def run(*cmd: str, cwd: Path | None = None, timeout: float = 90,
             **env_extra) -> Run:
+        # The log directory is pointed at the fixture's by default, but a
+        # caller may pass WATCHDOG_LOG_DIR=None to unset it and get the
+        # resolution a real operator gets.
+        env_extra.setdefault("WATCHDOG_LOG_DIR", str(logs))
         p = subprocess.run(
             [sys.executable, "-m", "isabelle_watchdog.watchdog", *cmd],
             cwd=str(cwd or repo.root),
-            env=package_env(WATCHDOG_LOG_DIR=str(logs), **env_extra),
+            env=package_env(**env_extra),
             capture_output=True, text=True, timeout=timeout)
         return Run(p.returncode, (p.stdout + p.stderr).strip(), logs)
     return run

@@ -72,6 +72,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from . import corpus  # resolve_log_dir — one answer to "where do records go"
 from . import guard  # run_guarded — capture must never break the build
 
 # ---------------------------------------------------------------------------
@@ -279,11 +280,25 @@ def main() -> int:
     }
 
     # --- Log file setup ---
-    script_dir = Path(__file__).resolve().parent
-    project_dir = script_dir.parent
-    # WATCHDOG_LOG_DIR lets a project that does not use the `t/` theory-tree
-    # layout say where logs go; unset reproduces the original behaviour exactly.
-    log_dir = Path(os.environ.get("WATCHDOG_LOG_DIR") or (project_dir / "t" / "logs"))
+    # Was `Path(__file__).parent.parent / "t" / "logs"` -- the tool's own
+    # directory, which named the right thing only while this script lived
+    # inside the project it supervised.  Installed, it names site-packages.
+    # The recorder's copy of this bug was fixed during consolidation and this
+    # one was missed, because it only misplaces a log file: nothing errors,
+    # and no record ever looks wrong, so there is nothing to notice.
+    try:
+        log_dir = corpus.resolve_log_dir()
+    except corpus.CorpusError as exc:
+        # Before the build, not during it: this is configuration, not capture,
+        # so it fails fast and completely rather than being swallowed by the
+        # guard.  A run that cannot say where its records go is one whose
+        # records would have to be guessed at afterwards.
+        print(f"watchdog: {exc}", file=sys.stderr)
+        return 2
+    # Both writers must land in the same directory, and the recorder resolves
+    # independently (it is imported, not invoked).  Publishing the answer here
+    # means one resolution per run rather than two that agree by construction.
+    os.environ["WATCHDOG_LOG_DIR"] = str(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / os.environ.get("LOG_NAME", "last-build.log")
 

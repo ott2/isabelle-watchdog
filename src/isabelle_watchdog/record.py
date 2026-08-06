@@ -78,10 +78,12 @@ import re
 import secrets
 import socket
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
 
+from . import corpus
 from .guard import run_guarded
 
 def _project_dir() -> Path:
@@ -105,11 +107,16 @@ def _project_dir() -> Path:
 
 
 PROJECT_DIR = _project_dir()
-# WATCHDOG_LOG_DIR (same variable the watchdog honours) lets a project that
-# does not use the `t/` theory-tree layout say where logs go; unset reproduces
-# the original behaviour exactly.
-LOG_DIR = Path(os.environ.get("WATCHDOG_LOG_DIR") or (PROJECT_DIR / "t" / "logs"))
-BUILDS_JSONL = LOG_DIR / "builds.jsonl"
+# Where the records go, resolved the same way the readers resolve them
+# (corpus.py): $WATCHDOG_LOG_DIR, then the project's committed marker, then an
+# existing corpus under a known layout, and only then a default.  Falling
+# straight to `PROJECT_DIR / "t" / "logs"` was the second half of the bug the
+# reader's half already fixed -- a build run outside 43sp's Makefile, which
+# owns the variable, created a second corpus rather than appending to the one
+# in `results/isabelle-logs/`.  A writer that guesses is worse than a reader
+# that guesses: the reader reports the wrong number, the writer makes one.
+LOG_DIR = corpus.resolve_log_dir()
+BUILDS_JSONL = LOG_DIR / corpus.BASENAME
 # Throwaway index for snapshotting, kept under gitignored t/logs/ so it
 # never lands in a snapshot or a commit.  Per-call, removed after use.
 ATTEMPT_INDEX = LOG_DIR / ".attempt-index"
@@ -579,6 +586,15 @@ def _record(argv, outcome, exit_code, timeout_reason,
         "note_lint": (lint_note(note) or None) if note else None,
         "log": log_name,
     }
+    # Say so when a corpus comes into existence.  Resolution now looks before
+    # it creates, but it can only see layouts it knows and markers that were
+    # committed; a project keeping its records somewhere else entirely still
+    # gets a fresh one minted here.  Creating is the event worth announcing —
+    # it happens once per corpus, and "creating" where the operator expected
+    # "appending" is the whole of the bug, visible in one line.
+    if not BUILDS_JSONL.exists():
+        print(f"build-record: creating a new corpus at {BUILDS_JSONL}",
+              file=sys.stderr)
     with open(BUILDS_JSONL, "a") as fh:
         fh.write(json.dumps(rec) + "\n")
 

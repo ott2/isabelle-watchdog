@@ -28,9 +28,12 @@ import json
 import sys
 from pathlib import Path
 
-PROJECT_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_LOG = PROJECT_DIR / "t" / "logs" / "builds.jsonl"
-DEFAULT_OUT = PROJECT_DIR / "t" / "logs" / "trajectories"
+from . import corpus
+
+# No module-level defaults.  They were `Path(__file__).parent.parent / "t" /
+# "logs" / ...` -- the tool's own directory, which holds no corpus at all now
+# that the tooling lives in its own repository.  Resolved in main() instead,
+# from where the operator is standing (corpus.py).
 
 
 def load(log: Path) -> list[dict]:
@@ -89,16 +92,20 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--log", default=str(DEFAULT_LOG))
-    ap.add_argument("--out", default=str(DEFAULT_OUT))
+    ap.add_argument("--log", help="corpus to read (default: resolved from the "
+                                  "current project -- see corpus.py)")
+    ap.add_argument("--out", help="destination directory "
+                                  "(default: trajectories/ beside the corpus)")
     ap.add_argument("--apply", action="store_true",
                     help="write files (default: dry-run)")
     ns = ap.parse_args()
 
-    log, out = Path(ns.log), Path(ns.out)
-    if not log.exists():
-        print(f"FAIL: no log at {log}", file=sys.stderr)
+    try:
+        log = corpus.resolve(ns.log)
+    except corpus.CorpusError as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
         return 1
+    out = Path(ns.out) if ns.out else (log.parent / "trajectories")
 
     recs = load(log)
     episodes = [to_episode(a) for a in segment(recs)]

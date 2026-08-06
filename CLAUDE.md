@@ -50,6 +50,8 @@ installed.** Every path bug found during consolidation was one variable:
 | `build_record.PROJECT_DIR` | `<tool>` | **recorded diffs of the tooling instead of the proof** |
 | `build.SESSION` | `"SPSlowdown"` | only ever right for 43sp |
 | `trajectory._attempts()` | `spec_from_file_location` | no parent package, so `attempts`' own relative import failed |
+| `watchdog` log dir | `<tool>/t/logs` | installed, that is `site-packages/t/logs`; found last, because it only misplaces a *log file* |
+| `export.PROJECT_DIR` | `<tool>` | same, in a reader nothing routine calls |
 
 The `build_record` one is the instructive failure. It did not error — it wrote
 a faithful, well-formed diff of the wrong repository, and `trajectory.py check`
@@ -57,9 +59,16 @@ then certified every such record `sound`, because the payload genuinely
 regenerates from the trees it names. A corpus of perfectly-verified diffs of
 the wrong project is harder to notice than a crash and worse to inherit.
 `corpus.py` states the rule; anything new that needs a project path should go
-through `corpus.project_root()`. The one path that *is* legitimately
+through `corpus.project_root()` — or, for a log directory,
+`corpus.resolve_log_dir()`. The one path that *is* legitimately
 `__file__`-relative is a reference to a sibling module — that names the tool,
 which is the question being asked.
+
+The last two rows are the same rule caught a second time, and they say
+something about how it hides: the ones fixed during consolidation were the
+ones that touched a *payload*, where being wrong produces a record someone
+eventually reads. A misplaced log file produces nothing to read, so it
+survived until a project asked where its records had gone.
 
 ## Architecture
 
@@ -266,7 +275,7 @@ confusing Isabelle error seconds later, a missing one is a clear message now.
 | `LOOP_PROGRESS_THRESHOLD` | 3 | consecutive same-line warnings before loop kill |
 | `BUILD_PROGRESS_THRESHOLD` | 15 | injected as `-o build_progress_threshold=N` |
 | `LOG_NAME` | `last-build.log` | log basename; override per stage |
-| `WATCHDOG_LOG_DIR` | `<project>/t/logs` | where records go; read by watchdog, recorder *and* readers |
+| `WATCHDOG_LOG_DIR` | resolved, see below | where records go; read by watchdog, recorder *and* readers |
 | `BUILD_SOURCE_PATHSPECS` | `*.thy *ROOT *ROOTS` | what counts as source |
 | `BUILD_SESSION` / `BUILD_SESSION_DIR` | — / `.` | session to build, and where its ROOT is |
 | `BUILD_NOTE` / `BUILD_NOTE_FILE` | — | note text / pending-note path |
@@ -274,22 +283,76 @@ confusing Isabelle error seconds later, a missing one is a clear message now.
 | `TRAJECTORY_ATTRIBUTION` | — | attribution facts a corpus cannot show (`--attribution`) |
 
 Corpus resolution (`corpus.py`) has two tiers, and the distinction is the
-whole of it: **a corpus the operator named wins outright; ambiguity is a
+whole of it: **a corpus that was declared wins outright; ambiguity is a
 property of guessing.**
 
-1. *named* — `$TRAJECTORY_CORPUS`, then `$WATCHDOG_LOG_DIR/builds.jsonl` (the
-   same variable the writers honour, so a reader lands where the writer
-   wrote). The first that exists is the answer; one that does not exist yet is
-   simply not a candidate, since a project sets `WATCHDOG_LOG_DIR` before its
-   first build has written anything.
+1. *declared* — `$TRAJECTORY_CORPUS`, then `$WATCHDOG_LOG_DIR/builds.jsonl`
+   (the same variable the writers honour, so a reader lands where the writer
+   wrote), then the directory named by a committed `.isabelle-watchdog`. The
+   first that exists is the answer; one that does not exist yet is simply not
+   a candidate, since a project declares where its records go before its first
+   build has written any.
 2. *discovered* — the known layouts (`t/logs`, `results/isabelle-logs`) under
    the current project. Two distinct files here is an error, not a silent
    preference; two routes to the *same* file is not an ambiguity at all.
 
-Treating the named ones as mere candidates broke exactly what
+Treating the declared ones as mere candidates broke exactly what
 `$TRAJECTORY_CORPUS` is for: standing in a project with its own `builds.jsonl`
 and pointing the variable at a pooled corpus reported "several corpora found"
 and refused to read either.
+
+**`.isabelle-watchdog`** is a committed, project-owned declaration of the log
+directory: first non-blank, non-comment line, relative to the marker. Same
+file shape and same search as `.isabelle-query`, deliberately — a project
+already carrying one marker should not learn a second convention. It is the
+tier discovery cannot reach: discovery answers "where is the corpus that
+already exists", so it is silent about a fresh clone and about any layout not
+in `LEGACY_LAYOUTS`. One difference from `.isabelle-query`: the search is
+**bounded at the project root**, because projects are routinely nested here
+(`~/projects/claudecode/ndtht`) and overshooting does not merely read the
+wrong thing — it would pool two repositories' trajectories into one corpus.
+A marker that names nothing is an error, for the same reason a missing
+`--attribution` file is: a declaration that silently does nothing is the bug
+it was meant to prevent.
+
+### Writers resolve too — the same way
+
+`corpus.resolve_log_dir()`, used by all three writers (`build.py`,
+`watchdog.py`, `record.py`). The reader's tiers minus `$TRAJECTORY_CORPUS`,
+plus a default:
+
+1. `$WATCHDOG_LOG_DIR` → 2. the marker → 3. an existing corpus under a known
+layout → 4. `DEFAULT_LAYOUT` (`t/logs`).
+
+Tier 3 is the one that was missing, and 43sp paid for it twice. Its corpus is
+in `results/isabelle-logs`, named by a Makefile variable; a build run outside
+make had no variable and the writer went straight to a built-in `t/logs`,
+**creating a second corpus** — new instance id, empty history, every record in
+it perfectly valid. Appending to the wrong file is loud; creating the wrong
+file is silent and looks exactly like a first build. `trajectory check` calls
+both halves sound, because each is.
+
+Three consequences worth keeping:
+
+- **`$TRAJECTORY_CORPUS` is deliberately not honoured by writers.** It is the
+  reader override for looking at a corpus this project does not own; if it
+  redirected writes, reading someone else's dataset would silently record your
+  next build into it.
+- **Two discovered corpora make a writer refuse, before the build.** That is
+  *not* the failure `guard.py` exists to swallow: a capture that breaks is
+  instrumentation failing and the build must survive it, whereas this is
+  configuration, decided before anything runs, with the fix in the message —
+  the class `build.py` already puts "no session to build" in. Guessing would
+  split an irreplaceable dataset in a way nothing downstream can detect.
+- **Creating a corpus prints one line to stderr.** Resolution only sees
+  layouts it knows and markers that were committed, so a project keeping
+  records elsewhere entirely still gets a fresh one minted. "creating" where
+  the operator expected "appending" is the whole of the bug, in one line, once
+  per corpus.
+
+The watchdog also *publishes* its answer into `$WATCHDOG_LOG_DIR` before
+importing the recorder, so the two writers in one run share a resolution
+rather than deriving two that agree by construction.
 
 ## Commands
 

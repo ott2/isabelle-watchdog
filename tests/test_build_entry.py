@@ -152,6 +152,48 @@ def test_the_entry_point_owns_the_log_location(build_module, repo, launched):
     assert launched[0].env["WATCHDOG_LOG_DIR"].endswith("t/logs")
 
 
+def test_owning_the_location_is_not_inventing_it(build_module, repo, launched):
+    """The other half of the same bug.
+
+    Owning the setting fixed the wrapper problem and left the value a guess,
+    and in 43sp -- whose Makefile is exactly the wrapper above -- the guess
+    was wrong: its corpus is in `results/isabelle-logs`, so a build run
+    directly created a second one in `t/logs` rather than appending.
+    """
+    (repo.root / "results/isabelle-logs").mkdir(parents=True)
+    (repo.root / "results/isabelle-logs/builds.jsonl").write_text("")
+    build = build_module(BUILD_SESSION="S")
+    main_with(build, [], repo)
+    assert launched[0].env["WATCHDOG_LOG_DIR"].endswith("results/isabelle-logs")
+
+
+def test_a_project_marker_decides_the_log_location(build_module, repo, launched):
+    """The tier discovery cannot reach: a fresh clone has no corpus to find."""
+    (repo.root / ".isabelle-watchdog").write_text("records\n")
+    build = build_module(BUILD_SESSION="S")
+    main_with(build, [], repo)
+    assert launched[0].env["WATCHDOG_LOG_DIR"].endswith("/records")
+
+
+def test_an_undecidable_location_stops_before_the_build(build_module, repo,
+                                                        launched, capsys):
+    """Refusing is not the failure the guard exists to swallow.
+
+    A capture that breaks is instrumentation failing and the build must
+    survive it; a project that cannot say which of two corpora to record into
+    is a configuration error, decided before anything runs, with the fix in
+    the message -- the same class as "no session to build".  Guessing would
+    split an irreplaceable dataset in a way nothing downstream can detect.
+    """
+    for layout in ("t/logs", "results/isabelle-logs"):
+        (repo.root / layout).mkdir(parents=True)
+        (repo.root / layout / "builds.jsonl").write_text("")
+    build = build_module(BUILD_SESSION="S")
+    assert main_with(build, [], repo) == 2
+    assert not launched
+    assert "several corpora" in capsys.readouterr().err
+
+
 def test_the_build_runs_from_the_project_not_from_here(build_module, repo,
                                                         launched):
     build = build_module(BUILD_SESSION="S")

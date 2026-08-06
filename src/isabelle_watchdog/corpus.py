@@ -24,6 +24,14 @@ recorded into the recorder's built-in default instead — a second corpus, a
 second instance id, and a build that looked unrecorded because its records
 were somewhere else.  Reader and writer must agree on the location, so the
 reader honours `WATCHDOG_LOG_DIR` too.
+
+That fixed the reader and left the writer guessing, which cost 43sp the
+*same* bug a second time: with the variable unset, the recorder still fell
+back to a built-in `t/logs`, so a build run outside the Makefile minted a
+fresh corpus in a project whose real one sits in `results/isabelle-logs/`.
+Hence `resolve_log_dir()` — the writer now looks before it creates, using
+the same discovery the reader uses, and only mints a corpus where a project
+genuinely has none.  **A default is a last resort, not a first guess.**
 """
 
 from __future__ import annotations
@@ -42,10 +50,32 @@ ENV_CORPUS = "TRAJECTORY_CORPUS"
 
 BASENAME = "builds.jsonl"
 
+# A committed, project-owned declaration of the log directory, deliberately
+# symmetric with `.isabelle-query` (same file shape, same search, same place):
+# a project that already carries one marker to tell a tool where its theories
+# are should not learn a second convention to tell this one where its records
+# go.  First non-blank, non-comment line names the directory, relative to the
+# marker itself.
+#
+# This is the tier discovery cannot reach.  Discovery answers "where is the
+# corpus that already exists", so it is silent about a fresh clone (no corpus
+# yet, and the first build would mint one in the default place rather than the
+# project's) and about any layout not listed below.  A marker is checked in, so
+# a clone is configured before its first build and the layout is stated rather
+# than pattern-matched.
+MARKER_NAME = ".isabelle-watchdog"
+
 # Layouts seen in the wild, tried under the *current* project, not the tool's.
 # Kept so an operator standing in either source project gets what they always
-# got; new projects should set WATCHDOG_LOG_DIR rather than adopt one of these.
+# got; new projects should drop a marker or set WATCHDOG_LOG_DIR rather than
+# adopt one of these.
 LEGACY_LAYOUTS = ("t/logs", "results/isabelle-logs")
+
+# Where a corpus is created when a project has none and says nothing.  Only
+# ever reached after the marker and discovery have both come up empty, which
+# is the whole point: as an unconditional default it put a second corpus in
+# 43sp, whose real one is the other layout above.
+DEFAULT_LAYOUT = "t/logs"
 
 
 class CorpusError(Exception):
@@ -54,40 +84,129 @@ class CorpusError(Exception):
 
 # ------------------------------------------------------------------ location
 
+# Keyed on the resolved directory asked about, not on "the answer", so a
+# process that changes directory still gets a correct one.  Resolution asks
+# this question two or three times per call, and on a Mac with a security
+# agent in the exec path a `git` invocation costs ~0.5s -- enough to be worth
+# not paying twice for an answer that cannot change under a fixed directory.
+_ROOTS: dict[Path, Path] = {}
+
+
 def project_root(start: Path | None = None) -> Path:
     """The git top level containing `start` (default: cwd), or `start` itself.
 
     Deliberately *not* derived from `__file__`: see the module docstring.
     """
     start = (start or Path.cwd()).resolve()
+    if start in _ROOTS:
+        return _ROOTS[start]
     p = subprocess.run(["git", "-C", str(start), "rev-parse", "--show-toplevel"],
                        capture_output=True, text=True)
-    return Path(p.stdout.strip()) if p.returncode == 0 else start
+    if p.returncode != 0:
+        # Not cached: a directory can become a repository (`git init`, a
+        # clone finishing) and the fallback is a guess, not an answer.  Only
+        # a real top level is stable enough to remember.
+        return start
+    _ROOTS[start] = Path(p.stdout.strip())
+    return _ROOTS[start]
 
 
-def configured() -> list[Path]:
-    """Corpora the operator *named*, in descending order of authority.
+def find_marker(start: Path | None = None) -> Path | None:
+    """The nearest `.isabelle-watchdog`, at or above `start`, within the project.
 
-    These are instructions, not discoveries, so they short-circuit the search
-    the way an explicit path argument does.
+    Bounded at the project root, unlike `.isabelle-query`'s unbounded walk.
+    The difference is what happens when the search overshoots: a wrong session
+    directory yields an empty index and an obviously wrong answer, whereas a
+    wrong log directory *creates a dataset in it* and pools two projects'
+    trajectories into one corpus.  Projects are routinely nested here
+    (`~/projects/claudecode/ndtht`), so a stray marker in a parent must not
+    capture every repository beneath it.
+    """
+    here = (start or Path.cwd()).resolve()
+    root = project_root(here).resolve()
+    chain = [here, *here.parents]
+    chain = chain[:chain.index(root) + 1] if root in chain else [here]
+    for d in chain:
+        marker = d / MARKER_NAME
+        if marker.is_file():
+            return marker
+    return None
+
+
+def read_marker(marker: Path) -> Path:
+    """The log directory a marker names, resolved against the marker itself.
+
+    A marker that names nothing is an error rather than a no-op.  Silently
+    ignoring an empty declaration reproduces the bug this file exists to
+    prevent — a project that believes it has said where its records go, and a
+    writer that puts them somewhere else — and it is the same reasoning that
+    makes a missing `--attribution` file fatal in `attempts.py`.
+    """
+    for line in marker.read_text().splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        p = Path(s).expanduser()
+        return p if p.is_absolute() else (marker.parent / p)
+    raise CorpusError(
+        f"{marker} names no log directory.\n"
+        "  Its first non-blank, non-comment line should be the directory "
+        "holding builds.jsonl,\n  relative to the marker — e.g. 't/logs'.")
+
+
+def declared() -> list[Path]:
+    """Corpora something *stated*, in descending order of authority.
+
+    Two kinds of statement, ranked the way they are meant: the operator's
+    environment beats the project's committed marker, so a pooled or archived
+    corpus can be read from inside a project that declares its own.
+
+    These are instructions rather than discoveries, so they short-circuit the
+    search the way an explicit path argument does, and none of them can be
+    ambiguous.
     """
     out: list[Path] = []
     if os.environ.get(ENV_CORPUS):
         out.append(Path(os.environ[ENV_CORPUS]).expanduser())
     if os.environ.get(ENV_LOG_DIR):
         out.append(Path(os.environ[ENV_LOG_DIR]).expanduser() / BASENAME)
+    marker = find_marker()
+    if marker is not None:
+        out.append(read_marker(marker) / BASENAME)
     return out
 
 
-def discovered() -> list[Path]:
+def discovered(start: Path | None = None) -> list[Path]:
     """Corpora found by looking, under the project the caller is standing in."""
-    root = project_root()
+    root = project_root(start)
     return [root / layout / BASENAME for layout in LEGACY_LAYOUTS]
 
 
 def candidates() -> list[Path]:
     """Every place a corpus might be, in descending order of authority."""
-    return configured() + discovered()
+    return declared() + discovered()
+
+
+def _distinct_existing(paths: list[Path]) -> list[Path]:
+    """Those that exist, one per underlying file.
+
+    Distinct *routes* to the same file are not an ambiguity, and the routes
+    coincide constantly: a corpus normally *is* a symlink into a separate
+    trajectory repository, so both known layouts can legitimately name one
+    file.  Reporting that as a choice between two corpora made every reader
+    unusable in 43sp, whose Makefile points WATCHDOG_LOG_DIR at one of the
+    layouts -- a case the declared tier now short-circuits before reaching
+    here, though the symlink one still arrives.
+    """
+    out, seen = [], set()
+    for c in paths:
+        if not c.exists():
+            continue
+        key = c.resolve()
+        if key not in seen:
+            seen.add(key)
+            out.append(c)
+    return out
 
 
 def resolve(given: str | os.PathLike | None = None) -> Path:
@@ -103,40 +222,30 @@ def resolve(given: str | os.PathLike | None = None) -> Path:
             raise CorpusError(f"no such corpus: {path}")
         return path
 
-    # A named corpus wins outright, in the order it was named.  $TRAJECTORY_
-    # CORPUS exists precisely to read a pooled or archived corpus that no
-    # writer owns, and it could not do that while it merely *competed* with
-    # whatever the project happened to have on disk: standing in a project
-    # with its own builds.jsonl, pointing the variable at the pool reported
-    # "several corpora found" and refused to read either.  Ambiguity is a
-    # property of *guessing*, and neither of these is a guess.
-    for c in configured():
+    # A declared corpus wins outright, in the order it was declared.
+    # $TRAJECTORY_CORPUS exists precisely to read a pooled or archived corpus
+    # that no writer owns, and it could not do that while it merely *competed*
+    # with whatever the project happened to have on disk: standing in a
+    # project with its own builds.jsonl, pointing the variable at the pool
+    # reported "several corpora found" and refused to read either.  Ambiguity
+    # is a property of *guessing*, and none of these is a guess.
+    #
+    # A declared location that holds no corpus yet is simply not a candidate,
+    # rather than an assertion that none exists: a project declares where its
+    # records will go before its first build has written any.
+    for c in declared():
         if c.exists():
             return c
 
-    # Distinct *routes* to the same file are not an ambiguity either.  Two of
-    # the discovered layouts coincide constantly: a project that sets
-    # WATCHDOG_LOG_DIR to one of them -- which 43sp's Makefile does, to
-    # `results/isabelle-logs` -- reaches the same corpus by both, and
-    # reporting that as a choice between two corpora made every reader
-    # unusable there.  Resolving also collapses the symlink case, which
-    # matters because a corpus normally *is* a symlink into a separate
-    # trajectory repository, so two projects can legitimately name one file.
-    found, seen = [], set()
-    for c in discovered():
-        if not c.exists():
-            continue
-        key = c.resolve()
-        if key not in seen:
-            seen.add(key)
-            found.append(c)
+    found = _distinct_existing(discovered())
     if len(found) == 1:
         return found[0]
     if not found:
         tried = "\n".join(f"    {c}" for c in candidates())
         raise CorpusError(
-            "no corpus found. Name one explicitly, or set "
-            f"${ENV_CORPUS} or ${ENV_LOG_DIR}.\n  tried:\n{tried}")
+            f"no corpus found. Name one explicitly, set ${ENV_CORPUS} or "
+            f"${ENV_LOG_DIR},\n  or commit a {MARKER_NAME} naming the log "
+            f"directory.\n  tried:\n{tried}")
     # Genuinely different files, though: two layouts both populated under one
     # project is ambiguous, and picking by priority would quietly answer about
     # whichever this tool happened to rank first.  Both halves of a split
@@ -144,6 +253,56 @@ def resolve(given: str | os.PathLike | None = None) -> Path:
     listed = "\n".join(f"    {c}  ->  {c.resolve()}" for c in found)
     raise CorpusError(
         f"several corpora found; name the one you mean:\n{listed}")
+
+
+def resolve_log_dir(start: Path | None = None) -> Path:
+    """Where a *writer* should put its records.
+
+    Unlike `resolve()`, finding nothing is not an error: a project with no
+    corpus gets one created, which is how every corpus began.  What *is* an
+    error is being unable to tell which of two existing ones is meant.
+
+    The reader's tiers, plus a fourth the reader has no use for:
+
+      1. `$WATCHDOG_LOG_DIR` — the operator's instruction.
+      2. the project's committed `.isabelle-watchdog` marker.
+      3. an existing corpus under one of the known layouts.  This is the tier
+         that was missing, and its absence is a bug you cannot see: appending
+         to the wrong file is loud, but *creating* the wrong file is silent
+         and looks exactly like a first build.
+      4. `DEFAULT_LAYOUT`, for a project that genuinely has no corpus.
+
+    `$TRAJECTORY_CORPUS` is deliberately absent.  It is documented as a reader
+    override, for pointing a view at a corpus this project does not own;
+    honouring it here would mean that reading someone else's dataset silently
+    redirects your next build's records into it.  A variable that changes
+    where data is *written* should never be one people set casually to look
+    at something.
+    """
+    if os.environ.get(ENV_LOG_DIR):
+        return Path(os.environ[ENV_LOG_DIR]).expanduser()
+
+    marker = find_marker(start)
+    if marker is not None:
+        return read_marker(marker)
+
+    found = _distinct_existing(discovered(start))
+    if len(found) == 1:
+        return found[0].parent
+    if found:
+        # Refusing is not the same failure as a capture that breaks a build,
+        # and must not be softened into one.  This is a configuration error,
+        # decided before anything runs, with the fix in the message -- the
+        # class `build.py` already puts "no session to build" in.  Guessing
+        # instead would split an irreplaceable dataset in a way nothing
+        # downstream can detect, since each half is internally consistent.
+        listed = "\n".join(f"    {c}  ->  {c.resolve()}" for c in found)
+        raise CorpusError(
+            f"several corpora under {project_root(start)}; say which to "
+            f"record into.\n  Set ${ENV_LOG_DIR}, or commit a {MARKER_NAME} "
+            f"naming the log directory.\n{listed}")
+
+    return project_root(start) / DEFAULT_LAYOUT
 
 
 def resolve_repo(given: str | os.PathLike | None = None) -> Path:

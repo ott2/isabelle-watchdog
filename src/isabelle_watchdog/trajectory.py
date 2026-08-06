@@ -88,8 +88,10 @@ a Makefile edit halving `WALL_TIMEOUT`.
 
 CORPUS is optional everywhere: it defaults to $TRAJECTORY_CORPUS, then
 $WATCHDOG_LOG_DIR/builds.jsonl (the variable the watchdog and the recorder
-already honour, so a reader lands where the writer wrote), then the known
-layouts under the project the caller is standing in.  See bin/corpus.py.
+already honour, so a reader lands where the writer wrote), then the directory
+named by a committed .isabelle-watchdog marker, then the known layouts under
+the project the caller is standing in.  The first three are declarations and
+win outright; only the last can be ambiguous.  See corpus.py.
 
 Usage:
     bin/trajectory.py check    [CORPUS] [--repo PATH]
@@ -862,7 +864,9 @@ def build_parser() -> argparse.ArgumentParser:
                            help="builds.jsonl to read (default: "
                                 "$TRAJECTORY_CORPUS, else "
                                 "$WATCHDOG_LOG_DIR/builds.jsonl, else the "
-                                "known layouts under the current project)")
+                                "directory a committed .isabelle-watchdog "
+                                "names, else the known layouts under the "
+                                "current project)")
             if name in NEEDS_REPO:
                 s.add_argument("--repo", default=None,
                                help="source git repository the diffs came "

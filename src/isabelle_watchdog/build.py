@@ -43,6 +43,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import corpus
+
 
 
 def project_dir() -> Path:
@@ -115,8 +117,19 @@ def main() -> int:
     # second instance id, and a build that looks unrecorded because the
     # records are somewhere else.  Configuration belongs to the command, not
     # to one of its wrappers.
-    log_dir = os.environ.get("WATCHDOG_LOG_DIR") or str(project / "t" / "logs")
-    os.environ.setdefault("WATCHDOG_LOG_DIR", log_dir)
+    #
+    # Owning it is not the same as inventing it: the built-in default was
+    # still a guess, and in 43sp -- whose Makefile is exactly the wrapper this
+    # paragraph is about -- it guessed wrong.  corpus.resolve_log_dir() looks
+    # for the project's real corpus first and only creates one where there is
+    # none.  Resolved once here and exported, so every layer below inherits
+    # this answer rather than deriving its own.
+    try:
+        log_dir = str(corpus.resolve_log_dir(project))
+    except corpus.CorpusError as exc:
+        print(f"build: {exc}", file=sys.stderr)
+        return 2
+    os.environ["WATCHDOG_LOG_DIR"] = log_dir
 
     from .record import lint_note, NOTE_FILE
 
@@ -135,8 +148,9 @@ def main() -> int:
             print("note: ok")
         return 1 if complaints else 0
 
+    # Already carries WATCHDOG_LOG_DIR: it was set above, before `record` was
+    # imported, because that module reads it at import time.
     env = dict(os.environ)
-    env["WATCHDOG_LOG_DIR"] = log_dir
     if note is not None:
         env["BUILD_NOTE"] = note
         # A note given here supersedes whatever was pending, and the pending

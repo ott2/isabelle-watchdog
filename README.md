@@ -76,7 +76,7 @@ build system a project already has.
 | `BATTERY_FACTOR` | `2.0` | scale the budgets on battery power (macOS); `1.0` disables |
 | `LOOP_PROGRESS_THRESHOLD` | `3` | consecutive same-line warnings before a loop kill |
 | `BUILD_PROGRESS_THRESHOLD` | `15` | passed to Isabelle as `-o build_progress_threshold` |
-| `WATCHDOG_LOG_DIR` | `<project>/t/logs` | where records go |
+| `WATCHDOG_LOG_DIR` | resolved (below) | where records go |
 | `BUILD_SOURCE_PATHSPECS` | `*.thy *ROOT *ROOTS` | what counts as source |
 | `BUILD_SESSION` | — | session to build (`isabelle-build`) |
 | `TRAJECTORY_CORPUS` | — | read a specific corpus |
@@ -92,6 +92,24 @@ battery-throttled-but-fine build stops tripping while a genuine cost regression
 still does. The loop-detection threshold is scaled too — without that, a slow
 but healthy command crosses the unscaled threshold and gets killed as a loop
 while the scaled budgets still have room.
+
+### Where the corpus lives
+
+`$WATCHDOG_LOG_DIR` if you set it. Otherwise the tools look, rather than
+assuming — first for a committed `.isabelle-watchdog` naming the directory,
+then for a corpus already present under a known layout, and only then do they
+create one at `t/logs`. Readers resolve the same way, so a reader lands where
+the writer wrote without being told twice.
+
+```
+# .isabelle-watchdog, at the project root, committed
+# first non-blank, non-comment line: the log directory, relative to here
+results/isabelle-logs
+```
+
+Worth committing one. Discovery can only find a corpus that already exists,
+which means it says nothing about a fresh clone — whose first build would
+otherwise mint a corpus in the default place rather than the project's.
 
 ## Requirements
 
