@@ -848,6 +848,15 @@ itself a scope decision — take the narrowest widening that covers the
 defect.  `bin/check-snapshot-untracked.sh` guards both directions
 (theory and session `ROOT` in; scratch and gitignored out).
 
+> **Superseded.** That shell guard was never wired into anything, and by
+> the time the tooling moved into its own package it called
+> `_snapshot_tree()` with an arity the function no longer had, while
+> probing one project's `t/base/…` paths.  Its two checks now live in
+> `tests/test_record.py`
+> (`test_the_allowlist_admits_and_excludes_the_right_things`), which runs
+> a real capture in a scratch repository and asserts the same two
+> directions.  A guard nobody runs is not a guard.
+
 Two consequences that outlive the fix.  Records from before it under-
 report new-theory episodes and cannot be repaired retrospectively — the
 content was never captured.  And a *zero-byte* delta remains a distinct

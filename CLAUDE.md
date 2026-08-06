@@ -18,8 +18,7 @@ prose belongs in it.
         build.py               note-carrying entry point -> isabelle-build
         export.py  legacy_convert.py
         audits/                validation suite for the readers' statistics
-    tests/                     run.sh; error-loci + attribution, Isabelle e2e
-    scripts/                   shell guards, not packaged
+    tests/                     pytest; conftest.py holds the fixtures
     docs/logging-design.md     the design doc the code cites by section
 
 Consolidated from the two application projects that grew it, with history —
@@ -141,7 +140,11 @@ One JSON line per attempt. Design commitments, all load-bearing:
   authored every edit is invisible and a whole fail→fix run records as empty
   diffs. That accounted for 26 of 28 otherwise-inexplicable fail→ok flips in
   the first month of data. Non-source changes are still *named* in
-  `other_changed`, so a flip with an empty source diff stays explicable.
+  `other_changed`, so a flip with an empty source diff stays explicable —
+  tracked ones, that is: both snapshots stage untracked files by the same
+  allowlist, so a brand-new untracked non-source file appears in neither.
+  Narrow for Isabelle, where the untracked things able to flip an outcome are
+  `.thy` and `ROOT` files, which the allowlist already admits.
 - **Re-baselining on commit.** Diffs are incremental against the previous
   attempt's tree — *except* when HEAD moved mid-run, where it re-baselines on
   the new HEAD so committed content never leaks into a payload. Any consumer
@@ -306,11 +309,6 @@ trajectory lengths --fit --by-project
 trajectory classify BUILD_ID -v
 ```
 
-`scripts/check-snapshot-untracked.sh` is the regression guard for the capture
-allowlist and checks **both** directions — build-relevant source gets in,
-scratch and gitignored paths stay out. It is the closest thing to a test suite
-the capture layer has; its probe paths are still ndtht-shaped (`t/base/...`).
-
 `audits/` is the validation suite for the readers: each module interrogates one
 measurement decision (is the 1-shot rate measuring search or bookkeeping? is a
 timeout a proof event or load?) and re-derives the quantity a second way, so
@@ -336,23 +334,72 @@ own relative import failed), and a `readme = "README.md"` that did not exist.
 
 ### Tests
 
+pytest, in the ordinary way. It is a *test* dependency, not a runtime one:
+nothing under `tests/` is installed, imported by the package, or present when a
+build runs. The no-dependencies rule protects the build; it is not a reason to
+hand-roll a runner every contributor then has to learn.
+
 ```sh
-./tests/run.sh            # everything
-./tests/run.sh --fast     # skip the Isabelle integration test
+pip install -e ".[test]"
+pytest -m "not slow and not isabelle"   # pure logic — seconds
+pytest -m "not isabelle"                # + real subprocesses
+pytest                                  # + a real isabelle build
 ```
 
-Plain scripts, no framework — the package has no runtime dependencies and its
-tests should not add one. They raise `unittest.SkipTest`, which pytest honours
-if you have it.
+Two markers, both `--strict`, so a typo in one marks nothing rather than
+silently opting a slow test back in:
 
-`test_isabelle_integration.py` drives a **real** `isabelle build` in a scratch
-git repo: a green build, a false lemma (so a locus is extracted from genuine
-Isabelle output), and an axiom that rewrites `f x → f (Suc x)` forever. The
-last is the one worth its ~2m45s: it asserts `timeout_reason == "loop_progress"`
-and that the named line is the looping `by`, so it fails if Isabelle ever stops
-re-emitting its progress warning and the three coupled constants stop lining
-up. Skips cleanly without Isabelle or a prebuilt HOL heap — building HOL to run
-a test would cost more than the test is worth.
+- **`slow`** — spawns real processes. On a Mac with a security agent in the
+  exec path, `git` costs ~0.5 s per invocation and one capture makes ~25 of
+  them, so these dominate the wall clock on that machine and barely register
+  elsewhere.
+- **`isabelle`** — needs a real Isabelle *and* a prebuilt HOL heap.
+
+Three layers, deliberately, because each catches what the others cannot:
+
+| layer | what it can decide |
+|---|---|
+| pure functions over text and records | every parse, verdict and statistic |
+| the watchdog against a **fake** child (`sh -c` printing canned output) | the three kill conditions, the loop detector, battery scaling — in seconds, with no Isabelle |
+| the watchdog against a **real** `isabelle build` | whether Isabelle still prints what the parsers assume |
+
+The middle layer is why the suite is usable: supervision decides everything
+from the text on a pipe and the clock, so a shell script emitting the right
+lines at the right times exercises the real code path. It found two defects in
+the read loop that a corpus never could — see the fixtures in
+`tests/conftest.py`.
+
+`test_isabelle_integration.py` is the third layer: a green build, a false lemma
+(so a locus is extracted from genuine Isabelle output), and an axiom that
+rewrites `f x → f (Suc x)` forever. The last is the one worth its ~2m45s — it
+asserts `timeout_reason == "loop_progress"` and that the named line is the
+looping `by`, so it fails if Isabelle ever stops re-emitting its progress
+warning and the three coupled constants stop lining up. Skips cleanly without
+Isabelle or a HOL heap; building HOL to run a test would cost more than the
+test is worth.
+
+Fixtures worth knowing about, all in `tests/conftest.py`:
+
+- **`clean_env`** (autouse) clears every variable in the environment contract.
+  The whole public API is environment variables, so a developer with
+  `WATCHDOG_LOG_DIR` exported — that is, anyone using this on a real project —
+  would otherwise run a different suite from CI.
+- **`repo`** copies a template repository rather than running `git init`, for
+  the exec-latency reason above.
+- **`trajectory`** records five *real* attempts once per session — a tracked
+  edit, an untracked theory beside files the allowlist must exclude, a
+  mid-run commit, a no-op rebuild, and a prose-only edit. The integrity
+  readers' claim is that regeneration is the ground truth, so they have to be
+  tested against genuine payloads over a genuine object store; synthetic
+  records would only confirm that the code agrees with itself.
+- **`watchdog`** and **`stub_bin`** run the supervisor against a fake child,
+  and put a fake `pmset` on `PATH` (the only way to reach the battery branch —
+  no environment variable does).
+
+Note that any test exercising a timeout runs `kill_tree`, which ends with
+`pkill -TERM -f poly` as a safety net for orphaned Poly/ML. That will signal an
+unrelated interactive Isabelle session on the same machine. It is the tool's
+production behaviour, not something the tests add.
 
 ### Verifying a change
 
@@ -362,10 +409,10 @@ run every subcommand against both, before and after, and diff:
 - `~/projects/ndtht-trajectories/stac-wip/builds.jsonl` (695 records)
 - `~/projects/trajectories/43sp/builds.jsonl` (40 records)
 
-For the *write* path, `git init` a scratch repo, write a `.thy`, run the
-watchdog with `WATCHDOG_LOG_DIR` set, then `trajectory.py check` and `replay`
-against it. That is what caught the `PROJECT_DIR` bug, and no amount of reading
-would have.
+For the *write* path, that is now what the `trajectory` fixture does — `git
+init` a scratch repo, edit theories, capture, then `check` and `replay` against
+the result. It is the shape of test that caught the `PROJECT_DIR` bug, and no
+amount of reading would have.
 
 ## Corpora are separate repos
 
@@ -377,8 +424,6 @@ backup and sharing story from the tools.
 
 ## Known follow-up work
 
-- `scripts/check-snapshot-untracked.sh` probes `t/base/...` paths and is not
-  yet wired into `tests/`.
 - `legacy_convert.py` was a one-shot migration off the git-chain
   prototype; kept as a record of how the initial dataset was produced, not on
   any live path.

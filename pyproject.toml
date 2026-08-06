@@ -25,6 +25,13 @@ classifiers = [
 # tool it needs is `git`, which the projects it records already require.
 dependencies = []
 
+# A *test* dependency is not a runtime one: nothing under `tests/` is
+# installed, imported by the package, or present when a build runs.  The
+# no-dependencies rule protects the build; it is not a reason to hand-roll a
+# test runner that every contributor then has to learn.
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
 [project.urls]
 Homepage = "https://github.com/salamon/isabelle-watchdog"
 Source = "https://github.com/salamon/isabelle-watchdog"
@@ -33,6 +40,17 @@ Source = "https://github.com/salamon/isabelle-watchdog"
 isabelle-watchdog = "isabelle_watchdog.watchdog:main"
 isabelle-build = "isabelle_watchdog.build:main"
 trajectory = "isabelle_watchdog.trajectory:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# --strict-markers: a typo in `@pytest.mark.isabele` would otherwise silently
+# mark nothing, and `-m "not isabelle"` would then run the slow test anyway --
+# the failure mode being guarded against is a marker that quietly does nothing.
+addopts = "-ra --strict-markers"
+markers = [
+    "isabelle: needs a real Isabelle on PATH and a prebuilt HOL heap (~3 min)",
+    "slow: takes seconds rather than milliseconds -- supervises a real child process",
+]
 
 [tool.hatch.version]
 path = "src/isabelle_watchdog/__init__.py"
@@ -44,4 +62,4 @@ packages = ["src/isabelle_watchdog"]
 # The design document is the reason half this code looks the way it does --
 # the module comments cite it by section number -- so it ships with the
 # source rather than living only in the repository.
-include = ["src/", "docs/", "scripts/", "README.md", "LICENSE"]
+include = ["src/", "docs/", "tests/", "README.md", "LICENSE"]

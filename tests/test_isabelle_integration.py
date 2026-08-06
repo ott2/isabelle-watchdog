@@ -30,7 +30,9 @@ Building HOL to run a test would take longer than the test is worth, so its
 absence is a skip rather than a slow pass.  About 2m45s when it does run:
 three builds each paying to load the HOL heap, plus the loop case waiting out
 its 20 s of spinning.  Slow enough to keep out of a tight edit loop, and the
-only thing here that can tell you Isabelle still behaves as assumed.
+only thing here that can tell you Isabelle still behaves as assumed:
+
+    pytest -m "not isabelle"      everything else
 """
 from __future__ import annotations
 
@@ -39,16 +41,13 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
-import unittest
 from pathlib import Path
 
-import isabelle_watchdog
+import pytest
 
-# `raise unittest.SkipTest` rather than a pytest decorator: pytest honours it,
-# and so does plain `python tests/test_isabelle_integration.py`, which is how
-# the rest of this suite is run.  No test dependency either way.
-SkipTest = unittest.SkipTest
+from conftest import package_env
+
+pytestmark = pytest.mark.isabelle
 
 SESSION = "Probe"
 ROOT = "session Probe = HOL +\n  theories\n    Probe_A\n"
@@ -107,7 +106,7 @@ def isabelle_exe() -> str:
     """The Isabelle launcher, or skip."""
     exe = shutil.which("isabelle") or str(Path.home() / ".local/bin/isabelle")
     if not Path(exe).exists():
-        raise SkipTest("no `isabelle` on PATH")
+        pytest.skip("no `isabelle` on PATH")
     return exe
 
 
@@ -125,9 +124,9 @@ def require_hol_heap(exe: str, heaps: Path | None = None) -> None:
                            capture_output=True, text=True)
         heaps = Path(p.stdout.strip() or "/nonexistent")
     if not heaps.is_dir():
-        raise SkipTest(f"cannot locate ISABELLE_HEAPS (got {heaps!r})")
+        pytest.skip(f"cannot locate ISABELLE_HEAPS (got {heaps!r})")
     if not any((d / "HOL").exists() for d in heaps.iterdir() if d.is_dir()):
-        raise SkipTest(f"no HOL heap under {heaps}; run `isabelle build HOL` first")
+        pytest.skip(f"no HOL heap under {heaps}; run `isabelle build HOL` first")
 
 
 def make_project(root: Path, theory: str) -> None:
@@ -148,17 +147,16 @@ def make_project(root: Path, theory: str) -> None:
 
 
 def run_build(root: Path, logs: Path, note: str, **budgets) -> tuple[int, str]:
-    """One recorded attempt.  Returns (exit code, terse summary)."""
+    """One recorded attempt.  Returns (exit code, terse summary).
+
+    `package_env` both reaches this package from the subprocess and clears the
+    ambient configuration, so a developer with `WATCHDOG_LOG_DIR` or
+    `WALL_TIMEOUT` exported does not quietly run a different test.
+    """
     exe = isabelle_exe()
-    env = dict(os.environ)
-    env["PATH"] = f"{Path(exe).parent}{os.pathsep}{env.get('PATH', '')}"
-    # The subprocess must import the same copy of the package this test did,
-    # whether that is an install or a source tree on PYTHONPATH.
-    src = str(Path(isabelle_watchdog.__file__).resolve().parent.parent)
-    env["PYTHONPATH"] = f"{src}{os.pathsep}{env.get('PYTHONPATH', '')}"
-    env["WATCHDOG_LOG_DIR"] = str(logs)
-    env["BUILD_NOTE"] = note
-    env.update({k: str(v) for k, v in budgets.items()})
+    env = package_env(
+        PATH=f"{Path(exe).parent}{os.pathsep}{os.environ.get('PATH', '')}",
+        WATCHDOG_LOG_DIR=str(logs), BUILD_NOTE=note, **budgets)
     p = subprocess.run(
         [sys.executable, "-m", "isabelle_watchdog.watchdog",
          "isabelle", "build", "-d", "thy", "-v", SESSION],
@@ -170,96 +168,114 @@ def last_record(logs: Path) -> dict:
     return json.loads(logs.joinpath("builds.jsonl").read_text().splitlines()[-1])
 
 
-def test_heap_detection_skips_rather_than_builds():
-    """A missing heap must skip: building HOL to run a test is not a test."""
-    exe = isabelle_exe()
-    empty = Path(tempfile.mkdtemp(prefix="wd-heaps-"))
-    try:
-        (empty / "polyml-x").mkdir()
-        try:
-            require_hol_heap(exe, heaps=empty)
-        except SkipTest as e:
-            print(f"   no HOL heap -> SkipTest({str(e)[:40]}...)")
-        else:
-            raise AssertionError("a heapless installation must skip")
-    finally:
-        shutil.rmtree(empty, ignore_errors=True)
-
-
-def test_isabelle_end_to_end():
+# One session, three attempts, run once: each build pays about 25 seconds to
+# load the HOL heap, and the diffs are incremental, so the chain has to happen
+# in order.  The assertions then read as separate tests, which is what makes a
+# failure say *which* of the three broke.
+@pytest.fixture(scope="session")
+def isabelle_run(tmp_path_factory):
     exe = isabelle_exe()
     require_hol_heap(exe)
 
-    tmp = Path(tempfile.mkdtemp(prefix="wd-isa-"))
-    try:
-        root, logs = tmp / "proj", tmp / "logs"
-        make_project(root, GREEN)
+    tmp = tmp_path_factory.mktemp("isa")
+    root, logs = tmp / "proj", tmp / "logs"
+    make_project(root, GREEN)
+    out = {}
 
-        # --- green ------------------------------------------------------
-        # A generous budget only here: the first build of a session pays for
-        # loading the HOL heap, which is not what any of these budgets are
-        # about.
-        code, out = run_build(root, logs, "change: first build; expect: ok",
-                              WALL_TIMEOUT=900, WATCHDOG_TIMEOUT=300)
-        rec = last_record(logs)
-        print(f"   green   exit={code} outcome={rec['outcome']} "
-              f"{rec['elapsed_s']}s  predicted={rec['note_predicted']}")
-        assert code == 0, out
-        assert rec["outcome"] == "ok", rec["outcome"]
-        assert not rec["error_loci"], rec["error_loci"]
-        assert rec["limits"]["build_progress_threshold"] == 15, rec["limits"]
+    # --- green ----------------------------------------------------------
+    # A generous budget only here: the first build of a session pays for
+    # loading the HOL heap, which is not what any of these budgets are about.
+    code, text = run_build(root, logs, "change: first build; expect: ok",
+                           WALL_TIMEOUT=900, WATCHDOG_TIMEOUT=300)
+    out["green"] = (code, text, last_record(logs))
 
-        # --- failure, with a locus --------------------------------------
-        (root / "thy" / "Probe_A.thy").write_text(FALSE_LEMMA)
-        code, out = run_build(root, logs,
-                              "diagnosis: n+1=n is false; change: added it; "
-                              "expect: fail",
-                              WALL_TIMEOUT=900, WATCHDOG_TIMEOUT=300)
-        rec = last_record(logs)
-        loci = rec["error_loci"] or []
-        print(f"   fail    outcome={rec['outcome']} loci={loci}")
-        assert rec["outcome"] == "fail", rec["outcome"]
-        assert loci, f"no locus extracted from:\n{rec['error_head']}"
-        where, line = loci[0]
-        assert where.endswith("Probe_A.thy"), where
-        assert line == "9", f"expected the `by` at line 9, got {line}"
-        # The edit is in the payload, so the corpus explains the outcome.
-        assert "broken" in (rec["diff"] or ""), rec["diff"][:200]
+    # --- failure, with a locus ------------------------------------------
+    (root / "thy" / "Probe_A.thy").write_text(FALSE_LEMMA)
+    code, text = run_build(root, logs,
+                           "diagnosis: n+1=n is false; change: added it; "
+                           "expect: fail",
+                           WALL_TIMEOUT=900, WATCHDOG_TIMEOUT=300)
+    out["fail"] = (code, text, last_record(logs))
 
-        # --- the loop detector ------------------------------------------
-        # Budgets well clear of the loop threshold, so what fires is the loop
-        # detector rather than the wall.  With the shipped 40 s wall a cold
-        # heap can exhaust it before the command has spun for 20 s: the line
-        # is still named, but the diagnosis reads `wall`, and this test is
-        # about the loop path specifically.
-        (root / "thy" / "Probe_A.thy").write_text(LOOPING)
-        code, out = run_build(root, logs,
-                              "diagnosis: f_unfold rewrites forever; "
-                              "change: declared it [simp]; expect: timeout",
-                              WALL_TIMEOUT=180, WATCHDOG_TIMEOUT=180)
-        rec = last_record(logs)
-        print(f"   loop    outcome={rec['outcome']} reason={rec['timeout_reason']}")
-        print(f"           head: {rec['error_head']}")
-        assert rec["outcome"] == "timeout", rec["outcome"]
-        assert rec["timeout_reason"] == "loop_progress", (
-            f"expected the loop detector to fire, got {rec['timeout_reason']!r}. "
-            f"If Isabelle stopped re-emitting its progress warning, the three "
-            f"coupled constants no longer line up -- see "
-            f"inject_progress_threshold.\n{out}")
-        # The whole point: it names the line, not just 'something hung'.
-        assert LOOPING_LINE in (rec["error_head"] or ""), rec["error_head"]
-        assert any(LOOPING_LINE == ln for _thy, ln in rec["error_loci"] or []), \
-            rec["error_loci"]
-        assert code == 124, f"watchdog kill should exit 124, got {code}"
-
-        print("\nPASS: green, locus-bearing failure, and a named looping line")
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+    # --- the loop detector ----------------------------------------------
+    # Budgets well clear of the loop threshold, so what fires is the loop
+    # detector rather than the wall.  With the shipped 40 s wall a cold heap
+    # can exhaust it before the command has spun for 20 s: the line is still
+    # named, but the diagnosis reads `wall`, and this is about the loop path.
+    (root / "thy" / "Probe_A.thy").write_text(LOOPING)
+    code, text = run_build(root, logs,
+                           "diagnosis: f_unfold rewrites forever; "
+                           "change: declared it [simp]; expect: timeout",
+                           WALL_TIMEOUT=180, WATCHDOG_TIMEOUT=180)
+    out["loop"] = (code, text, last_record(logs))
+    return out
 
 
-if __name__ == "__main__":
-    try:
-        test_heap_detection_skips_rather_than_builds()
-        test_isabelle_end_to_end()
-    except SkipTest as e:
-        print(f"SKIPPED: {e}")
+def test_a_missing_heap_skips_rather_than_building_one(tmp_path):
+    """Building HOL to run a test would cost more than the test is worth, so
+    its absence must be a skip and not a slow pass."""
+    exe = isabelle_exe()
+    (tmp_path / "polyml-x").mkdir()
+    with pytest.raises(pytest.skip.Exception):
+        require_hol_heap(exe, heaps=tmp_path)
+
+
+def test_a_real_green_build_is_recorded(isabelle_run):
+    code, out, rec = isabelle_run["green"]
+    assert code == 0, out
+    assert rec["outcome"] == "ok"
+    assert not rec["error_loci"]
+    assert rec["note_predicted"] == "ok"
+
+
+def test_the_injected_threshold_survives_a_real_invocation(isabelle_run):
+    """Isabelle accepted the option and the record says which value was in
+    force -- the two halves of the constant that makes the loop detector
+    possible."""
+    _code, _out, rec = isabelle_run["green"]
+    assert rec["limits"]["build_progress_threshold"] == 15
+
+
+def test_a_locus_is_extracted_from_genuine_isabelle_output(isabelle_run):
+    """And it points at the `by` on line 9, not at the `lemma` on line 8: a
+    locus names the command that failed, which is the whole reason it beats a
+    theory name."""
+    _code, _out, rec = isabelle_run["fail"]
+    assert rec["outcome"] == "fail"
+    loci = rec["error_loci"] or []
+    assert loci, f"no locus extracted from:\n{rec['error_head']}"
+    where, line = loci[0]
+    assert where.endswith("Probe_A.thy"), where
+    assert line == "9", f"expected the `by` at line 9, got {line}"
+
+
+def test_the_edit_that_caused_the_failure_is_in_the_payload(isabelle_run):
+    """So the corpus explains its own outcome."""
+    _code, _out, rec = isabelle_run["fail"]
+    assert "broken" in (rec["diff"] or "")
+
+
+def test_the_loop_detector_fires_on_a_real_looping_tactic(isabelle_run):
+    """The claim this whole file exists to check.
+
+    Three constants have to agree, and two of them belong to Isabelle: its
+    progress threshold and its 2-second re-emit.  Nothing but running it can
+    say whether they still do.
+    """
+    code, out, rec = isabelle_run["loop"]
+    assert rec["outcome"] == "timeout"
+    assert rec["timeout_reason"] == "loop_progress", (
+        f"expected the loop detector to fire, got {rec['timeout_reason']!r}. "
+        f"If Isabelle stopped re-emitting its progress warning, the three "
+        f"coupled constants no longer line up -- see "
+        f"inject_progress_threshold.\n{out}")
+    assert code == 124, f"a watchdog kill should exit 124, got {code}"
+
+
+def test_the_looping_line_is_named(isabelle_run):
+    """"The build hung" and "`by simp` at Probe_A:12 hung" are different
+    amounts of help."""
+    _code, _out, rec = isabelle_run["loop"]
+    assert LOOPING_LINE in (rec["error_head"] or ""), rec["error_head"]
+    assert any(LOOPING_LINE == ln for _thy, ln in rec["error_loci"] or []), \
+        rec["error_loci"]

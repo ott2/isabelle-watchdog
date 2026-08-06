@@ -106,6 +106,20 @@ corpus written by an older version has drifted.
 The design is documented at length in [`docs/logging-design.md`](docs/logging-design.md),
 which the code comments cite by section number.
 
+## Development
+
+```sh
+pip install -e ".[test]"
+pytest -m "not slow and not isabelle"   # pure logic — seconds
+pytest -m "not isabelle"                # + real subprocesses
+pytest                                  # + a real isabelle build
+```
+
+pytest is a test dependency only — nothing under `tests/` is installed or
+imported by the package. The `isabelle` marker covers the end-to-end test,
+which needs a real Isabelle and a prebuilt HOL heap and skips cleanly without
+them.
+
 ## Licence
 
 MIT.
