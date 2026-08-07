@@ -11,13 +11,70 @@ still regenerates.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-08-07
+
+Everything a project other than the two that grew this needs before adopting
+it: where its records go is discoverable and declarable, capture is optional,
+and the budgets no longer assume a machine nobody else has.
+
 **Record-schema change, additive.** Two new keys: a top-level `contention`
-object and `limits.load_factor_max`. Older records read identically — every
-view treats an absent key as unmeasured, which is not the same as zero — and
-readers' output on both existing corpora is byte-for-byte unchanged.
+object and `limits.load_factor_max`. Corpora written by `0.2.0` read
+identically — every view treats an absent key as unmeasured, which is not the
+same as zero — and readers' output on both existing corpora is byte-for-byte
+unchanged.
+
+### Fixed
+
+- **A writer with nothing configured created a corpus instead of finding
+  one.** With `$WATCHDOG_LOG_DIR` unset, all three writers fell straight to a
+  built-in `t/logs` default. In a project whose corpus is the other known
+  layout — 43sp's is `results/isabelle-logs`, named by a Makefile variable, so
+  any build run outside make had no variable — that minted a *second* corpus:
+  new instance id, empty history, and every record in it perfectly valid.
+  Appending to the wrong file is loud; creating the wrong file is silent and
+  looks exactly like a first build, and `trajectory check` calls both halves
+  sound because each is. `corpus.resolve_log_dir()` now looks before it
+  creates, using the same tiers the readers use, and the default is reached
+  only by a project that genuinely has no corpus.
+
+  The reader's half of this was fixed in 0.2.0 — readers honour
+  `$WATCHDOG_LOG_DIR` so they land where the writer wrote. That left the
+  writer guessing, which is the worse half: a reader that guesses reports the
+  wrong number, a writer that guesses makes one.
+- **The watchdog placed `last-build.log` relative to `__file__`.** That named
+  the project only while the script lived inside it; installed, it named
+  `site-packages/t/logs`. The recorder's copy of this bug was fixed during
+  consolidation and this one was missed, because it misplaces a log file
+  rather than a payload — nothing errors and no record ever looks wrong.
+  `export.py`'s defaults had it too.
+- **`BATTERY_FACTOR` had never applied off macOS.** Detection was `pmset`
+  only, so the scaling was silently inert on exactly the laptops it was
+  written for. Linux now reads `/sys/class/power_supply` — a file read, no
+  subprocess. A desktop with no mains supply still answers "unknown", because
+  "no battery" and "on battery" must not be confused.
 
 ### Added
 
+- **`.isabelle-watchdog`**, a committed project marker naming the log
+  directory — first non-blank, non-comment line, relative to the marker. Same
+  file shape and same search as `.isabelle-query`, deliberately: a project
+  already carrying one marker should not learn a second convention. This is
+  the tier discovery cannot reach, since discovery can only find a corpus that
+  already exists and so says nothing about a fresh clone, or about a layout
+  the tool has never seen. The search stops at the project root, unlike
+  `.isabelle-query`'s unbounded walk: projects are routinely nested, and
+  overshooting here would pool two repositories' trajectories into one corpus.
+  A marker that names nothing is an error rather than a no-op.
+- **Trajectory capture can be turned off**: `--no-record` on both
+  `isabelle-build` and `isabelle-watchdog`, or `BUILD_RECORD=0` for a project
+  that never wants it. On by default, because the capture is the reason the
+  supervision was written — but the supervision is useful alone (killing a
+  looping tactic and naming its line needs no dataset), and a project that
+  only wants that should not accumulate records it will never read. The check
+  lives in the watchdog rather than inside `record()`, so a declined capture
+  skips the module entirely rather than importing it to do nothing.
+  An unrecognised `$BUILD_RECORD` is an error: read as *on*, a misspelt "off"
+  quietly collects the data someone declined.
 - **Budgets adapt to a contended machine, measured rather than predicted.**
   Battery and load look like one problem and are two. Throttling changes how
   much work a CPU-second *buys*, which no accounting can see afterwards —
@@ -52,49 +109,6 @@ readers' output on both existing corpora is byte-for-byte unchanged.
   machine`, or `machine contended — this build got 0.31 of a core`. The
   stalled case earns its line: it is the one verdict where nothing was
   scaled, so nothing else in the output would hint at it.
-- **Battery detection on Linux**, via `/sys/class/power_supply`. `pmset` is
-  macOS-only, so `BATTERY_FACTOR` had simply never applied anywhere else —
-  not broken, but silently inert on exactly the machines it was written for.
-  A desktop with no mains supply still answers "unknown", because "no
-  battery" and "on battery" must not be confused.
-
-### Fixed
-
-- **A writer with nothing configured created a corpus instead of finding
-  one.** With `$WATCHDOG_LOG_DIR` unset, all three writers fell straight to a
-  built-in `t/logs` default. In a project whose corpus is the other known
-  layout — 43sp's is `results/isabelle-logs`, named by a Makefile variable, so
-  any build run outside make had no variable — that minted a *second* corpus:
-  new instance id, empty history, and every record in it perfectly valid.
-  Appending to the wrong file is loud; creating the wrong file is silent and
-  looks exactly like a first build, and `trajectory check` calls both halves
-  sound because each is. `corpus.resolve_log_dir()` now looks before it
-  creates, using the same tiers the readers use, and the default is reached
-  only by a project that genuinely has no corpus.
-
-  The reader's half of this was fixed in 0.2.0 — readers honour
-  `$WATCHDOG_LOG_DIR` so they land where the writer wrote. That left the
-  writer guessing, which is the worse half: a reader that guesses reports the
-  wrong number, a writer that guesses makes one.
-- **The watchdog placed `last-build.log` relative to `__file__`.** That named
-  the project only while the script lived inside it; installed, it named
-  `site-packages/t/logs`. The recorder's copy of this bug was fixed during
-  consolidation and this one was missed, because it misplaces a log file
-  rather than a payload — nothing errors and no record ever looks wrong.
-  `export.py`'s defaults had it too.
-
-### Added
-
-- **Trajectory capture can be turned off**: `--no-record` on both
-  `isabelle-build` and `isabelle-watchdog`, or `BUILD_RECORD=0` for a project
-  that never wants it. On by default, because the capture is the reason the
-  supervision was written — but the supervision is useful alone (killing a
-  looping tactic and naming its line needs no dataset), and a project that
-  only wants that should not accumulate records it will never read. The check
-  lives in the watchdog rather than inside `record()`, so a declined capture
-  skips the module entirely rather than importing it to do nothing.
-  An unrecognised `$BUILD_RECORD` is an error: read as *on*, a misspelt "off"
-  quietly collects the data someone declined.
 - **`isabelle-build --where`** — reports the resolved corpus, which of the
   four rules chose it, and whether capture is on, without building. A tool
   that resolves a path by four rules should be able to say which one fired;
@@ -106,16 +120,6 @@ readers' output on both existing corpora is byte-for-byte unchanged.
   and the capture switch, and only *leading* flags are the wrapper's — `env`,
   `nice` and `timeout` draw the line in the same place, and anywhere else
   means silently eating an option meant for `isabelle build`.
-- **`.isabelle-watchdog`**, a committed project marker naming the log
-  directory — first non-blank, non-comment line, relative to the marker. Same
-  file shape and same search as `.isabelle-query`, deliberately: a project
-  already carrying one marker should not learn a second convention. This is
-  the tier discovery cannot reach, since discovery can only find a corpus that
-  already exists and so says nothing about a fresh clone, or about a layout
-  the tool has never seen. The search stops at the project root, unlike
-  `.isabelle-query`'s unbounded walk: projects are routinely nested, and
-  overshooting here would pool two repositories' trajectories into one corpus.
-  A marker that names nothing is an error rather than a no-op.
 - **One line to stderr when a corpus is created.** Resolution only sees
   layouts it knows and markers that were committed, so a project keeping
   records somewhere else entirely still gets a fresh one minted. "creating"

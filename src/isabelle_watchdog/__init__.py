@@ -28,6 +28,6 @@ watchdog imports it, and it should stay that way.
 # watchdog is often run, and how its own tests run it.  Deriving it from
 # `importlib.metadata` instead would raise `PackageNotFoundError` in exactly
 # that case.
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = ["__version__"]
