@@ -258,7 +258,7 @@ def test_on_battery_all_three_budgets_scale(watchdog, stub_bin):
     assert rec["limits"] == {
         "activity_timeout": 10, "wall_timeout": 20, "startup_timeout": 30,
         "loop_progress_threshold": 3, "build_progress_threshold": 30.0,
-        "battery_factor_applied": 2.0,
+        "battery_factor_applied": 2.0, "load_factor_max": 4.0,
     }
     assert "budgets scaled x2" in run.out
 
@@ -284,6 +284,136 @@ def test_an_undetectable_power_state_scales_nothing(watchdog, stub_bin):
                    PATH=f"{stub_bin.dir}{os.pathsep}{os.environ['PATH']}")
     assert run.record["power"] == "unknown"
     assert run.record["limits"]["activity_timeout"] == 5
+
+
+# ----------------------------------------------------------------- contention
+#
+# Battery is *assumed* from a machine state; contention is *measured* from the
+# build.  These drive the measurement with a fake `ps`, which is the only way
+# to hold a duty cycle still -- a real one on a `sleep` reports no CPU, and a
+# real one on a spinner reports whatever the machine happens to be doing while
+# the suite runs.
+
+def cpu_stub(stub_bin, tmp_path, cs_per_call: int):
+    """A fake `ps` whose reported tree CPU advances `cs_per_call` centiseconds
+    per sample.  With CPU_SAMPLE_INTERVAL=1 that is the duty cycle x 100."""
+    counter = tmp_path / "ps-calls"
+    stub_bin("ps", f"""
+n=$(cat {counter} 2>/dev/null || echo 0)
+n=$((n + 1))
+echo $n > {counter}
+cs=$((n * {cs_per_call}))
+printf '  0:%d.%02d\\n' $((cs / 100)) $((cs % 100))
+""")
+
+
+def with_stub(stub_bin, **env):
+    env["PATH"] = f"{stub_bin.dir}{os.pathsep}{os.environ['PATH']}"
+    env.setdefault("CPU_SAMPLE_INTERVAL", 1.0)
+    return env
+
+
+def test_a_starved_build_is_given_back_the_time_it_did_not_get(watchdog, stub_bin,
+                                                               tmp_path):
+    """A build getting a quarter of a core has had a quarter of the budget it
+    was charged for, so 1/duty restores what it would have had uncontended.
+
+    Measured, not assumed -- which is what makes the rule portable: 0.25 of a
+    core means the same thing on any machine, so nothing here is calibrated
+    against the one it was written on.
+    """
+    cpu_stub(stub_bin, tmp_path, 25)                      # duty 0.25 -> factor 4
+    run = watchdog("sh", "-c", STARTED + "sleep 5", WATCHDOG_TIMEOUT=30,
+                   **with_stub(stub_bin, WALL_TIMEOUT=3, LOAD_FACTOR_MAX=4.0))
+    assert run.code == 0, run                             # 3s x 4 = 12s > 5s
+    c = run.record["contention"]
+    assert c["verdict"] == "starved"
+    assert c["load_factor_applied"] == 4.0
+
+
+def test_a_build_running_flat_out_still_trips_its_budget(watchdog, stub_bin,
+                                                         tmp_path):
+    """The property the whole design turns on.
+
+    A proof that got genuinely more expensive burns CPU at full rate, so it is
+    never mistaken for a starved one -- scaling by an *estimated* load factor
+    would have made those two indistinguishable and quietly destroyed the
+    cost-regression signal the tight wall budget exists to carry.
+    """
+    cpu_stub(stub_bin, tmp_path, 100)                     # duty 1.0 -> factor 1
+    run = watchdog("sh", "-c", STARTED + "sleep 20", WATCHDOG_TIMEOUT=30,
+                   **with_stub(stub_bin, WALL_TIMEOUT=3, LOAD_FACTOR_MAX=4.0))
+    assert run.code == 124, run
+    rec = run.record
+    assert rec["timeout_reason"] == "wall"
+    assert rec["contention"]["verdict"] == "running"
+    assert rec["contention"]["load_factor_applied"] == 1.0
+
+
+def test_a_stalled_tree_earns_no_extension(watchdog, stub_bin, tmp_path):
+    """1/duty is unbounded as duty goes to zero, so the naive rule would hand
+    a deadlock four times its deadline.  No CPU is not slowness -- it is the
+    absence of work, and more time does not fix it.
+
+    It also sharpens the diagnosis: "no output" alone could be a build working
+    quietly, and "no output and no CPU" could not.
+    """
+    cpu_stub(stub_bin, tmp_path, 0)                       # duty 0 -> stalled
+    run = watchdog("sh", "-c", STARTED + "sleep 20", WATCHDOG_TIMEOUT=30,
+                   **with_stub(stub_bin, WALL_TIMEOUT=3, LOAD_FACTOR_MAX=4.0))
+    assert run.code == 124, run
+    c = run.record["contention"]
+    assert c["verdict"] == "stalled"
+    assert c["load_factor_applied"] == 1.0
+    # And it says so: "timed out" is a report, "timed out without using the
+    # CPU" is a diagnosis -- and this is the one verdict where nothing was
+    # scaled, so no other part of the output would hint at it.
+    assert "used no CPU" in run.out, run
+
+
+def test_the_cap_bounds_what_starvation_can_buy(watchdog, stub_bin, tmp_path):
+    """A budget that stretches without limit is not a budget."""
+    cpu_stub(stub_bin, tmp_path, 10)                      # duty 0.1 -> 1/duty=10
+    run = watchdog("sh", "-c", STARTED + "sleep 20", WATCHDOG_TIMEOUT=30,
+                   **with_stub(stub_bin, WALL_TIMEOUT=3, LOAD_FACTOR_MAX=2.0))
+    assert run.code == 124, run                           # 3s x 2 = 6s, not 30s
+    assert run.record["contention"]["load_factor_applied"] == 2.0
+
+
+def test_the_measurement_can_be_switched_off(watchdog, stub_bin, tmp_path):
+    """LOAD_FACTOR_MAX=1.0 skips the sampling entirely, `ps` calls included --
+    the setting to reach for on a machine where this misbehaves."""
+    cpu_stub(stub_bin, tmp_path, 25)
+    run = watchdog("sh", "-c", STARTED + "sleep 20", WATCHDOG_TIMEOUT=30,
+                   **with_stub(stub_bin, WALL_TIMEOUT=3, LOAD_FACTOR_MAX=1.0))
+    assert run.code == 124, run                           # killed on the nose
+    c = run.record["contention"]
+    assert c["verdict"] == "unknown" and c["cpu_time_s"] is None
+
+
+def test_an_unreadable_tree_changes_nothing(watchdog, stub_bin, tmp_path):
+    """No `ps`, a platform without one, or a race with the tree exiting.
+    Unmeasured contention has to behave exactly as it did before any of this
+    existed, or a portability gap becomes a behaviour change."""
+    stub_bin("ps", "exit 1")
+    run = watchdog("sh", "-c", STARTED + "sleep 20", WATCHDOG_TIMEOUT=30,
+                   **with_stub(stub_bin, WALL_TIMEOUT=3, LOAD_FACTOR_MAX=4.0))
+    assert run.code == 124, run
+    assert run.record["contention"]["verdict"] == "unknown"
+
+
+def test_the_observations_are_recorded_not_just_the_verdict(watchdog, stub_bin,
+                                                            tmp_path):
+    """A record keeping only the applied factor could never answer "was that
+    timeout a hard proof or a busy laptop" once the policy above it changed.
+    Duty cycle and CPU seconds stay meaningful whatever the policy becomes."""
+    cpu_stub(stub_bin, tmp_path, 50)
+    run = watchdog("sh", "-c", STARTED + "sleep 4", WATCHDOG_TIMEOUT=30,
+                   **with_stub(stub_bin, WALL_TIMEOUT=6, LOAD_FACTOR_MAX=4.0))
+    c = run.record["contention"]
+    assert 0.45 <= c["duty_cycle"] <= 0.55        # sampled, so not exact
+    assert c["cpu_time_s"] > 0
+    assert run.record["limits"]["load_factor_max"] == 4.0
 
 
 # --------------------------------------------------- capture never costs a build

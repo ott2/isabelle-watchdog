@@ -73,7 +73,8 @@ build system a project already has.
 |---|---|---|
 | `WATCHDOG_TIMEOUT` | `20` | kill after N seconds of stalled stdout |
 | `WALL_TIMEOUT` | `40` | absolute wall-clock cap |
-| `BATTERY_FACTOR` | `2.0` | scale the budgets on battery power (macOS); `1.0` disables |
+| `BATTERY_FACTOR` | `2.0` | scale the budgets on battery power; `1.0` disables |
+| `LOAD_FACTOR_MAX` | `4.0` | cap on the measured contention factor; `1.0` disables |
 | `LOOP_PROGRESS_THRESHOLD` | `3` | consecutive same-line warnings before a loop kill |
 | `BUILD_PROGRESS_THRESHOLD` | `15` | passed to Isabelle as `-o build_progress_threshold` |
 | `WATCHDOG_LOG_DIR` | resolved (below) | where records go |
@@ -93,6 +94,34 @@ battery-throttled-but-fine build stops tripping while a genuine cost regression
 still does. The loop-detection threshold is scaled too — without that, a slow
 but healthy command crosses the unscaled threshold and gets killed as a loop
 while the scaled budgets still have room.
+
+### A busy machine, versus a slow one
+
+These look alike and are not, so they are handled differently.
+
+Battery throttling changes how much work a CPU-second *buys*. Nothing can
+measure that after the fact, so it takes an assumed factor — `BATTERY_FACTOR`.
+
+Sharing the machine changes how many CPU-seconds you *get* per wall-second,
+and that **is** measurable: a descheduled process accrues no CPU time at all.
+So the watchdog samples its process tree's CPU time and works out the **duty
+cycle** — CPU-seconds per wall-second. A build getting a quarter of a core has
+had a quarter of the budget it was charged for, and gets four times as long.
+Nothing is estimated, and nothing is calibrated: 0.25 of a core means the same
+thing on every machine.
+
+Three cases, and the third is the point:
+
+| duty cycle | verdict | what happens |
+|---|---|---|
+| ~0 | stalled | killed on time — no CPU is a hang, and more time cannot fix it |
+| 0.05–0.9 | starved | budgets × 1/duty, capped at `LOAD_FACTOR_MAX` |
+| ≥ 0.9 | running | killed on time — a build using a full core is expensive, not starved |
+
+That last row is why this is a measurement and not a load-average heuristic: a
+proof that got genuinely slower burns CPU at full rate, so it still trips its
+budget and the regression is still visible. Scaling by an estimated system
+load would have hidden it.
 
 ### Where the corpus lives
 

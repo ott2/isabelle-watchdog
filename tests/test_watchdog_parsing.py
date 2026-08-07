@@ -197,9 +197,132 @@ def test_ansi_escapes_are_stripped_before_matching():
     assert W.strip_ansi("\x1b[32m*** At command\x1b[0m") == "*** At command"
 
 
-def test_power_state_is_unknown_off_macos(monkeypatch):
-    """`pmset` is macOS-only, and guessing would be worse than not scaling:
-    a wrongly-applied factor doubles every budget and hides a real
-    regression."""
-    monkeypatch.setattr(W.sys, "platform", "linux")
+def test_power_state_is_unknown_on_an_unsupported_platform(monkeypatch):
+    """Guessing would be worse than not scaling: a wrongly-applied factor
+    doubles every budget and hides a real regression."""
+    monkeypatch.setattr(W.sys, "platform", "sunos5")
     assert W.on_battery() is None
+
+
+# ------------------------------------------------------------- power, on Linux
+
+def supplies(root, **kinds):
+    """Build a fake /sys/class/power_supply."""
+    for name, (typ, online) in kinds.items():
+        d = root / name
+        d.mkdir(parents=True)
+        (d / "type").write_text(typ + "\n")
+        if online is not None:
+            (d / "online").write_text(str(online) + "\n")
+    return root
+
+
+def test_linux_mains_offline_is_battery(tmp_path):
+    supplies(tmp_path, AC=("Mains", 0), BAT0=("Battery", None))
+    assert W._on_battery_linux(tmp_path) is True
+
+
+def test_linux_mains_online_is_ac(tmp_path):
+    supplies(tmp_path, AC=("Mains", 1), BAT0=("Battery", None))
+    assert W._on_battery_linux(tmp_path) is False
+
+
+def test_a_desktop_with_no_mains_supply_is_unknown(tmp_path):
+    """"No battery" and "on battery" must not be confused, and a machine that
+    cannot run on battery needs no scaling either way."""
+    supplies(tmp_path)
+    assert W._on_battery_linux(tmp_path) is None
+
+
+def test_no_sysfs_at_all_is_unknown(tmp_path):
+    assert W._on_battery_linux(tmp_path / "nope") is None
+
+
+# --------------------------------------------------------------- contention
+#
+# The measurement that load average could not provide: a dimensionless duty
+# cycle, so a threshold expressed in it is not fitted to one machine.
+
+@pytest.mark.parametrize("field, secs", [
+    ("  0:01.22", 1.22),          # macOS
+    ("00:00:01", 1.0),            # Linux
+    ("12:34.00", 754.0),
+    ("01:00:00", 3600.0),
+    ("2-03:00:00", 183600.0),     # Linux, days
+    ("", None),
+    ("garbage", None),
+])
+def test_ps_time_is_read_in_both_platform_formats(field, secs):
+    """One parser for both deliberately: a watchdog that silently measured
+    nothing on Linux would simply never see contention there."""
+    assert W._parse_ps_time(field) == secs
+
+
+def test_a_duty_cycle_needs_two_samples_far_enough_apart():
+    assert W.duty_cycle([]) is None
+    assert W.duty_cycle([(0.0, 0.0)]) is None
+    assert W.duty_cycle([(0.0, 0.0), (0.5, 0.5)], min_span=2.0) is None
+
+
+def test_a_duty_cycle_is_cpu_seconds_per_wall_second():
+    """Dimensionless by construction -- 1.0 is a whole core on any machine,
+    which is the whole reason this is measurable rather than calibrated."""
+    assert W.duty_cycle([(0.0, 0.0), (10.0, 10.0)]) == 1.0
+    assert W.duty_cycle([(0.0, 0.0), (10.0, 2.5)]) == 0.25
+    assert W.duty_cycle([(0.0, 5.0), (10.0, 45.0)]) == 4.0    # a parallel build
+
+
+def test_a_duty_cycle_is_measured_over_the_window_it_is_given():
+    """The window matters because the question differs by kill condition: a
+    build that ran flat out for a minute and then hung has a healthy whole-run
+    duty cycle and a dead recent one."""
+    ran_then_hung = [(0.0, 0.0), (30.0, 30.0), (40.0, 30.0)]
+    assert W.duty_cycle(ran_then_hung) == 0.75                # whole run: fine
+    assert W.duty_cycle(ran_then_hung[1:]) == 0.0             # recent: stopped
+
+
+@pytest.mark.parametrize("duty, verdict, factor", [
+    (None, "unknown", 1.0),
+    (0.0, "stalled", 1.0),
+    (0.01, "stalled", 1.0),
+    (0.5, "starved", 2.0),
+    (0.25, "starved", 4.0),
+    (0.1, "starved", 4.0),        # capped
+    (0.95, "running", 1.0),       # a healthy single-threaded build, jitter and all
+    (1.0, "running", 1.0),
+    (3.9, "running", 1.0),        # a healthy -j4 build
+])
+def test_the_three_regimes(duty, verdict, factor):
+    assert W.contention(duty, cap=4.0) == (verdict, factor)
+
+
+def test_a_stalled_tree_earns_no_extension():
+    """The case that makes this safe.
+
+    1/duty for a hung process is unbounded, so a naive factor would hand a
+    deadlock four times its deadline -- the opposite of the point.  No CPU is
+    not slowness, it is absence of work, and no amount of extra time fixes it.
+    """
+    _, factor = W.contention(0.0, cap=4.0)
+    assert factor == 1.0
+
+
+def test_a_build_running_flat_out_keeps_its_budget():
+    """The property the cost-regression signal rests on: a proof that got
+    genuinely more expensive burns CPU at full rate, so it is never mistaken
+    for a starved one and still trips its budget on time."""
+    assert W.contention(1.0, cap=4.0)[1] == 1.0
+
+
+def test_a_whole_core_is_not_measured_as_exactly_one():
+    """Nothing is scheduled for 100.0% of wall time, and the sampler lands
+    where a 1-second poll allows.  A strict boundary would label every healthy
+    single-threaded build `starved` -- harmless in budget terms, and a
+    systematically wrong label on most of the corpus."""
+    assert W.contention(0.96, cap=4.0) == ("running", 1.0)
+
+
+def test_the_cap_is_honoured():
+    """A budget that stretches without limit is not a budget."""
+    assert W.contention(0.1, cap=2.0)[1] == 2.0    # 1/duty would be 10
+    assert W.contention(0.5, cap=1.0)[1] == 1.0    # cap 1.0 disables entirely

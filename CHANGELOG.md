@@ -11,7 +11,52 @@ still regenerates.
 
 ## [Unreleased]
 
-**No record-schema change.**
+**Record-schema change, additive.** Two new keys: a top-level `contention`
+object and `limits.load_factor_max`. Older records read identically — every
+view treats an absent key as unmeasured, which is not the same as zero — and
+readers' output on both existing corpora is byte-for-byte unchanged.
+
+### Added
+
+- **Budgets adapt to a contended machine, measured rather than predicted.**
+  Battery and load look like one problem and are two. Throttling changes how
+  much work a CPU-second *buys*, which no accounting can see afterwards —
+  hence `BATTERY_FACTOR`, assumed in advance. Contention changes how many
+  CPU-seconds you *get* per wall-second, and a descheduled process accrues no
+  CPU time at all, so it needs no prediction and no benchmark.
+
+  The watchdog samples its process tree's CPU time (`ps`, every
+  `CPU_SAMPLE_INTERVAL`, a fraction of a percent of a build) and derives a
+  **duty cycle**: CPU-seconds per wall-second. Dimensionless, so 1.0 is a
+  whole core on any machine and no threshold here is fitted to the machine it
+  was written on. Three regimes — *stalled* (no CPU: killed on time, because
+  `1/duty` is unbounded and the naive rule would hand a deadlock four times
+  its deadline), *starved* (budgets × `1/duty`, capped by `LOAD_FACTOR_MAX`),
+  and *running* (a core or more: killed on time). That last one is what the
+  design turns on — a proof that got genuinely more expensive burns CPU at
+  full rate, so it is never mistaken for a starved one and the
+  cost-regression signal the tight wall budget carries survives intact.
+  `LOAD_FACTOR_MAX=1.0` disables the measurement, `ps` calls included.
+
+  Load average was tried first and rejected on measurement: its 60 s time
+  constant is longer than the whole 40 s budget it would govern — a workload
+  already 1.27× slower after 5 s still read as idle — and on a heterogeneous
+  CPU, scheduler migration between performance and efficiency cores swamps
+  what signal remains, with no correct denominator.
+- **`contention` in every record**: `cpu_time_s`, `duty_cycle`, `verdict`,
+  `load_factor_applied`. The observations, not just the derived factor — the
+  policy above them will change and these will not, and without them "that
+  timeout was a hard proof" and "that timeout was a busy laptop" are
+  indistinguishable in the corpus.
+- **A timeout summary says which.** `used no CPU — a hang, not a busy
+  machine`, or `machine contended — this build got 0.31 of a core`. The
+  stalled case earns its line: it is the one verdict where nothing was
+  scaled, so nothing else in the output would hint at it.
+- **Battery detection on Linux**, via `/sys/class/power_supply`. `pmset` is
+  macOS-only, so `BATTERY_FACTOR` had simply never applied anywhere else —
+  not broken, but silently inert on exactly the machines it was written for.
+  A desktop with no mains supply still answers "unknown", because "no
+  battery" and "on battery" must not be confused.
 
 ### Fixed
 

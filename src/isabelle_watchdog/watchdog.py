@@ -59,10 +59,11 @@ Environment:
                               an un-watchdogged build records no attempt at
                               all, not even the success that closes an
                               episode.
-    BATTERY_FACTOR            On a laptop running on battery (detected via
-                              `pmset -g ps`, macOS only) the machine runs
-                              ~this-many times slower, so both WATCHDOG_TIMEOUT
-                              and WALL_TIMEOUT are multiplied by this factor
+    BATTERY_FACTOR            On a laptop running on battery (macOS via
+                              `pmset -g ps`, Linux via /sys/class/power_supply;
+                              elsewhere the state is unknown and nothing is
+                              scaled) the machine runs ~this-many times slower,
+                              so all three budgets are multiplied by this factor
                               (default: 2.0).  This *normalises* the budgets to
                               AC-equivalent time rather than bypassing them — a
                               build that is slow in AC-equivalent terms still
@@ -70,6 +71,22 @@ Environment:
                               meaningful, while a battery-throttled-but-fine
                               build no longer spuriously trips the activity
                               timeout.  Set to 1.0 to disable scaling.
+                              ASSUMED, not measured: throttling changes what a
+                              CPU-second buys, and no accounting can see that
+                              after the fact.  Contrast LOAD_FACTOR_MAX.
+    LOAD_FACTOR_MAX           Ceiling on the *measured* contention factor
+                              (default: 4.0; 1.0 disables the measurement and
+                              its `ps` calls).  A build sharing the machine
+                              gets fewer CPU-seconds per wall-second, which —
+                              unlike throttling — is directly measurable: the
+                              watchdog samples its process tree's CPU time and
+                              scales all three budgets by 1/duty-cycle, capped
+                              here.  Dimensionless, so the same number means
+                              the same thing on any machine; nothing is
+                              calibrated against the machine it was written on.
+                              A tree using no CPU at all is not starved but
+                              *stuck*, and gets no extension.
+    CPU_SAMPLE_INTERVAL       Seconds between those samples (default: 5.0).
     LOOP_PROGRESS_THRESHOLD   Kill after N consecutive Isabelle
                               `command "X" running for ...s (line Y of theory Z)`
                               warnings on the same (theory, line, command) triple
@@ -116,6 +133,26 @@ from . import guard  # run_guarded — capture must never break the build
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+
+# Contention measurement (see the `contention` section below).  A duty cycle
+# under this is not slowness, it is absence of work: extending a budget for a
+# process getting no CPU would stretch a deadlock's deadline fourfold.
+STALL_DUTY = 0.05
+# At or above this, treat the tree as having a whole core -- not a strict 1.0.
+# Nothing is scheduled for 100.0% of wall time (page faults, I/O, and the
+# sampler's own jitter: samples land where the 1-second select() poll allows),
+# so a healthy single-threaded build measures ~0.96 and a strict boundary
+# would label every one of them `starved` and hand it a few percent of budget
+# it does not need.  Being wrong here is cheap; being wrong *systematically*
+# puts a misleading label on most of the corpus.
+RUNNING_DUTY = 0.9
+# Seconds between tree-CPU samples.  The duty cycle is measured over a window
+# of three of them rather than over one interval, because `ps` reports whole
+# seconds on Linux and a short window quantises the ratio into uselessness.
+# Derived rather than separately configurable: two knobs that must stay in
+# proportion are one knob and a mistake waiting to happen.
+CPU_SAMPLE_INTERVAL = 5.0
+CPU_WINDOW_SAMPLES = 3
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
@@ -198,6 +235,143 @@ def get_descendants(pid: int) -> list[int]:
     return result
 
 
+# ---------------------------------------------------------------------------
+# Contention: how much CPU is this build actually getting?
+# ---------------------------------------------------------------------------
+#
+# Battery and load look like the same problem and are not, which is why one
+# scalar cannot cover both:
+#
+#   - Battery/thermal changes how much work a CPU-second *buys*.  The process
+#     still gets its CPU-second per wall-second; it accomplishes less in it.
+#     No accounting can see that after the fact, so it needs a factor assumed
+#     in advance -- which is exactly what BATTERY_FACTOR is.
+#   - Load changes how many CPU-seconds you *get* per wall-second.  A
+#     descheduled process accrues no CPU time at all.  That is directly
+#     measurable, on this build, at the moment the question is asked.
+#
+# So load needs no prediction and no benchmark, and the measurement it needs
+# is dimensionless: the **duty cycle**, CPU-seconds per wall-second of the
+# process tree.  1.0 means a whole core's worth -- running flat out -- on any
+# machine, fast or slow, and a threshold expressed in it is not fitted to the
+# machine it was written on.  That matters more than the cost: a factor
+# calibrated here would be wrong everywhere else.
+#
+# Load average was the obvious alternative and does not work.  It is a 60 s
+# damped average, so its time constant is longer than the whole wall budget it
+# would govern -- measured on an 8-core Mac, a workload that was already 1.27x
+# slower after 5 s still read as idle -- and on a heterogeneous CPU (4
+# performance + 4 efficiency cores here) the scheduler migrating a thread
+# between core types swamps what signal remains.  It is free to read and not
+# worth reading.
+
+def _parse_ps_time(field: str) -> "float | None":
+    """Seconds from `ps -o time=`: `[[DD-]HH:]MM:SS[.ss]`.
+
+    Both formats in one parser deliberately -- macOS prints `0:01.22` and
+    Linux `00:00:01`, and a watchdog that silently measured nothing on one of
+    them would simply never see contention there.
+    """
+    field = field.strip()
+    if not field:
+        return None
+    days = 0.0
+    if "-" in field:
+        d, _, field = field.partition("-")
+        days = float(d)
+    try:
+        parts = [float(p) for p in field.split(":")]
+    except ValueError:
+        return None
+    secs = 0.0
+    for p in parts:
+        secs = secs * 60 + p
+    return days * 86400 + secs
+
+
+def tree_cpu_seconds(pid: int) -> "float | None":
+    """CPU seconds used by the process tree, or None if it cannot be read.
+
+    One `ps` over the whole tree -- 2-5 ms, sampled every few seconds, so a
+    fraction of a percent of a build.  `/proc` would be faster on Linux and is
+    deliberately not used: the saving is milliseconds, and the platform branch
+    would leave half of this untested on whichever machine the suite ran on.
+
+    None on any failure (no `ps`, Windows, a race with the tree exiting), and
+    the caller then applies no adjustment -- unmeasured contention behaves
+    exactly as it did before this existed.
+    """
+    pids = [pid] + get_descendants(pid)
+    try:
+        out = subprocess.check_output(
+            ["ps", "-o", "time=", "-p", ",".join(str(p) for p in pids)],
+            stderr=subprocess.DEVNULL, text=True, timeout=5,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return None
+    total = 0.0
+    seen = False
+    for line in out.splitlines():
+        secs = _parse_ps_time(line)
+        if secs is not None:
+            total += secs
+            seen = True
+    return total if seen else None
+
+
+def duty_cycle(samples: "list[tuple[float, float]]",
+               min_span: float = 2.0) -> "float | None":
+    """CPU-seconds per wall-second over the samples held, or None if too few.
+
+    Measured over a *window* rather than the whole run, because the question
+    differs by kill condition: the wall budget asks "did this build get its 40
+    seconds of CPU", but the activity budget asks "is it working *now*" -- and
+    a build that ran flat out for a minute and then hung has a healthy
+    whole-run duty cycle and a dead one.  The caller prunes the window.
+    """
+    if len(samples) < 2:
+        return None
+    (t0, c0), (t1, c1) = samples[0], samples[-1]
+    span = t1 - t0
+    if span < min_span:
+        return None
+    return max(0.0, (c1 - c0) / span)
+
+
+def contention(duty: "float | None", cap: float) -> "tuple[str, float]":
+    """`(verdict, factor)` from a measured duty cycle.  Pure.
+
+    Three regimes, and the middle one is the only one that earns more time:
+
+      - **stalled** -- essentially no CPU.  Either hung or starved to nothing,
+        and no extension helps either; extending here would turn a 40 s budget
+        into a 160 s one for a deadlock, which is the opposite of the point.
+        This *sharpens* the activity kill, which previously could not tell a
+        hang from a build that was working quietly.
+      - **starved** -- progressing, but on less than a core.  The build has
+        had `duty` of the machine, so the budget it has actually consumed is
+        `duty x` the wall clock; giving back `1/duty` restores what it would
+        have had uncontended.  Capped, because an uncapped factor is not a
+        budget.
+      - **running** -- a whole core or more.  Not starved, so nothing is owed.
+        This is the case that preserves the cost-regression signal: a proof
+        that got genuinely more expensive burns CPU at full rate and still
+        trips its budget on time.
+
+    A parallel build (`-j4`) that is starved to one core's worth reads as
+    `running` and gets no extension.  That under-compensates, deliberately:
+    the failure it avoids is a build with real parallelism being handed 4x its
+    budget, and erring toward killing keeps the budget meaningful.
+    """
+    if duty is None:
+        return "unknown", 1.0
+    if duty < STALL_DUTY:
+        return "stalled", 1.0
+    if duty >= RUNNING_DUTY:
+        return "running", 1.0
+    return "starved", min(cap, 1.0 / duty)
+
+
 def kill_tree(pid: int) -> None:
     """SIGTERM, wait, SIGKILL the process tree, then pkill poly."""
     all_pids = [pid] + get_descendants(pid)
@@ -227,13 +401,49 @@ def kill_tree(pid: int) -> None:
 # Power source (battery vs AC)
 # ---------------------------------------------------------------------------
 
+POWER_SUPPLY = Path("/sys/class/power_supply")
+
+
+def _on_battery_linux(root: Path | None = None) -> "bool | None":
+    """Linux power state from sysfs.  `root` is injectable, since the only
+    other way to test this is to own a laptop and unplug it.
+
+    An `*/online` of 0 on every mains supply means battery; any 1 means AC.
+    A desktop has no `BAT*` and often no `AC*` either, and answers None --
+    correctly, since "no battery" and "on battery" must not be confused, and
+    a machine that cannot be on battery needs no scaling anyway.
+    """
+    root = root or POWER_SUPPLY
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return None
+    mains = []
+    for e in entries:
+        try:
+            if (e / "type").read_text().strip() == "Mains":
+                mains.append((e / "online").read_text().strip())
+        except OSError:
+            continue
+    if not mains:
+        return None
+    return not any(v == "1" for v in mains)
+
+
 def on_battery() -> "bool | None":
     """True on battery, False on AC, None if undetermined.
 
-    macOS only (via `pmset -g ps`); returns None on other platforms or
-    on any error, so the caller treats power state as unknown and applies
-    no scaling.  `pmset -g ps` reports e.g.
-    `Now drawing from 'Battery Power'` / `'AC Power'`."""
+    None on any platform or error this cannot answer for, so the caller
+    treats power state as unknown and applies no scaling.  Unknown has always
+    been a supported answer here, which is why running elsewhere was never
+    broken -- only unscaled.
+
+    Two implementations, and neither is a dependency: macOS shells out to
+    `pmset -g ps` (`Now drawing from 'Battery Power'` / `'AC Power'`), Linux
+    reads sysfs, which is a file read and needs no subprocess at all.
+    """
+    if sys.platform.startswith("linux"):
+        return _on_battery_linux()
     if sys.platform != "darwin":
         return None
     try:
@@ -312,6 +522,15 @@ def main() -> int:
     # informative LOOP-on-line message than the bare wall timeout.
     loop_progress_threshold = int(os.environ.get("LOOP_PROGRESS_THRESHOLD", "3"))
     build_progress_threshold = float(os.environ.get("BUILD_PROGRESS_THRESHOLD", "15"))
+    # Ceiling on the *measured* contention factor.  A budget that stretches
+    # without limit is not a budget, and the tight wall timeout is doing
+    # deliberate work in this design.  1.0 disables the measurement entirely,
+    # including its `ps` calls -- the setting to reach for if this ever
+    # misbehaves on a machine nobody here has.
+    load_factor_max = float(os.environ.get("LOAD_FACTOR_MAX", "4.0"))
+    cpu_sample_interval = float(os.environ.get("CPU_SAMPLE_INTERVAL",
+                                               CPU_SAMPLE_INTERVAL))
+    cpu_window = cpu_sample_interval * CPU_WINDOW_SAMPLES
 
     # Battery throttling: a laptop on battery runs ~BATTERY_FACTOR times
     # slower, so scale the time budgets to keep them in AC-equivalent
@@ -356,6 +575,14 @@ def main() -> int:
         "loop_progress_threshold": loop_progress_threshold,
         "build_progress_threshold": build_progress_threshold,
         "battery_factor_applied": applied_factor,
+        # The *ceiling* on the contention factor, not the factor: this one is
+        # measured during the run and can vary, so it belongs with the
+        # observations rather than with the budgets in force.  What the
+        # budgets say here is still exactly what they said before contention
+        # existed -- divide by `battery_factor_applied` for the configured
+        # values, then multiply by `contention.load_factor_applied` for what
+        # was actually enforced at the kill.
+        "load_factor_max": load_factor_max,
     }
 
     # --- Log file setup ---
@@ -410,6 +637,21 @@ def main() -> int:
     loop_key: tuple[str, str, str] | None = None
     loop_count = 0
     loop_elapsed = ""
+
+    # Contention state.  `load_factor` multiplies all three budgets, exactly as
+    # BATTERY_FACTOR does -- but measured from this build rather than assumed
+    # about the machine, and re-measured as the machine changes under it.
+    # Samples are (monotonic, tree cpu seconds); the first is taken at spawn so
+    # the first duty cycle is available a window later.
+    cpu_samples: list[tuple[float, float]] = []
+    load_factor = 1.0
+    duty: float | None = None
+    contention_verdict = "unknown"
+    if load_factor_max > 1.0:
+        c0 = tree_cpu_seconds(proc.pid)
+        if c0 is not None:
+            cpu_samples.append((wall_start, c0))
+    next_cpu_sample = wall_start + cpu_sample_interval
 
     # Write log header
     with open(log_path, "w") as log_f:
@@ -492,22 +734,48 @@ def main() -> int:
             # unaffected by moving: `last_activity` was just reset above.
             now = time.monotonic()
 
+            # How much of a CPU is this build actually getting?  Sampled on a
+            # timer rather than at the moment a budget trips, because the
+            # answer has to be about the recent past: a build that ran flat
+            # out and then hung looks healthy measured over the whole run.
+            # One `ps` per interval, so a fraction of a percent.
+            if load_factor_max > 1.0 and now >= next_cpu_sample:
+                next_cpu_sample = now + cpu_sample_interval
+                cpu_now = tree_cpu_seconds(proc.pid)
+                if cpu_now is not None:
+                    cpu_samples.append((now, cpu_now))
+                    cpu_samples = [s for s in cpu_samples
+                                   if now - s[0] <= cpu_window] or cpu_samples[-1:]
+                    # 0.9 of the interval: samples land where the 1-second
+                    # select() poll allows, not on the tick, and rejecting a
+                    # 0.98-second span as too short would drop every other
+                    # measurement.
+                    duty = duty_cycle(cpu_samples, cpu_sample_interval * 0.9)
+                    contention_verdict, load_factor = contention(duty,
+                                                                 load_factor_max)
+
             # Wall-clock
-            if now - wall_start >= wall_timeout:
+            if now - wall_start >= wall_timeout * load_factor:
                 timeout_reason = "wall"
                 break
 
             # Loop-on-line: a single tactic emitted N+ consecutive
             # progress warnings on the same line — it's searching
             # in a loop, not making progress.
-            if loop_count >= loop_progress_threshold:
+            #
+            # Scaled too, for the reason the battery factor scales it: the
+            # warnings fire on Isabelle's *wall* clock, so a command starved
+            # to a quarter of a core crosses the 15 s threshold having used
+            # under 4 s of CPU, and three of those would loop-kill a command
+            # that was merely waiting its turn.
+            if loop_count >= loop_progress_threshold * load_factor:
                 timeout_reason = "loop_progress"
                 break
 
             # Activity
             idle = now - last_activity
             limit = activity_timeout if build_started else startup_timeout
-            if idle >= limit:
+            if idle >= limit * load_factor:
                 timeout_reason = "activity"
                 break
 
@@ -570,16 +838,27 @@ def main() -> int:
     # the pending note at *import* time, and a project that declined capture
     # should not be paying for -- or failing on -- any of that.
     if recording:
+        # The observations, not a verdict derived from them.  A record that
+        # kept only `load_factor_applied` could never answer "was that
+        # timeout a hard proof or a busy laptop" once the policy changed;
+        # duty cycle and CPU seconds stay meaningful whatever this file
+        # decides to do with them next.
+        contention_rec = {
+            "cpu_time_s": (round(cpu_samples[-1][1], 2) if cpu_samples else None),
+            "duty_cycle": (round(duty, 3) if duty is not None else None),
+            "verdict": contention_verdict,
+            "load_factor_applied": round(load_factor, 2),
+        }
         _record_attempt(args, outcome, exit_code, timeout_reason,
                         elapsed_s, error_head, power, applied_factor,
-                        error_loci, limits)
+                        error_loci, limits, contention_rec)
 
     if outcome == "timeout":
         _print_summary_timeout(timeout_reason, lines, wall_timeout,
                                activity_timeout,
                                last_progress_theory, last_progress_pct,
                                loop_key, loop_count, loop_elapsed,
-                               log_path, battery)
+                               log_path, battery, contention_verdict, duty)
     elif outcome == "ok":
         _print_summary_ok(lines, log_path)
     else:
@@ -680,7 +959,8 @@ def _record_attempt(args: list[str], outcome: str, exit_code: int,
                     error_head: str, power: str = "unknown",
                     battery_factor: float = 1.0,
                     error_loci: "list[list[str]] | None" = None,
-                    limits: "dict | None" = None) -> None:
+                    limits: "dict | None" = None,
+                    contention_rec: "dict | None" = None) -> None:
     """Hand the attempt to the recorder under the shared best-effort guard,
     which here additionally covers the `import` itself (a guard inside
     `record` cannot catch its own import failure), so a missing or broken
@@ -697,6 +977,7 @@ def _record_attempt(args: list[str], outcome: str, exit_code: int,
             error_head=error_head, power=power, battery_factor=battery_factor,
             log_name=os.environ.get("LOG_NAME", "last-build.log"),
             error_loci=error_loci or [], limits=limits,
+            contention=contention_rec,
         )
     guard.run_guarded("build-record", go)
 
@@ -871,6 +1152,8 @@ def _print_summary_timeout(
     loop_elapsed: str,
     log_path: Path,
     battery: "bool | None" = None,
+    contention_verdict: str = "unknown",
+    duty: "float | None" = None,
 ) -> None:
     # log: first so `head -N` captures it even if the diagnostic
     # line ends up wrapped.  Name the stuck command's line when we have
@@ -879,9 +1162,21 @@ def _print_summary_timeout(
     # obligations before the slow one tripped the budget), so annotate the
     # count.
     print(_log_line(log_path, lines, loop_key))
-    # On battery the budgets are already scaled (see main); still flag it
-    # on any timeout, since slowness — not a hang — is the likely cause.
-    batt = "  (on battery — likely slowness, not a hang)" if battery else ""
+    # The budgets were already scaled for both of these (see main); they are
+    # still worth saying on a timeout, because they change what the operator
+    # should do about it.  `stalled` is the one that earns its line: it turns
+    # "the build timed out" into "the build timed out without using the CPU",
+    # which is a diagnosis rather than a report -- and it is the case where
+    # nothing was scaled, so nothing else would hint at it.
+    notes = []
+    if battery:
+        notes.append("on battery — likely slowness, not a hang")
+    if contention_verdict == "starved" and duty:
+        notes.append(f"machine contended — this build got {duty:.2f} of a "
+                     f"core, and its budgets were scaled to match")
+    elif contention_verdict == "stalled":
+        notes.append("used no CPU — a hang, not a busy machine")
+    batt = f"  ({'; '.join(notes)})" if notes else ""
     if reason == "loop_progress" and loop_key is not None:
         theory, lineno, cmd = loop_key
         short_theory = theory.split(".")[-1]

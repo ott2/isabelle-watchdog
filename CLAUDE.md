@@ -108,12 +108,55 @@ and the activity kill fire at the same instant and the line is lost. At 15 s,
 with Isabelle's 2 s re-emit, warnings land at 15/17/19 s: three consecutive
 (`LOOP_PROGRESS_THRESHOLD`) just under the 20 s kill.
 
-**Battery normalisation.** Detects battery via `pmset -g ps` (macOS) and scales
-the activity budget, the wall budget *and* the loop-warn threshold by
-`BATTERY_FACTOR` (default 2.0). Scaling all three matters: scaling only the
-budgets leaves a battery-slow-but-fine command crossing the unscaled loop
-threshold and being spuriously loop-killed. This normalises to AC-equivalent
-time rather than bypassing the budget, so the cost-regression signal survives.
+**Two ways a machine can be slow, and they need different instruments.**
+Both scale the activity budget, the wall budget *and* the loop-warn threshold
+— scaling only the budgets leaves a slow-but-fine command crossing the
+unscaled loop threshold and being spuriously loop-killed. Both normalise to
+uncontended, AC-equivalent time rather than bypassing the budget, so the
+cost-regression signal survives. What differs is where the number comes from:
+
+| | what changes | can you measure it afterwards? |
+|---|---|---|
+| **battery/thermal** | how much work a CPU-second *buys* | **no** — the process still gets its CPU-second, it just accomplishes less. Hence an assumed `BATTERY_FACTOR` |
+| **contention** | how many CPU-seconds you *get* per wall-second | **yes** — a descheduled process accrues no CPU time at all |
+
+*Battery* is detected via `pmset -g ps` (macOS) or `/sys/class/power_supply`
+(Linux); anywhere else the state is unknown and nothing is scaled — which is
+why running elsewhere was never broken, only unscaled.
+
+*Contention* is measured, not predicted. The watchdog samples its process
+tree's CPU time (`ps`, every `CPU_SAMPLE_INTERVAL`) and computes a **duty
+cycle** — CPU-seconds per wall-second. That quantity is dimensionless: 1.0 is
+a whole core's worth on any machine, fast or slow, so a threshold expressed in
+it is not fitted to the machine it was written on. Three regimes:
+
+- **stalled** (`duty < STALL_DUTY`) — no CPU. Not slowness, the *absence* of
+  work, and no extension helps. Critically, `1/duty` is unbounded as duty → 0,
+  so the naive rule would hand a deadlock four times its deadline. It also
+  sharpens the activity kill: "no output" could be a build working quietly,
+  "no output and no CPU" could not, and the summary says so.
+- **starved** (`STALL_DUTY ≤ duty < RUNNING_DUTY`) — progressing on less than
+  a core. Budgets × `min(LOAD_FACTOR_MAX, 1/duty)`, restoring what the build
+  would have had uncontended.
+- **running** (`duty ≥ RUNNING_DUTY`) — a core or more. Nothing owed. **This
+  is the row the design turns on**: a proof that got genuinely more expensive
+  burns CPU at full rate, so it is never mistaken for a starved one and still
+  trips its budget on time. Scaling by an *estimated* load factor would have
+  made those two indistinguishable.
+
+`RUNNING_DUTY` is 0.9, not 1.0, because nothing is scheduled for 100.0% of
+wall time; a strict boundary labels every healthy single-threaded build
+`starved`. A parallel build starved to one core reads as `running` and gets
+nothing — deliberate under-compensation, since erring toward killing keeps the
+budget meaningful.
+
+**Load average was tried and rejected.** It is free to read (0.45 µs) and
+useless here: a 60 s damped average has a longer time constant than the whole
+40 s budget it would govern — measured, a workload already 1.27× slower after
+5 s still read as idle — and on a heterogeneous CPU (4 P + 4 E cores on the
+development machine) scheduler migration swamps what signal remains, with no
+correct denominator. `LOAD_FACTOR_MAX=1.0` disables the measurement entirely,
+`ps` calls included.
 
 **The read loop is `select()` + `os.read()`, and both halves are load-bearing.**
 Two defects lived here until the supervision tests went in, and each made a
@@ -161,6 +204,14 @@ One JSON line per attempt. Design commitments, all load-bearing:
 - **`limits` records the budgets in force.** Without them "the proof got
   slower" and "the clock got tighter" produce identical records. Values are
   *effective* (post-battery-scaling); divide by `battery_factor_applied`.
+- **`contention` records what the machine gave, not what the budget allowed.**
+  `cpu_time_s`, `duty_cycle`, `verdict`, `load_factor_applied`. The
+  *observations* are stored, not just the derived factor — the policy above
+  them will change and these will not, and without them "that timeout was a
+  hard proof" and "that timeout was a busy laptop" are indistinguishable,
+  which is the same failure `limits` exists to prevent one layer up.
+  `limits.load_factor_max` holds the *ceiling* rather than the factor, since
+  the factor is measured during the run and can vary.
 - **Notes carry the reasoning the diff cannot.** Keys `diagnosis:` / `change:`
   / `expect:` / `ref:`, parsed into `note_fields` while `note` keeps text
   verbatim. `expect:` is the field worth the trouble: a prediction recorded
@@ -271,7 +322,9 @@ confusing Isabelle error seconds later, a missing one is a clear message now.
 |---|---|---|
 | `WATCHDOG_TIMEOUT` | 20 | activity kill, seconds of stalled stdout |
 | `WALL_TIMEOUT` | 40 | absolute wall cap |
-| `BATTERY_FACTOR` | 2.0 | scales all three budgets on battery; 1.0 disables |
+| `BATTERY_FACTOR` | 2.0 | scales all three budgets on battery (*assumed*); 1.0 disables |
+| `LOAD_FACTOR_MAX` | 4.0 | cap on the *measured* contention factor; 1.0 disables the sampling |
+| `CPU_SAMPLE_INTERVAL` | 5.0 | seconds between process-tree CPU samples |
 | `LOOP_PROGRESS_THRESHOLD` | 3 | consecutive same-line warnings before loop kill |
 | `BUILD_PROGRESS_THRESHOLD` | 15 | injected as `-o build_progress_threshold=N` |
 | `LOG_NAME` | `last-build.log` | log basename; override per stage |

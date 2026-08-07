@@ -461,19 +461,20 @@ def record(*, argv: list[str], outcome: str, exit_code: int,
            log_name: str, power: str = "unknown",
            battery_factor: float = 1.0,
            error_loci: "list[list[str]] | None" = None,
-           limits: "dict | None" = None) -> None:
+           limits: "dict | None" = None,
+           contention: "dict | None" = None) -> None:
     """Capture one build attempt.  Never raises into the caller (the
     shared `run_guarded` swallows and warns on any failure)."""
     run_guarded("build-record", lambda: _record(
         argv, outcome, exit_code, timeout_reason,
         elapsed_s, error_head, log_name, power, battery_factor,
-        error_loci or [], limits))
+        error_loci or [], limits, contention))
 
 
 def _record(argv, outcome, exit_code, timeout_reason,
             elapsed_s, error_head, log_name,
             power="unknown", battery_factor=1.0, error_loci=None,
-            limits=None) -> None:
+            limits=None, contention=None) -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     instance = _instance_id()
     branch = _git(["rev-parse", "--abbrev-ref", "HEAD"]) or "DETACHED"
@@ -556,6 +557,16 @@ def _record(argv, outcome, exit_code, timeout_reason,
         # identically, and the second reads as a proof regression.  The
         # harness's own parameters are part of the experiment's conditions.
         "limits": limits,
+        # What the machine actually gave this build, as opposed to what the
+        # budgets allowed it: tree CPU seconds, the duty cycle they imply, and
+        # the factor that was in force when a kill fired.  The *observations*
+        # are stored, not just the derived factor, because the policy above
+        # them will change and these will not -- and because "that timeout was
+        # a hard proof" and "that timeout was a busy laptop" are otherwise
+        # indistinguishable in the corpus, which is the same failure `limits`
+        # exists to prevent one layer up.  None on a machine where it could
+        # not be read, which is not the same as zero.
+        "contention": contention,
         "git_head": head,                    # commit built against (episode baseline / mid-flight-commit marker)
         "head_dirty": tree != head_tree,     # False = rebuild of an unchanged tree
         "tree": tree,                        # source snapshot id (integrity / no-op anchor)
