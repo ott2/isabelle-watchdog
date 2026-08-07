@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""bin/build — the recorded way to run the Isabelle build.
+"""isabelle-build — the recorded way to run the Isabelle build.
 
-    bin/build                                          # no note; records null
-    bin/build -m 'change: swap blast for auto; expect: ok'
-    bin/build -m - < note.md                           # note on stdin
-    bin/build --note-file notes/next.md
-    bin/build --lint -m '...'                          # check the note, do not build
-    bin/build -- -o quick_and_dirty                    # extra isabelle arguments
+    isabelle-build                                 # no note; records null
+    isabelle-build -m 'change: swap blast for auto; expect: ok'
+    isabelle-build -m - < note.md                  # note on stdin
+    isabelle-build --note-file notes/next.md
+    isabelle-build --lint -m '...'                 # check the note, do not build
+    isabelle-build --where                         # where would this record to?
+    isabelle-build --no-record                     # supervise, but record nothing
+    isabelle-build -- -o quick_and_dirty           # extra isabelle arguments
 
 Why a single command that carries its own note, rather than "write a file,
 then build":
@@ -29,7 +31,12 @@ The file route is kept for genuinely long notes, where shell quoting stops
 being pleasant: write $WATCHDOG_LOG_DIR/next-note.md and build with no -m.
 Notes are optional in every form; the default is no note, recorded as null.
 
-This wraps bin/isabelle-watchdog.py, which is where trajectory capture
+Recording is on by default and `--no-record` (or BUILD_RECORD=0) turns it off
+for a project that wants only the supervision.  `--where` reports which corpus
+this would record into, and why -- the question a project has when adopting
+this, and one the tools can answer about themselves.
+
+This wraps isabelle_watchdog.watchdog, which is where trajectory capture
 actually happens, so any path through the watchdog is recorded whether or not
 it came through here.  Running `isabelle build` directly is the one way to
 lose an attempt: the sources are still captured by the next recorded build
@@ -44,6 +51,7 @@ import sys
 from pathlib import Path
 
 from . import corpus
+from . import guard
 
 
 
@@ -82,9 +90,91 @@ def read_note(args) -> str | None:
     return None
 
 
+# argparse prints `description` above the options, so only the synopsis
+# belongs there -- the title and the usage block, which are the first two
+# paragraphs of the module docstring.  Everything below them is design
+# rationale for someone reading the source, and putting forty lines of it in
+# `-h` buries the two things a new project actually needs to find.
+SYNOPSIS = "\n\n".join(__doc__.split("\n\n")[:2])
+
+# Printed under the options, where a new adopter looks.  The resolution ladder
+# is the one thing a project has to understand before its first build, and the
+# marker is the only part of it a project has to *do* -- so it is stated here
+# rather than only in a README nobody has opened yet.
+EPILOG = """\
+where records go:
+  $WATCHDOG_LOG_DIR if set.  Otherwise the tools look rather than assume:
+
+    1. a committed `.isabelle-watchdog` at the project root -- its first
+       non-blank, non-comment line names the log directory, relative to it
+    2. an existing corpus under a known layout (t/logs, results/isabelle-logs)
+    3. a new one at t/logs
+
+  Readers resolve the same way, so `trajectory` lands where this wrote.
+  `--where` reports the answer for this project, and which rule gave it.
+
+  A new project wants the marker: discovery finds only a corpus that already
+  exists, so it is silent about a fresh clone -- whose first build would
+  otherwise mint one somewhere the project did not choose.
+
+    $ cat .isabelle-watchdog
+    # the log directory, relative to this file
+    results/isabelle-logs
+
+environment:
+  BUILD_SESSION / BUILD_SESSION_DIR   session to build, and where its ROOT is
+  BUILD_NOTE / BUILD_NOTE_FILE        note text / pending-note path
+  BUILD_RECORD                        capture on/off (default: on; --no-record)
+  BUILD_SOURCE_PATHSPECS              what counts as source (*.thy *ROOT *ROOTS)
+  WATCHDOG_TIMEOUT / WALL_TIMEOUT     the kill budgets, in seconds
+  BATTERY_FACTOR                      scales the budgets on battery (1.0 = off)
+
+  `isabelle-watchdog --help` documents the supervision side in full.
+"""
+
+
+def report_where(project: Path) -> int:
+    """Answer "which corpus would this build record into, and why".
+
+    A tool that resolves a path by four rules should be able to say which one
+    fired.  The alternative is an operator reasoning about it from the source,
+    which is how a wrong answer stays believed.
+    """
+    marker = corpus.find_marker(project)
+    try:
+        recording = guard.capture_enabled()
+        log_dir = corpus.resolve_log_dir(project, recording=recording)
+    except (ValueError, corpus.CorpusError) as exc:
+        print(f"build: {exc}", file=sys.stderr)
+        return 2
+
+    if os.environ.get(corpus.ENV_LOG_DIR):
+        why = f"${corpus.ENV_LOG_DIR} is set"
+    elif marker is not None:
+        why = f"declared by {marker}"
+    elif log_dir == project / corpus.DEFAULT_LAYOUT \
+            and not (log_dir / corpus.BASENAME).exists():
+        why = ("no corpus found and nothing declared -- this is the default, "
+               f"and a build here would create it.\n         Commit a "
+               f"{corpus.MARKER_NAME} to choose somewhere else.")
+    else:
+        why = "an existing corpus was found here"
+
+    print(f"project: {project}")
+    print(f"log dir: {log_dir}")
+    print(f"    why: {why}")
+    # Named separately from the directory, because with capture off the
+    # directory is still used -- last-build.log goes there -- and printing a
+    # corpus path that nothing will write would be the same species of
+    # confident wrong answer this whole ladder exists to stop.
+    print(f"records: {log_dir / corpus.BASENAME}" if recording else
+          f"records: none -- capture is off (${guard.ENV_RECORD})")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description=__doc__,
+        description=SYNOPSIS, epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-m", "--note", metavar="TEXT",
                     help="reasoning for this attempt; '-' reads stdin. "
@@ -94,6 +184,15 @@ def main() -> int:
                     help="read the note from a file ('-' for stdin)")
     ap.add_argument("--lint", action="store_true",
                     help="report on the note's format and exit without building")
+    ap.add_argument("--where", action="store_true",
+                    help="report which corpus this would record into, and "
+                         "which rule decided, then exit without building")
+    ap.add_argument("--no-record", dest="record", action="store_false",
+                    default=None,
+                    help="supervise the build but capture no trajectory "
+                         "(default: capture; also $BUILD_RECORD=0)")
+    ap.add_argument("--record", dest="record", action="store_true",
+                    help=argparse.SUPPRESS)   # the explicit form of the default
     ap.add_argument("--session", default=DEFAULT_SESSION,
                     help="Isabelle session to build "
                          "(default: $BUILD_SESSION; required)")
@@ -104,13 +203,23 @@ def main() -> int:
                     help="extra arguments passed through to isabelle build")
     args = ap.parse_args()
 
+    # Before anything reads it -- including `record`, which resolves at import
+    # time below, and the child, which inherits this environment.  A flag is
+    # the same setting said on the command line, so it is written where the
+    # setting lives rather than threaded separately.
+    if args.record is not None:
+        os.environ[guard.ENV_RECORD] = "1" if args.record else "0"
+
+    project = project_dir()
+    if args.where:
+        return report_where(project)
+
     if not args.session and not args.lint:
         print("no session to build: pass --session, or set $BUILD_SESSION.\n"
               "(There is no default -- it would only ever be right for one "
               "project.)", file=sys.stderr)
         return 2
 
-    project = project_dir()
     # The entry point owns the log location rather than inheriting it.  It was
     # a Makefile's to export, which meant `bin/build` run directly quietly
     # recorded into the recorder's built-in default -- a second corpus, a
@@ -125,11 +234,12 @@ def main() -> int:
     # none.  Resolved once here and exported, so every layer below inherits
     # this answer rather than deriving its own.
     try:
-        log_dir = str(corpus.resolve_log_dir(project))
-    except corpus.CorpusError as exc:
+        log_dir = str(corpus.resolve_log_dir(project,
+                                             recording=guard.capture_enabled()))
+    except (ValueError, corpus.CorpusError) as exc:
         print(f"build: {exc}", file=sys.stderr)
         return 2
-    os.environ["WATCHDOG_LOG_DIR"] = log_dir
+    os.environ[corpus.ENV_LOG_DIR] = log_dir
 
     from .record import lint_note, NOTE_FILE
 

@@ -22,10 +22,45 @@ nothing: the watchdog and the recorder are now standalone.
 
 from __future__ import annotations
 
+import os
 import sys
 from typing import Callable, TypeVar
 
 _T = TypeVar("_T")
+
+# Whether to capture at all.  On by default: the supervision and the capture
+# ship together because the second is the reason the first was written, and a
+# project that adopts the watchdog and never notices the corpus has still
+# collected one worth having.  But supervision is useful on its own -- killing
+# a looping tactic and naming its line needs no dataset -- so a project that
+# only wants that must be able to say so, rather than accumulating records it
+# will never read into a directory it did not ask for.
+ENV_RECORD = "BUILD_RECORD"
+_OFF = {"0", "no", "false", "off"}
+_ON = {"1", "yes", "true", "on"}
+
+
+def capture_enabled() -> bool:
+    """Whether trajectory capture should run, from `$BUILD_RECORD`.
+
+    An unrecognised value is an error rather than a default.  The failure this
+    avoids is one-sided: read as *on*, a misspelt "off" quietly collects the
+    data someone declined, and the first they hear of it is a corpus.  It is
+    the same reasoning that makes an empty `.isabelle-watchdog` fatal -- a
+    setting that silently does nothing is worse than one that is absent,
+    because absence is at least visible in the file.
+    """
+    raw = os.environ.get(ENV_RECORD)
+    if raw is None:
+        return True
+    v = raw.strip().lower()
+    if v in _OFF:
+        return False
+    if v in _ON:
+        return True
+    raise ValueError(
+        f"${ENV_RECORD}={raw!r} is neither on nor off "
+        f"(on: {'/'.join(sorted(_ON))}; off: {'/'.join(sorted(_OFF))})")
 
 
 def run_guarded(label: str, thunk: Callable[[], _T]) -> "_T | None":

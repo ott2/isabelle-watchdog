@@ -279,6 +279,7 @@ confusing Isabelle error seconds later, a missing one is a clear message now.
 | `BUILD_SOURCE_PATHSPECS` | `*.thy *ROOT *ROOTS` | what counts as source |
 | `BUILD_SESSION` / `BUILD_SESSION_DIR` | — / `.` | session to build, and where its ROOT is |
 | `BUILD_NOTE` / `BUILD_NOTE_FILE` | — | note text / pending-note path |
+| `BUILD_RECORD` | on | trajectory capture on/off (`--no-record`); `1/yes/true/on`, `0/no/false/off` |
 | `TRAJECTORY_CORPUS` | — | read a specific corpus, ignoring the above |
 | `TRAJECTORY_ATTRIBUTION` | — | attribution facts a corpus cannot show (`--attribution`) |
 
@@ -353,6 +354,36 @@ Three consequences worth keeping:
 The watchdog also *publishes* its answer into `$WATCHDOG_LOG_DIR` before
 importing the recorder, so the two writers in one run share a resolution
 rather than deriving two that agree by construction.
+
+### Capture is optional; supervision is the part that always runs
+
+`guard.capture_enabled()` reads `$BUILD_RECORD`, and `--no-record` on both
+`isabelle-build` and `isabelle-watchdog` sets it for one call. On by default,
+because the capture is the reason the supervision was written — but the
+supervision is genuinely useful alone (killing a looping tactic and naming its
+line needs no dataset), and a project that only wants that should not
+accumulate records it will never read in a directory it did not choose.
+
+Three details that are load-bearing:
+
+- **The check is in the watchdog, not inside `record()`.** `record` resolves
+  the project, the log directory and the pending note at *import* time, so a
+  project that declined capture should not be paying for — or failing on —
+  any of that. Skipped entirely, not entered and short-circuited.
+- **An unrecognised value is an error.** The failure is one-sided: read as
+  *on*, a misspelt "off" quietly collects the data someone declined, and the
+  first they hear of it is a corpus. Same reasoning as the empty marker.
+- **`recording=False` softens the ambiguity refusal** in `resolve_log_dir()`.
+  With nothing being written there is no dataset to protect, and refusing to
+  start a build over it would be the tail wagging the dog. The directory is
+  still resolved — `last-build.log` goes there.
+
+`isabelle-build --where` reports the resolved corpus, the rule that chose it,
+and whether capture is on. It exists because a tool that resolves a path by
+four rules should be able to say which one fired; the alternative is an
+operator deducing it from the source, which is how a wrong answer stays
+believed. It is also the answer to "what will adopting this do to my repo",
+asked before the first build rather than after.
 
 ## Commands
 

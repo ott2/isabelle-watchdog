@@ -40,6 +40,27 @@ still regenerates.
 
 ### Added
 
+- **Trajectory capture can be turned off**: `--no-record` on both
+  `isabelle-build` and `isabelle-watchdog`, or `BUILD_RECORD=0` for a project
+  that never wants it. On by default, because the capture is the reason the
+  supervision was written — but the supervision is useful alone (killing a
+  looping tactic and naming its line needs no dataset), and a project that
+  only wants that should not accumulate records it will never read. The check
+  lives in the watchdog rather than inside `record()`, so a declined capture
+  skips the module entirely rather than importing it to do nothing.
+  An unrecognised `$BUILD_RECORD` is an error: read as *on*, a misspelt "off"
+  quietly collects the data someone declined.
+- **`isabelle-build --where`** — reports the resolved corpus, which of the
+  four rules chose it, and whether capture is on, without building. A tool
+  that resolves a path by four rules should be able to say which one fired;
+  the alternative is deducing it from the source, which is how a wrong answer
+  stays believed.
+- **`isabelle-watchdog --help`.** There was none: `--help` was taken as the
+  command to supervise, so the one entry point named after the package ran
+  when asked for help. Its text now covers the resolution ladder, the marker
+  and the capture switch, and only *leading* flags are the wrapper's — `env`,
+  `nice` and `timeout` draw the line in the same place, and anywhere else
+  means silently eating an option meant for `isabelle build`.
 - **`.isabelle-watchdog`**, a committed project marker naming the log
   directory — first non-blank, non-comment line, relative to the marker. Same
   file shape and same search as `.isabelle-query`, deliberately: a project

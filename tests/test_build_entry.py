@@ -194,6 +194,93 @@ def test_an_undecidable_location_stops_before_the_build(build_module, repo,
     assert "several corpora" in capsys.readouterr().err
 
 
+def test_capture_can_be_turned_off_for_one_call(build_module, repo, launched):
+    """Capture is on by default and stays that way; a project that wants only
+    the supervision has to be able to say so, once or in a Makefile."""
+    build = build_module(BUILD_SESSION="S")
+    main_with(build, ["--no-record"], repo)
+    assert launched[0].env["BUILD_RECORD"] == "0"
+
+
+def test_no_flag_leaves_the_setting_alone(build_module, repo, launched):
+    """The default lives in one place -- `guard.capture_enabled()` -- so the
+    entry point must not restate it, or the two can drift apart."""
+    build = build_module(BUILD_SESSION="S")
+    main_with(build, [], repo)
+    assert "BUILD_RECORD" not in launched[0].env
+
+
+# --------------------------------------------------------------------- where
+
+def test_where_reports_the_corpus_and_the_rule_that_chose_it(build_module, repo,
+                                                             launched, capsys):
+    """The question a project has when adopting this, and one the tools can
+    answer about themselves -- the alternative is an operator deducing it from
+    the source, which is how a wrong answer stays believed."""
+    (repo.root / "results/isabelle-logs").mkdir(parents=True)
+    (repo.root / "results/isabelle-logs/builds.jsonl").write_text("")
+    build = build_module(BUILD_SESSION="S")
+    assert main_with(build, ["--where"], repo) == 0
+    out = capsys.readouterr().out
+    assert "results/isabelle-logs/builds.jsonl" in out
+    assert "existing corpus" in out
+    assert not launched                              # reports, does not build
+
+
+def test_where_names_the_marker_that_decided(build_module, repo, launched, capsys):
+    (repo.root / ".isabelle-watchdog").write_text("records\n")
+    build = build_module(BUILD_SESSION="S")
+    main_with(build, ["--where"], repo)
+    out = capsys.readouterr().out
+    assert "declared by" in out and ".isabelle-watchdog" in out
+
+
+def test_where_says_when_a_build_would_create_a_corpus(build_module, repo,
+                                                       launched, capsys):
+    """The state a new project is in, and the one moment the marker is worth
+    mentioning -- afterwards the corpus exists and discovery finds it."""
+    build = build_module(BUILD_SESSION="S")
+    main_with(build, ["--where"], repo)
+    out = capsys.readouterr().out
+    assert "would create it" in out
+    assert ".isabelle-watchdog" in out               # ...and what to do about it
+
+
+def test_where_does_not_promise_records_it_will_not_write(build_module, repo,
+                                                          launched, capsys):
+    build = build_module(BUILD_SESSION="S")
+    main_with(build, ["--where", "--no-record"], repo)
+    assert "capture is off" in capsys.readouterr().out
+
+
+def test_where_needs_no_session(build_module, repo, launched, capsys):
+    """It answers a question about the project, not about a build."""
+    build = build_module()
+    assert main_with(build, ["--where"], repo) == 0
+    assert not launched
+
+
+def test_the_marker_and_the_switch_are_both_in_the_help(build_module, repo):
+    """A new project has to learn exactly two things, and `-h` is where it
+    looks for them."""
+    build = build_module()
+    assert ".isabelle-watchdog" in build.EPILOG
+    assert "BUILD_RECORD" in build.EPILOG
+
+
+def test_help_shows_the_synopsis_not_the_rationale(build_module):
+    """`-h` gets the first two paragraphs of the docstring.
+
+    argparse prints `description` above the options, and the forty lines of
+    design rationale below the synopsis are for someone reading the source --
+    in `-h` they bury the two things a new project needs to find.
+    """
+    build = build_module()
+    assert "isabelle-build --where" in build.SYNOPSIS
+    assert "isabelle-build --no-record" in build.SYNOPSIS
+    assert "Why a single command" not in build.SYNOPSIS
+
+
 def test_the_build_runs_from_the_project_not_from_here(build_module, repo,
                                                         launched):
     build = build_module(BUILD_SESSION="S")

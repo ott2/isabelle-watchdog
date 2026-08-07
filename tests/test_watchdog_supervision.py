@@ -358,3 +358,80 @@ def test_creating_a_corpus_says_so(watchdog, repo):
     # and noise is not read.
     second = watchdog("sh", "-c", 'echo "Session Probe"', WATCHDOG_LOG_DIR=None)
     assert "creating a new corpus" not in second.out, second
+
+
+# ------------------------------------------------------ capture, and turning it off
+
+def test_capture_can_be_turned_off_without_losing_supervision(watchdog, logs):
+    """The supervision is useful on its own -- killing a looping tactic and
+    naming its line needs no dataset -- so a project that wants only that must
+    be able to say so, rather than accumulating records it will never read."""
+    run = watchdog("--no-record", "sh", "-c", STARTED + "exit 3")
+    assert run.code == 3, run                       # ...it still supervised
+    assert run.records == []                        # ...and recorded nothing
+    assert (logs / "last-build.log").exists(), run  # ...but still logged
+
+
+@pytest.mark.parametrize("off", ["0", "no", "false", "off"])
+def test_the_environment_turns_capture_off_too(watchdog, off):
+    """A flag suits one call; the variable suits a Makefile, which is how a
+    project that never wants capture would express it."""
+    run = watchdog("sh", "-c", 'echo "Session Probe"', BUILD_RECORD=off)
+    assert run.code == 0, run
+    assert run.records == []
+
+
+def test_the_flag_beats_the_environment(watchdog):
+    """Said on the command line, about this one call."""
+    run = watchdog("--record", "sh", "-c", 'echo "Session Probe"',
+                   BUILD_RECORD="0")
+    assert run.records, run
+
+
+def test_a_meaningless_setting_stops_before_the_build(watchdog, logs):
+    run = watchdog("sh", "-c", 'echo "Session Probe"', BUILD_RECORD="fasle")
+    assert run.code == 2, run
+    assert "neither on nor off" in run.out
+    assert not (logs / "last-build.log").exists()   # the build never started
+
+
+def test_capture_off_does_not_resolve_a_corpus_at_all(watchdog, repo):
+    """Two corpora make a *recording* writer refuse, because guessing would
+    split a dataset.  With nothing being written there is no dataset to
+    protect, and refusing to start a build over it would be the tail wagging
+    the dog."""
+    for layout in ("t/logs", "results/isabelle-logs"):
+        (repo.root / layout).mkdir(parents=True)
+        (repo.root / layout / "builds.jsonl").write_text("")
+    run = watchdog("--no-record", "sh", "-c", 'echo "Session Probe"',
+                   WATCHDOG_LOG_DIR=None)
+    assert run.code == 0, run
+
+
+# --------------------------------------------------------- the wrapper's own flags
+
+def test_asking_for_help_does_not_run_help(watchdog):
+    """`--help` was taken as the command to supervise: the one entry point
+    named after the package, and asking it for help ran it."""
+    run = watchdog("--help")
+    assert run.code == 0, run
+    assert "isabelle-watchdog" in run.out
+    # The two things a project adopting this has to know are the marker and
+    # the switch, so both have to be in the text it is pointed at.
+    assert ".isabelle-watchdog" in run.out and "--no-record" in run.out
+
+
+def test_only_leading_flags_belong_to_the_wrapper(watchdog, logs):
+    """`env`, `nice` and `timeout` all draw the line here, and so must this:
+    a flag after the command is the command's, or this wrapper silently eats
+    options meant for `isabelle build`."""
+    run = watchdog("sh", "-c", 'echo "got: $1"', "sh", "--no-record")
+    assert run.code == 0, run
+    assert "got: --no-record" in run.log_text()     # passed through, not eaten
+    assert run.records, run                         # ...so capture stayed on
+
+
+def test_a_double_dash_ends_the_wrappers_flags(watchdog):
+    run = watchdog("--", "sh", "-c", 'echo "Session Probe"')
+    assert run.code == 0, run
+    assert run.records, run

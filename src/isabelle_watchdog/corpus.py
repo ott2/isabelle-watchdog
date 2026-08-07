@@ -255,12 +255,16 @@ def resolve(given: str | os.PathLike | None = None) -> Path:
         f"several corpora found; name the one you mean:\n{listed}")
 
 
-def resolve_log_dir(start: Path | None = None) -> Path:
+def resolve_log_dir(start: Path | None = None, *, recording: bool = True) -> Path:
     """Where a *writer* should put its records.
 
     Unlike `resolve()`, finding nothing is not an error: a project with no
     corpus gets one created, which is how every corpus began.  What *is* an
-    error is being unable to tell which of two existing ones is meant.
+    error is being unable to tell which of two existing ones is meant --
+    unless `recording` is false, in which case there is no dataset to protect
+    and the question has shrunk to "where does `last-build.log` go".  Refusing
+    to start a build over an ambiguity that cannot affect anything would be
+    the tail wagging the dog.
 
     The reader's tiers, plus a fourth the reader has no use for:
 
@@ -289,7 +293,7 @@ def resolve_log_dir(start: Path | None = None) -> Path:
     found = _distinct_existing(discovered(start))
     if len(found) == 1:
         return found[0].parent
-    if found:
+    if found and recording:
         # Refusing is not the same failure as a capture that breaks a build,
         # and must not be softened into one.  This is a configuration error,
         # decided before anything runs, with the fix in the message -- the

@@ -79,6 +79,7 @@ build system a project already has.
 | `WATCHDOG_LOG_DIR` | resolved (below) | where records go |
 | `BUILD_SOURCE_PATHSPECS` | `*.thy *ROOT *ROOTS` | what counts as source |
 | `BUILD_SESSION` | — | session to build (`isabelle-build`) |
+| `BUILD_RECORD` | on | trajectory capture on/off (`--no-record`) |
 | `TRAJECTORY_CORPUS` | — | read a specific corpus |
 | `TRAJECTORY_ATTRIBUTION` | — | attribution facts a corpus cannot show |
 
@@ -110,6 +111,35 @@ results/isabelle-logs
 Worth committing one. Discovery can only find a corpus that already exists,
 which means it says nothing about a fresh clone — whose first build would
 otherwise mint a corpus in the default place rather than the project's.
+
+Ask before you build, rather than finding out after:
+
+```sh
+$ isabelle-build --where
+project: /home/me/proofs
+log dir: /home/me/proofs/t/logs
+    why: no corpus found and nothing declared -- this is the default, and a
+         build here would create it.
+         Commit a .isabelle-watchdog to choose somewhere else.
+records: /home/me/proofs/t/logs/builds.jsonl
+```
+
+### Supervision without the corpus
+
+Capture is on by default — it is the reason the supervision was written. But
+the supervision is useful alone, so a project that wants only a build killed
+when it loops can say so, rather than accumulating records it will never read:
+
+```sh
+isabelle-build --no-record -m '...'      # this call
+isabelle-watchdog --no-record isabelle build -d t MySession
+export BUILD_RECORD=0                    # this project
+```
+
+`--no-record` still logs, still kills, still names the looping line; it just
+writes no `builds.jsonl`. An unrecognised `$BUILD_RECORD` is an error rather
+than a guess, because the guess would be "on" — which quietly collects the
+data someone declined.
 
 ## Requirements
 

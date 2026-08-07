@@ -295,6 +295,18 @@ def test_the_writer_refuses_to_choose_between_two_corpora(repo, monkeypatch):
         corpus.resolve_log_dir()
 
 
+def test_nothing_is_being_written_so_nothing_is_ambiguous(repo, monkeypatch):
+    """With capture off there is no dataset to protect, and refusing to start
+    a build over an ambiguity that cannot affect anything would be the tail
+    wagging the dog.  The directory is still wanted -- `last-build.log` goes
+    there."""
+    monkeypatch.chdir(repo.root)
+    touch(repo.root / "t/logs/builds.jsonl")
+    touch(repo.root / "results/isabelle-logs/builds.jsonl")
+    assert corpus.resolve_log_dir(recording=False).resolve() \
+        == (repo.root / corpus.DEFAULT_LAYOUT).resolve()
+
+
 def test_the_reader_override_does_not_redirect_writes(repo, tmp_path, monkeypatch):
     """`$TRAJECTORY_CORPUS` is for reading someone else's dataset.  Honouring
     it here would mean looking at a pooled corpus silently redirects your next

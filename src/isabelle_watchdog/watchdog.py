@@ -1,13 +1,51 @@
 #!/usr/bin/env python3
 """
-isabelle-watchdog.py — Build wrapper for Isabelle with terse output.
+isabelle-watchdog — Build wrapper for Isabelle with terse output.
 
-Runs an Isabelle build, saves full output to logs/$LOG_NAME
-(default last-build.log), and prints a one-line summary to the terminal.
+Runs an Isabelle build under three kill conditions (a stalled stdout, a wall
+budget, and a tactic looping on one line -- which it names), saves the full
+output to $WATCHDOG_LOG_DIR/$LOG_NAME, prints a one-line summary, and records
+the attempt to a build-trajectory corpus.
 
-Usage: isabelle-watchdog.py command [args...]
+Usage: isabelle-watchdog [--no-record] command [args...]
+
+    isabelle-watchdog isabelle build -d t MySession
+    isabelle-watchdog --no-record isabelle build -d t MySession
+    isabelle-watchdog -- --oddly-named-command    # -- ends the wrapper's flags
+
+Only *leading* flags are the wrapper's; everything from the first non-flag
+word on belongs to the command, so an option meant for `isabelle build` is
+never eaten here.
+
+Options:
+    --no-record / --record    Turn trajectory capture off / on for this run,
+                              overriding $BUILD_RECORD.  Capture is on by
+                              default, and is the reason the watchdog exists;
+                              but the supervision is useful alone, so a
+                              project that wants only that can say so instead
+                              of accumulating records it will never read.
+    -h / --help               This text.
+
+WHERE RECORDS GO.  $WATCHDOG_LOG_DIR if set.  Otherwise the tools look rather
+than assume, in this order: a committed `.isabelle-watchdog` at the project
+root, whose first non-blank, non-comment line names the log directory relative
+to itself; then an existing corpus under a known layout (t/logs,
+results/isabelle-logs); and only then a new one at t/logs.  Readers resolve
+the same way, so `trajectory` lands where this wrote without being told twice.
+A new project adopting this package wants the marker: discovery can only find
+a corpus that already exists, so it says nothing about a fresh clone.
+
+    $ cat .isabelle-watchdog
+    # the log directory, relative to this file
+    results/isabelle-logs
 
 Environment:
+    WATCHDOG_LOG_DIR          Where the log and the corpus go.  Unset, it is
+                              resolved as above -- and honoured by the readers
+                              too, so writer and reader cannot disagree.
+    BUILD_RECORD              Trajectory capture on/off (default: on).
+                              Accepts 1/yes/true/on and 0/no/false/off;
+                              anything else is an error rather than a guess.
     WATCHDOG_TIMEOUT          Kill after N seconds of stalled stdout (default: 20).
     WALL_TIMEOUT              Absolute wall-clock limit (default: 40).  The
                               tight ceiling is the point, not an oversight: a
@@ -216,12 +254,53 @@ def on_battery() -> "bool | None":
 # Main
 # ---------------------------------------------------------------------------
 
+def _parse_leading_flags(argv: list[str]) -> tuple[list[str], bool | None, bool]:
+    """Split the watchdog's own flags off the front of the command.
+
+    Only *leading* flags are ours, the way `env`, `nice` and `timeout` do it:
+    everything from the first non-flag word onwards belongs to the child, and
+    `--` ends the split explicitly for a command whose own name starts with a
+    dash.  Anything else would mean this wrapper silently eating an option
+    meant for `isabelle build`.
+
+    Returns `(command, record_override, help_wanted)`.
+    """
+    record: bool | None = None
+    while argv:
+        if argv[0] in ("-h", "--help"):
+            return [], record, True
+        if argv[0] == "--no-record":
+            record = False
+        elif argv[0] == "--record":
+            record = True
+        elif argv[0] == "--":
+            return argv[1:], record, False
+        else:
+            break
+        argv = argv[1:]
+    return argv, record, False
+
+
 def main() -> int:
     # --- Parse args ---
-    args = sys.argv[1:]
+    args, record_override, help_wanted = _parse_leading_flags(sys.argv[1:])
+    if help_wanted:
+        # To stdout, exit 0.  `--help` used to be taken as the command to
+        # supervise -- the one entry point named after the package, and asking
+        # it for help ran it.
+        print(__doc__.strip())
+        return 0
     if not args:
         print(__doc__.strip(), file=sys.stderr)
         return 1
+
+    if record_override is not None:
+        os.environ[guard.ENV_RECORD] = "1" if record_override else "0"
+    try:
+        recording = guard.capture_enabled()
+    except ValueError as exc:
+        print(f"watchdog: {exc}", file=sys.stderr)
+        return 2
 
     activity_timeout = int(os.environ.get("WATCHDOG_TIMEOUT", "20"))
     wall_timeout = int(os.environ.get("WALL_TIMEOUT", "40"))
@@ -287,7 +366,7 @@ def main() -> int:
     # one was missed, because it only misplaces a log file: nothing errors,
     # and no record ever looks wrong, so there is nothing to notice.
     try:
-        log_dir = corpus.resolve_log_dir()
+        log_dir = corpus.resolve_log_dir(recording=recording)
     except corpus.CorpusError as exc:
         # Before the build, not during it: this is configuration, not capture,
         # so it fails fast and completely rather than being swallowed by the
@@ -482,12 +561,18 @@ def main() -> int:
         error_loci = ([[thy, ln] for thy, ln in _error_loci(err_lines)]
                       if exit_code else [])
 
-    # Trajectory capture (bin/build_record.py): snapshot the working tree
-    # to refs/attempts + a builds.jsonl record.  Guarded so it never
-    # affects the build's exit code.
-    _record_attempt(args, outcome, exit_code, timeout_reason,
-                    elapsed_s, error_head, power, applied_factor,
-                    error_loci, limits)
+    # Trajectory capture (record.py): a builds.jsonl record carrying this
+    # attempt's incremental source diff.  Guarded so it never affects the
+    # build's exit code.
+    #
+    # Skipped entirely when capture is off, rather than entered and
+    # short-circuited: `record` resolves the project, the log directory and
+    # the pending note at *import* time, and a project that declined capture
+    # should not be paying for -- or failing on -- any of that.
+    if recording:
+        _record_attempt(args, outcome, exit_code, timeout_reason,
+                        elapsed_s, error_head, power, applied_factor,
+                        error_loci, limits)
 
     if outcome == "timeout":
         _print_summary_timeout(timeout_reason, lines, wall_timeout,
