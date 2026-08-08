@@ -16,11 +16,13 @@ import importlib
 import os
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from conftest import PACKAGE_ENV
+from isabelle_watchdog import build as build_mod
 
 REAL_RUN = subprocess.run
 
@@ -81,17 +83,176 @@ def main_with(build, argv, repo):
         os.chdir(cwd)
 
 
+# --------------------------------------------------------- reading a ROOT file
+
+@pytest.mark.parametrize("line, want", [
+    ("session Probe = HOL +", "Probe"),
+    ("session SPSlowdown = HOL +", "SPSlowdown"),
+    ('session "Probe (AFP)" = HOL +', "Probe (AFP)"),
+    ("session Probe in sub = HOL +", "Probe"),
+    ("  session Indented = HOL +", "Indented"),
+    ("session With_Under.Dots-2 = HOL +", "With_Under.Dots-2"),
+    ("chapter Foo", None),
+    ("  theories", None),
+    ("# not a session", None),
+])
+def test_a_session_declaration_is_read_the_way_isabelle_writes_it(tmp_path, line,
+                                                                  want):
+    """Isabelle's own declaration is the only authority on what a session is
+    called -- the same shape `attempts.py` reads out of captured ROOT diffs,
+    because a disagreement would attribute a build to a session it never
+    claimed to build."""
+    root = tmp_path / "ROOT"
+    root.write_text(line + "\n")
+    assert build_mod.sessions_in(root) == ([want] if want else [])
+
+
+def test_several_sessions_in_one_root_are_all_seen(tmp_path):
+    root = tmp_path / "ROOT"
+    root.write_text("session A = HOL +\n  theories\n    X\n\nsession B = A +\n")
+    assert build_mod.sessions_in(root) == ["A", "B"]
+
+
+def test_a_root_that_cannot_be_read_yields_nothing(tmp_path):
+    assert build_mod.sessions_in(tmp_path / "absent") == []
+
+
+def test_roots_come_from_git_not_a_filesystem_walk(repo):
+    """`.git`, ignored build trees, virtualenvs and vendored AFP checkouts are
+    exactly where a stray ROOT lives.  A walk would need a pruning list, and a
+    pruning list is a guess that goes stale."""
+    (repo.root / "venv/share").mkdir(parents=True)
+    (repo.root / "venv/share/ROOT").write_text("session Vendored = HOL +\n")
+    (repo.root / ".gitignore").write_text("logs/\nvenv/\n")
+    assert build_mod.root_files(repo.root) == [Path("thy/ROOT")]
+
+
+def test_an_uncommitted_root_still_counts(repo):
+    """The state a new project is in the first time it runs this."""
+    (repo.root / "extra").mkdir()
+    (repo.root / "extra/ROOT").write_text("session Fresh = HOL +\n")
+    assert Path("extra/ROOT") in build_mod.root_files(repo.root)
+
+
+def test_a_file_merely_ending_in_root_is_not_a_root(repo):
+    """`*` crosses directory separators in a git pathspec, so the pathspec
+    alone also matches `MY_ROOT`; the basename is the actual test."""
+    (repo.root / "MY_ROOT").write_text("session Nope = HOL +\n")
+    (repo.root / "thy/ROOTS").write_text("more\n")
+    assert build_mod.root_files(repo.root) == [Path("thy/ROOT")]
+
+
+# ------------------------------------------------------- deriving the session
+
+def test_one_root_declaring_one_session_needs_no_configuration(repo):
+    """43sp exactly: `isabelle/ROOT` declares `SPSlowdown` and nothing else,
+    so `$BUILD_SESSION` was carrying information the repository already
+    stated.  This is the rung that makes a per-project wrapper deletable."""
+    assert build_mod.resolve_session(repo.root, None, None) == ("Probe", "thy")
+
+
+def test_several_sessions_refuse_rather_than_guess(repo):
+    """ndtht has ten ROOTs declaring thirteen sessions.  Building the wrong
+    one is a confusing Isabelle failure minutes later -- and recording it puts
+    a build of the wrong thing into the corpus, which is worse."""
+    (repo.root / "other").mkdir()
+    (repo.root / "other/ROOT").write_text("session Second = HOL +\n")
+    with pytest.raises(ValueError, match="several sessions") as e:
+        build_mod.resolve_session(repo.root, None, None)
+    # Actionable: name them, and say the three ways to choose.
+    assert "Probe" in str(e.value) and "Second" in str(e.value)
+    assert ".isabelle-watchdog" in str(e.value) and "BUILD_SESSION" in str(e.value)
+
+
+def test_two_sessions_in_one_root_is_equally_ambiguous(repo):
+    """The ambiguity is in the *sessions*, not the ROOT count."""
+    repo.write("thy/ROOT", "session A = HOL +\n\nsession B = HOL +\n")
+    with pytest.raises(ValueError, match="several sessions"):
+        build_mod.resolve_session(repo.root, None, None)
+
+
+def test_no_root_at_all_says_so(repo):
+    """A different failure from ambiguity, and it deserves a different
+    message: nothing to choose between, rather than too much."""
+    (repo.root / "thy/ROOT").unlink()
+    with pytest.raises(ValueError, match="no ROOT under this project"):
+        build_mod.resolve_session(repo.root, None, None)
+
+
+def test_the_directory_is_wherever_the_root_was_found(repo):
+    """Strictly better than the `.` this used to default to, and it means a
+    project only ever has to state the session."""
+    assert build_mod.resolve_session(repo.root, "Probe", None) == ("Probe", "thy")
+
+
+def test_a_named_session_no_root_declares_falls_back_to_the_old_default(repo):
+    """Reproduces exactly what this command did before any of this existed, so
+    a project whose ROOT lives somewhere git cannot see is no worse off."""
+    assert build_mod.resolve_session(repo.root, "Elsewhere", None) \
+        == ("Elsewhere", ".")
+
+
+def test_a_session_declared_by_two_roots_refuses(repo):
+    (repo.root / "copy").mkdir()
+    (repo.root / "copy/ROOT").write_text("session Probe = HOL +\n")
+    with pytest.raises(ValueError, match="more than one ROOT"):
+        build_mod.resolve_session(repo.root, "Probe", None)
+
+
+# ------------------------------------------------ the ladder, rung by rung
+
+def test_the_marker_beats_derivation(repo):
+    """A project that cannot be derived states it once, in a committed file,
+    instead of every caller exporting a variable."""
+    (repo.root / "other").mkdir()
+    (repo.root / "other/ROOT").write_text("session Second = HOL +\n")
+    (repo.root / ".isabelle-watchdog").write_text("t/logs\nsession: Second\n")
+    assert build_mod.resolve_session(repo.root, None, None) == ("Second", "other")
+
+
+def test_the_marker_can_state_the_directory_too(repo):
+    """For a layout where the ROOT is not where `-d` should point."""
+    (repo.root / ".isabelle-watchdog").write_text("session: Odd\ndir: elsewhere\n")
+    assert build_mod.resolve_session(repo.root, None, None) == ("Odd", "elsewhere")
+
+
+def test_the_environment_beats_the_marker(repo):
+    (repo.root / ".isabelle-watchdog").write_text("session: FromMarker\n")
+    assert build_mod.resolve_session(repo.root, "FromEnv", None)[0] == "FromEnv"
+
+
+def test_an_explicit_directory_beats_the_root_it_was_found_in(repo):
+    assert build_mod.resolve_session(repo.root, "Probe", "custom") \
+        == ("Probe", "custom")
+
+
 # ------------------------------------------------------------------- session
 
-def test_no_session_anywhere_is_a_clear_message_now(build_module, repo, capsys):
-    """There is no defensible default -- it was "SPSlowdown" because the
-    script was written inside 43sp.  A wrong session is a confusing Isabelle
-    error several seconds later; a missing one should be a clear message
-    immediately."""
+def test_no_configuration_at_all_now_builds_the_obvious_session(build_module,
+                                                                repo, launched):
+    """There is still no defensible *constant* default -- it was "SPSlowdown"
+    because the script was written inside 43sp -- but there is a defensible
+    derivation, and a project with one ROOT declaring one session has already
+    said which.  That is what makes a per-project wrapper deletable."""
+    build = build_module()
+    assert main_with(build, [], repo) == 0
+    assert launched[0].cmd[-1] == "Probe"
+    assert launched[0].cmd[-4:-2] == ["-d", "thy"]     # and where it lives
+
+
+def test_an_ambiguous_project_is_a_clear_message_now(build_module, repo,
+                                                     launched, capsys):
+    """A wrong session is a confusing Isabelle error several seconds later,
+    and an attempt recorded against a build of the wrong thing.  Both beat
+    being told immediately, and neither is what should happen."""
+    (repo.root / "other").mkdir()
+    (repo.root / "other/ROOT").write_text("session Second = HOL +\n")
     build = build_module()
     assert main_with(build, [], repo) == 2
+    assert not launched
     err = capsys.readouterr().err
     assert "--session" in err and "BUILD_SESSION" in err
+    assert "Probe" in err and "Second" in err          # ...and what to choose from
 
 
 def test_the_session_comes_from_the_environment_by_default(build_module, repo,

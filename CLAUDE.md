@@ -316,8 +316,9 @@ outcome, timing and error loci are gone.
 
 ## Environment contract
 
-The public API. `--session` has no default on purpose: a wrong session is a
-confusing Isabelle error seconds later, a missing one is a clear message now.
+The public API. `--session` has no constant default on purpose — it was
+`"SPSlowdown"` because `build.py` was written inside 43sp — but it does have a
+derivation; see *Deriving what to build* below.
 
 | var | default | layer |
 |---|---|---|
@@ -331,7 +332,7 @@ confusing Isabelle error seconds later, a missing one is a clear message now.
 | `LOG_NAME` | `last-build.log` | log basename; override per stage |
 | `WATCHDOG_LOG_DIR` | resolved, see below | where records go; read by watchdog, recorder *and* readers |
 | `BUILD_SOURCE_PATHSPECS` | `*.thy *ROOT *ROOTS` | what counts as source |
-| `BUILD_SESSION` / `BUILD_SESSION_DIR` | — / `.` | session to build, and where its ROOT is |
+| `BUILD_SESSION` / `BUILD_SESSION_DIR` | derived | session to build, and where its ROOT is |
 | `BUILD_NOTE` / `BUILD_NOTE_FILE` | — | note text / pending-note path |
 | `BUILD_RECORD` | on | trajectory capture on/off (`--no-record`); `1/yes/true/on`, `0/no/false/off` |
 | `TRAJECTORY_CORPUS` | — | read a specific corpus, ignoring the above |
@@ -408,6 +409,51 @@ Three consequences worth keeping:
 The watchdog also *publishes* its answer into `$WATCHDOG_LOG_DIR` before
 importing the recorder, so the two writers in one run share a resolution
 rather than deriving two that agree by construction.
+
+### Deriving what to build
+
+`build.resolve_session()`, the same four-rung ladder for the other question a
+build needs answered — `--session`/`--dir`, then `$BUILD_SESSION`/
+`$BUILD_SESSION_DIR`, then the marker's `session:`/`dir:`, then **derived**.
+
+Derivation: the ROOT files git can see under the project (`git ls-files
+--cached --others --exclude-standard -- '*ROOT'`, filtered by basename).
+Exactly one ROOT declaring exactly one session is unambiguous — that session,
+and the ROOT's own directory as `-d`. Anything else is an **error naming what
+it found**, not a guess: building the wrong session is a confusing Isabelle
+failure minutes later, and recording it puts a build of the wrong thing into
+the corpus, which is worse.
+
+The two projects are exactly the two cases. **43sp** has one ROOT declaring
+`SPSlowdown`, so `$BUILD_SESSION` was carrying information the repository
+already stated — which is what made its `bin/build` shim deletable. **ndtht**
+has ten ROOTs declaring thirteen sessions and builds several of them, so it
+cannot be derived and keeps `$BUILD_SESSION` per invocation; the error lists
+all thirteen with their ROOTs.
+
+Two details worth keeping:
+
+- **Git, not a filesystem walk.** `.git`, ignored build trees, virtualenvs and
+  vendored AFP checkouts are exactly where a stray ROOT lives. A walk needs a
+  pruning list, and a pruning list is a guess that goes stale. `--others`
+  includes untracked-but-not-ignored, so a project whose ROOT is not committed
+  yet still resolves.
+- **The directory is derived separately.** Given a session name from any rung,
+  `-d` is wherever the ROOT declaring it lives — strictly better than the `.`
+  this used to default to, and it means a project only ever states the
+  *session*. If no visible ROOT declares the named session it falls back to
+  `.`, reproducing the old behaviour rather than failing a project whose ROOT
+  git cannot see.
+
+`root_files()` returns **project-relative** paths, because that is what `-d`
+wants and what an error should show; reading one means `sessions_in(project /
+r)`. Resolving it against the cwd works only when the operator happens to be
+standing at the top level — the same class of bug as every row in the table
+above, and the tests caught it.
+
+`isabelle-build --where` reports the resolved session and directory alongside
+the corpus, since with both derived, "which session does this project build"
+is no longer answerable by reading a Makefile.
 
 ### Capture is optional; supervision is the part that always runs
 

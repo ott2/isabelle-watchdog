@@ -79,7 +79,7 @@ build system a project already has.
 | `BUILD_PROGRESS_THRESHOLD` | `15` | passed to Isabelle as `-o build_progress_threshold` |
 | `WATCHDOG_LOG_DIR` | resolved (below) | where records go |
 | `BUILD_SOURCE_PATHSPECS` | `*.thy *ROOT *ROOTS` | what counts as source |
-| `BUILD_SESSION` | — | session to build (`isabelle-build`) |
+| `BUILD_SESSION` | derived | session to build (`isabelle-build`) |
 | `BUILD_RECORD` | on | trajectory capture on/off (`--no-record`) |
 | `TRAJECTORY_CORPUS` | — | read a specific corpus |
 | `TRAJECTORY_ATTRIBUTION` | — | attribution facts a corpus cannot show |
@@ -133,9 +133,20 @@ the writer wrote without being told twice.
 
 ```
 # .isabelle-watchdog, at the project root, committed
-# first non-blank, non-comment line: the log directory, relative to here
+# the bare line is the log directory, relative to here
 results/isabelle-logs
+
+# optional — only needed where the session cannot be derived
+session: SPSlowdown
+dir: isabelle
 ```
+
+**The session is derived too.** One ROOT under the project declaring one
+session is unambiguous, so a single-session project needs no configuration at
+all: `isabelle-build -m '...'` and nothing else. Several ROOTs or several
+sessions is an error listing them rather than a guess — building the wrong
+session records an attempt against the wrong thing — and that is when the
+`session:` key earns its place.
 
 Worth committing one. Discovery can only find a corpus that already exists,
 which means it says nothing about a fresh clone — whose first build would

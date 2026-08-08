@@ -234,14 +234,54 @@ def test_the_search_stops_at_the_project_root(tmp_path, monkeypatch):
     assert corpus.resolve().resolve() == p.resolve()
 
 
-def test_a_marker_naming_nothing_is_an_error(repo, monkeypatch):
+def test_a_marker_declaring_nothing_is_an_error(repo, monkeypatch):
     """Not a no-op.  Silently ignoring an empty declaration reproduces the bug
     the marker exists to prevent -- a project that believes it has said where
     its records go, and a writer that puts them somewhere else."""
     monkeypatch.chdir(repo.root)
     marker(repo.root, "# only a comment\n")
-    with pytest.raises(corpus.CorpusError, match="names no log directory"):
+    with pytest.raises(corpus.CorpusError, match="declares nothing"):
         corpus.resolve()
+
+
+# --------------------------------------------- a marker that says what to build
+
+def test_a_marker_may_declare_only_a_session(repo, monkeypatch):
+    """Having no opinion about where records go is not a parse failure.  A
+    project whose layout is already discoverable still has something to say
+    about which session to build."""
+    monkeypatch.chdir(repo.root)
+    marker(repo.root, "session: MySession\ndir: thy\n")
+    fields = corpus.read_marker(repo.root / corpus.MARKER_NAME)
+    assert fields == {"log_dir": None, "session": "MySession", "dir": "thy"}
+    # ...and resolution carries on past it rather than stopping there.
+    assert corpus.resolve_log_dir().resolve() \
+        == (repo.root / corpus.DEFAULT_LAYOUT).resolve()
+
+
+def test_the_bare_line_is_found_by_shape_not_by_position(repo):
+    """Identified by *not* being a `key: value`, so the file can be written in
+    whichever order reads best."""
+    marker(repo.root, "session: S\nrecords\ndir: thy\n")
+    fields = corpus.read_marker(repo.root / corpus.MARKER_NAME)
+    assert fields["log_dir"] == repo.root / "records"
+    assert fields["session"] == "S" and fields["dir"] == "thy"
+
+
+def test_a_marker_written_before_the_keys_existed_still_reads(repo):
+    """The format grew rather than changed."""
+    marker(repo.root, "# where the trajectories go\nresults/isabelle-logs\n")
+    fields = corpus.read_marker(repo.root / corpus.MARKER_NAME)
+    assert fields["log_dir"] == repo.root / "results/isabelle-logs"
+    assert fields["session"] is None and fields["dir"] is None
+
+
+def test_an_unrecognised_key_is_an_error(repo):
+    """`sessions:` for `session:` would otherwise be accepted and do nothing,
+    which is the failure this whole file is about."""
+    marker(repo.root, "t/logs\nsessions: S\n")
+    with pytest.raises(corpus.CorpusError, match="unrecognised key"):
+        corpus.read_marker(repo.root / corpus.MARKER_NAME)
 
 
 def test_a_marker_may_name_an_absolute_path(repo, tmp_path, monkeypatch):

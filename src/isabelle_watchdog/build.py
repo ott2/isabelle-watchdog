@@ -6,7 +6,7 @@
     isabelle-build -m - < note.md                  # note on stdin
     isabelle-build --note-file notes/next.md
     isabelle-build --lint -m '...'                 # check the note, do not build
-    isabelle-build --where                         # where would this record to?
+    isabelle-build --where                         # what would this build, and record where?
     isabelle-build --no-record                     # supervise, but record nothing
     isabelle-build -- -o quick_and_dirty           # extra isabelle arguments
 
@@ -46,6 +46,7 @@ are gone.
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -68,15 +69,145 @@ def project_dir() -> Path:
     return Path(p.stdout.strip()) if p.returncode == 0 else Path.cwd()
 
 
-# The session to build.  There is no defensible default -- it was
-# "SPSlowdown" because this script was written inside 43sp -- so it is
-# required, from $BUILD_SESSION or --session.  A wrong session name is a
-# confusing Isabelle error several seconds later; a missing one should be a
-# clear message now.
+# The session to build.  There is no defensible *constant* default -- it was
+# "SPSlowdown" because this script was written inside 43sp -- but there is a
+# defensible derivation; see `resolve_session`.
 DEFAULT_SESSION = os.environ.get("BUILD_SESSION")
-# Where the session's ROOT lives, relative to the project.  `.` suits a
-# project whose ROOT is at the top; 43sp used `isabelle/`, ndtht used `t/`.
-DEFAULT_SESSION_DIR = os.environ.get("BUILD_SESSION_DIR", ".")
+# Where the session's ROOT lives, relative to the project.  No longer defaulted
+# to `.`: unset now means "derive it from the ROOT that declares the session",
+# which is the same answer wherever the ROOT actually is.
+DEFAULT_SESSION_DIR = os.environ.get("BUILD_SESSION_DIR")
+
+
+# Isabelle's own session declaration, which is the only authority on what a
+# session is called.  `session NAME`, `session "NAME"`, optionally `in DIR`
+# and always `= PARENT +`.  The same shape `attempts.py` reads out of captured
+# ROOT diffs for attribution -- one syntax, parsed the same way in both
+# places, because a disagreement between them would attribute a build to a
+# session it never claimed to build.
+SESSION_DECL = re.compile(r'^\s*session\s+(?:"([^"]+)"|([A-Za-z0-9_\'.-]+))')
+
+# `isabelle-query` parses ROOT files too, and is deliberately not imported:
+# this package has no runtime dependencies on purpose, because it runs beside
+# a build and anything it imports is something that can break one.  What is
+# needed here is one regex over one file, not a session graph.
+
+
+def sessions_in(root_file: Path) -> list[str]:
+    """Session names a ROOT declares, in file order."""
+    try:
+        text = root_file.read_text(errors="replace")
+    except OSError:
+        return []
+    out = []
+    for line in text.splitlines():
+        m = SESSION_DECL.match(line)
+        if m:
+            out.append(m.group(1) or m.group(2))
+    return out
+
+
+def root_files(project: Path) -> list[Path]:
+    """ROOT files in the project, as *git* sees it, relative to `project`.
+
+    Git rather than a filesystem walk, and for more than speed: `.git`,
+    ignored build trees, virtualenvs and vendored AFP checkouts are exactly
+    the places a stray ROOT lives, and "the files this project tracks or could
+    track" is a definition already relied on everywhere else here (the
+    recorder's pathspecs, `project_root`).  A walk would need a pruning list,
+    and a pruning list is a guess that goes stale.
+
+    `--others --exclude-standard` includes untracked-but-not-ignored files, so
+    a project whose ROOT has not been committed yet still resolves -- which is
+    the state a new project is in when it runs this for the first time.
+    """
+    p = subprocess.run(
+        ["git", "-C", str(project), "ls-files", "--cached", "--others",
+         "--exclude-standard", "--", "*ROOT"],
+        capture_output=True, text=True)
+    if p.returncode != 0:
+        return []
+    # `*` crosses directory separators in a git pathspec, so `*ROOT` also
+    # matches `MY_ROOT` and `docs/ROOTS`; the basename is the actual test.
+    return sorted({Path(l) for l in p.stdout.split("\n")
+                   if l.strip() and Path(l).name == "ROOT"})
+
+
+def resolve_session(project: Path, session: str | None,
+                    session_dir: str | None) -> tuple[str, str]:
+    """`(session, dir)` to build, deriving whatever was not stated.
+
+    The ladder `resolve_log_dir` uses, for the other question a build needs
+    answered.  Declarations win in the order they were made, and only the last
+    rung guesses -- at which point it refuses to, unless the project leaves
+    exactly one possibility:
+
+      1. `--session` / `--dir` on the command line
+      2. `$BUILD_SESSION` / `$BUILD_SESSION_DIR`
+      3. the project's committed `.isabelle-watchdog` (`session:` / `dir:`)
+      4. derived: one ROOT under the project declaring one session
+
+    Rung 4 is what makes a per-project wrapper deletable.  43sp's
+    `isabelle/ROOT` declares exactly `SPSlowdown` and nothing else, so
+    `BUILD_SESSION` was carrying information the repository already stated;
+    ndtht has ten ROOTs and cannot be derived, which is why this refuses
+    rather than picking one.  **Several ROOTs, or several sessions, is an
+    error** -- building the wrong session is a confusing Isabelle failure
+    minutes later, and recording it as an attempt puts a build of the wrong
+    thing into the corpus.
+
+    The directory is derived independently: given a session name, the
+    directory is wherever the ROOT that declares it lives.  That is strictly
+    better than the `.` this used to default to, and it means a project only
+    ever has to state the session.
+    """
+    marker = corpus.find_marker(project)
+    if marker is not None:
+        fields = corpus.read_marker(marker)
+        session = session or fields["session"]
+        session_dir = session_dir or fields["dir"]
+
+    # `roots` are project-relative, because that is what `-d` wants and what
+    # an error message should show.  Reading one means anchoring it to the
+    # project: resolving it against the cwd works only when the operator
+    # happens to be standing at the top level, which is the same class of bug
+    # as every other entry in the table in CLAUDE.md.
+    roots = root_files(project)
+    if session is None:
+        declared = [(r, s) for r in roots for s in sessions_in(project / r)]
+        if len(declared) == 1:
+            (root_file, session), = declared
+            return session, session_dir or str(root_file.parent)
+        raise ValueError(_no_session_message(project, declared))
+
+    if session_dir is not None:
+        return session, session_dir
+
+    # The session was named; find the ROOT that declares it.  Falling back to
+    # `.` when nothing does reproduces exactly what this command did before
+    # any of this existed, so a project whose ROOT lives somewhere git cannot
+    # see is no worse off than it was.
+    holders = [r for r in roots if session in sessions_in(project / r)]
+    if len(holders) == 1:
+        return session, str(holders[0].parent)
+    if len(holders) > 1:
+        listed = "\n".join(f"    {r}" for r in holders)
+        raise ValueError(
+            f"session {session!r} is declared by more than one ROOT; say "
+            f"which with --dir or `dir:`\n{listed}")
+    return session, "."
+
+
+def _no_session_message(project: Path, declared: list) -> str:
+    """Why the session could not be derived, in terms of what was found."""
+    if not declared:
+        return ("no session to build, and no ROOT under this project declares "
+                "one.\n  Pass --session, set $BUILD_SESSION, or add "
+                f"`session:` to {corpus.MARKER_NAME}.")
+    listed = "\n".join(f"    {s:<24} {r}" for r, s in declared)
+    return (f"several sessions under {project}; say which to build.\n"
+            f"  Pass --session, set $BUILD_SESSION, or add `session:` to "
+            f"{corpus.MARKER_NAME}.\n{listed}")
 
 
 def read_note(args) -> str | None:
@@ -117,9 +248,20 @@ where records go:
   exists, so it is silent about a fresh clone -- whose first build would
   otherwise mint one somewhere the project did not choose.
 
+what gets built:
+  --session / --dir if given, else $BUILD_SESSION / $BUILD_SESSION_DIR, else
+  `session:` / `dir:` in the marker, else derived: one ROOT under the project
+  declaring one session is unambiguous, and its directory is where it was
+  found.  Several ROOTs or several sessions is an error listing them, not a
+  guess -- building the wrong session records an attempt against the wrong
+  thing.  A project with a single session need configure neither.
+
     $ cat .isabelle-watchdog
     # the log directory, relative to this file
     results/isabelle-logs
+    # optional, for a project too ambiguous to derive
+    session: SPSlowdown
+    dir: isabelle
 
 environment:
   BUILD_SESSION / BUILD_SESSION_DIR   session to build, and where its ROOT is
@@ -133,12 +275,15 @@ environment:
 """
 
 
-def report_where(project: Path) -> int:
-    """Answer "which corpus would this build record into, and why".
+def report_where(project: Path, session: str | None = None,
+                 session_dir: str | None = None) -> int:
+    """Answer "what would this build do, and why".
 
-    A tool that resolves a path by four rules should be able to say which one
-    fired.  The alternative is an operator reasoning about it from the source,
-    which is how a wrong answer stays believed.
+    A tool that resolves two questions by four rules each should be able to
+    say which rule fired for each.  The alternative is an operator reasoning
+    about it from the source, which is how a wrong answer stays believed --
+    and with the session derived rather than stated, "which session does this
+    project build" is no longer answerable by reading a Makefile.
     """
     marker = corpus.find_marker(project)
     try:
@@ -169,6 +314,18 @@ def report_where(project: Path) -> int:
     # confident wrong answer this whole ladder exists to stop.
     print(f"records: {log_dir / corpus.BASENAME}" if recording else
           f"records: none -- capture is off (${guard.ENV_RECORD})")
+
+    # The other half of "what would this do".  Reported even when it fails,
+    # and *after* the corpus lines, so a project that cannot derive its
+    # session still learns where its records would go -- the two questions
+    # are independent and one being unanswerable should not hide the other.
+    try:
+        name, where = resolve_session(project, session, session_dir)
+    except ValueError as exc:
+        print(f"session: unresolved -- {exc}")
+        return 2
+    print(f"session: {name}")
+    print(f"     in: {where}")
     return 0
 
 
@@ -194,11 +351,13 @@ def main() -> int:
     ap.add_argument("--record", dest="record", action="store_true",
                     help=argparse.SUPPRESS)   # the explicit form of the default
     ap.add_argument("--session", default=DEFAULT_SESSION,
-                    help="Isabelle session to build "
-                         "(default: $BUILD_SESSION; required)")
+                    help="Isabelle session to build (default: $BUILD_SESSION, "
+                         "else `session:` in the marker, else derived from a "
+                         "single ROOT declaring a single session)")
     ap.add_argument("--dir", default=DEFAULT_SESSION_DIR,
                     help="directory holding the session ROOT, relative to the "
-                         "project (default: $BUILD_SESSION_DIR, else '.')")
+                         "project (default: $BUILD_SESSION_DIR, else `dir:` "
+                         "in the marker, else where that ROOT was found)")
     ap.add_argument("rest", nargs="*", metavar="...",
                     help="extra arguments passed through to isabelle build")
     args = ap.parse_args()
@@ -212,13 +371,18 @@ def main() -> int:
 
     project = project_dir()
     if args.where:
-        return report_where(project)
+        return report_where(project, args.session, args.dir)
 
-    if not args.session and not args.lint:
-        print("no session to build: pass --session, or set $BUILD_SESSION.\n"
-              "(There is no default -- it would only ever be right for one "
-              "project.)", file=sys.stderr)
-        return 2
+    # Lint asks about a note, not about a build, so it must not require a
+    # session -- and must not pay for the ROOT scan that resolving one costs.
+    session = session_dir = None
+    if not args.lint:
+        try:
+            session, session_dir = resolve_session(project, args.session,
+                                                   args.dir)
+        except ValueError as exc:
+            print(f"build: {exc}", file=sys.stderr)
+            return 2
 
     # The entry point owns the log location rather than inheriting it.  It was
     # a Makefile's to export, which meant `bin/build` run directly quietly
@@ -276,7 +440,7 @@ def main() -> int:
     # installs signal handlers and reaps a process tree, which is not
     # something to run inside a caller's interpreter.
     cmd = [sys.executable, "-m", "isabelle_watchdog.watchdog", "isabelle", "build",
-           "-d", args.dir, "-v", *args.rest, args.session]
+           "-d", session_dir, "-v", *args.rest, session]
     return subprocess.run(cmd, cwd=project, env=env).returncode
 
 

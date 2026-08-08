@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -133,25 +134,58 @@ def find_marker(start: Path | None = None) -> Path | None:
     return None
 
 
-def read_marker(marker: Path) -> Path:
-    """The log directory a marker names, resolved against the marker itself.
+# Keys a marker may carry beyond the bare log-directory line.  Deliberately
+# few, and an unrecognised one is an error: `sessions:` for `session:` would
+# otherwise be accepted and do nothing, which is the failure this whole file
+# is about.  `log_dir:` is *not* a key -- the bare line is the log directory,
+# and offering two spellings of one setting invites a file that says both.
+MARKER_KEYS = ("session", "dir")
+_MARKER_KEY_RE = re.compile(r"^([A-Za-z_]+)\s*:\s*(.*)$")
 
-    A marker that names nothing is an error rather than a no-op.  Silently
-    ignoring an empty declaration reproduces the bug this file exists to
-    prevent — a project that believes it has said where its records go, and a
-    writer that puts them somewhere else — and it is the same reasoning that
-    makes a missing `--attribution` file fatal in `attempts.py`.
+
+def read_marker(marker: Path) -> dict:
+    """What a marker declares: `log_dir`, `session`, `dir` — any may be None.
+
+    The format grew rather than changed, so a marker written before this
+    reads identically: the first non-blank, non-comment line that is *not* a
+    `key: value` is the log directory, relative to the marker.  Ordering does
+    not matter, which is why the bare line is identified by shape rather than
+    by being first.
+
+        # where this project keeps its build trajectories
+        results/isabelle-logs
+        session: SPSlowdown
+        dir: isabelle
+
+    A marker that declares *nothing* is an error rather than a no-op — the
+    same reasoning that makes a missing `--attribution` file fatal in
+    `attempts.py`. One that declares only a session is fine: it simply has no
+    opinion about where records go, and resolution carries on past it.
     """
+    out = {"log_dir": None, "session": None, "dir": None}
     for line in marker.read_text().splitlines():
         s = line.strip()
         if not s or s.startswith("#"):
             continue
-        p = Path(s).expanduser()
-        return p if p.is_absolute() else (marker.parent / p)
-    raise CorpusError(
-        f"{marker} names no log directory.\n"
-        "  Its first non-blank, non-comment line should be the directory "
-        "holding builds.jsonl,\n  relative to the marker — e.g. 't/logs'.")
+        m = _MARKER_KEY_RE.match(s)
+        if m:
+            key, value = m.group(1).lower(), m.group(2).strip()
+            if key not in MARKER_KEYS:
+                raise CorpusError(
+                    f"{marker}: unrecognised key {key!r} "
+                    f"(recognised: {', '.join(MARKER_KEYS)}; the log "
+                    f"directory is a bare line, not a key)")
+            out[key] = value or None
+        elif out["log_dir"] is None:
+            p = Path(s).expanduser()
+            out["log_dir"] = p if p.is_absolute() else (marker.parent / p)
+    if not any(out.values()):
+        raise CorpusError(
+            f"{marker} declares nothing.\n"
+            "  A bare line names the log directory holding builds.jsonl, "
+            "relative to the marker\n  — e.g. 't/logs'; `session:` and `dir:` "
+            "name what to build.")
+    return out
 
 
 def declared() -> list[Path]:
@@ -172,7 +206,12 @@ def declared() -> list[Path]:
         out.append(Path(os.environ[ENV_LOG_DIR]).expanduser() / BASENAME)
     marker = find_marker()
     if marker is not None:
-        out.append(read_marker(marker) / BASENAME)
+        declared_dir = read_marker(marker)["log_dir"]
+        # A marker may declare only what to build, and say nothing about
+        # where records go.  That is not a failure to parse -- it is a file
+        # with no opinion on this question, so resolution carries on past it.
+        if declared_dir is not None:
+            out.append(declared_dir / BASENAME)
     return out
 
 
@@ -288,7 +327,9 @@ def resolve_log_dir(start: Path | None = None, *, recording: bool = True) -> Pat
 
     marker = find_marker(start)
     if marker is not None:
-        return read_marker(marker)
+        declared_dir = read_marker(marker)["log_dir"]
+        if declared_dir is not None:
+            return declared_dir
 
     found = _distinct_existing(discovered(start))
     if len(found) == 1:

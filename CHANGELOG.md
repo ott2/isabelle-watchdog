@@ -11,6 +11,49 @@ still regenerates.
 
 ## [Unreleased]
 
+**No record-schema change.**
+
+### Added
+
+- **The session to build is derived when a project leaves no doubt.** One
+  ROOT under the project declaring one session is unambiguous: that session,
+  and the ROOT's own directory as `-d`. So a single-session project now needs
+  no configuration at all — `isabelle-build -m '...'` and nothing else — which
+  is what makes a per-project wrapper deletable. 43sp's `isabelle/ROOT`
+  declares `SPSlowdown` and nothing else, so `$BUILD_SESSION` had been
+  carrying information the repository already stated.
+
+  Several ROOTs, or several sessions, is an **error listing them** rather than
+  a guess — the same ladder `resolve_log_dir()` uses. Building the wrong
+  session is a confusing Isabelle failure minutes later, and recording it puts
+  a build of the wrong thing into the corpus, which is worse. ndtht has ten
+  ROOTs declaring thirteen sessions and keeps `$BUILD_SESSION`.
+
+  ROOTs come from `git ls-files` rather than a filesystem walk: `.git`,
+  ignored build trees, virtualenvs and vendored AFP checkouts are exactly
+  where a stray ROOT lives, and a pruning list is a guess that goes stale.
+  `--others` includes untracked files, so a project whose ROOT is not
+  committed yet still resolves.
+- **`session:` and `dir:` keys in `.isabelle-watchdog`**, for a project too
+  ambiguous to derive but tired of exporting a variable. The bare first line
+  still means the log directory, so markers written before this read
+  identically; the bare line is now identified by *not* being a `key: value`,
+  so the file can be written in whichever order reads best. A marker may
+  declare only a session — that is a file with no opinion about where records
+  go, not a parse failure — and an unrecognised key is an error, since
+  `sessions:` for `session:` would otherwise be accepted and do nothing.
+- **`isabelle-build --where` reports the session and its directory**, since
+  with both derived, "which session does this project build" stopped being
+  answerable by reading a Makefile.
+
+### Changed
+
+- `$BUILD_SESSION_DIR` unset no longer means `.`. It means "wherever the ROOT
+  declaring this session lives", which is the same answer in the case `.` was
+  right and the correct one otherwise. If no ROOT git can see declares the
+  named session, it still falls back to `.` — a project whose ROOT is outside
+  git's view is no worse off than before.
+
 ## [0.3.0] — 2026-08-07
 
 Everything a project other than the two that grew this needs before adopting
