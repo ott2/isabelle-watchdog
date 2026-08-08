@@ -46,13 +46,13 @@ are gone.
 
 import argparse
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
 
 from . import corpus
 from . import guard
+from . import roots
 
 
 
@@ -79,32 +79,11 @@ DEFAULT_SESSION = os.environ.get("BUILD_SESSION")
 DEFAULT_SESSION_DIR = os.environ.get("BUILD_SESSION_DIR")
 
 
-# Isabelle's own session declaration, which is the only authority on what a
-# session is called.  `session NAME`, `session "NAME"`, optionally `in DIR`
-# and always `= PARENT +`.  The same shape `attempts.py` reads out of captured
-# ROOT diffs for attribution -- one syntax, parsed the same way in both
-# places, because a disagreement between them would attribute a build to a
-# session it never claimed to build.
-SESSION_DECL = re.compile(r'^\s*session\s+(?:"([^"]+)"|([A-Za-z0-9_\'.-]+))')
-
-# `isabelle-query` parses ROOT files too, and is deliberately not imported:
-# this package has no runtime dependencies on purpose, because it runs beside
-# a build and anything it imports is something that can break one.  What is
-# needed here is one regex over one file, not a session graph.
-
-
-def sessions_in(root_file: Path) -> list[str]:
-    """Session names a ROOT declares, in file order."""
-    try:
-        text = root_file.read_text(errors="replace")
-    except OSError:
-        return []
-    out = []
-    for line in text.splitlines():
-        m = SESSION_DECL.match(line)
-        if m:
-            out.append(m.group(1) or m.group(2))
-    return out
+# ROOT parsing lives in `roots.py`, shared with `attempts.py`.  It was two
+# regexes, one here and one there, and they disagreed: a session declared as
+# `"Probe (AFP)"` built under that name and was attributed under `Probe`.  See
+# that module for why `isabelle_query.common` is not imported instead.
+sessions_in = roots.sessions_in
 
 
 def root_files(project: Path) -> list[Path]:

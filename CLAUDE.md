@@ -13,6 +13,7 @@ prose belongs in it.
         watchdog.py            process supervision       -> isabelle-watchdog
         record.py              trajectory capture
         corpus.py  guard.py    location/loading; the never-break-a-build guard
+        roots.py               what an Isabelle ROOT declares
         trajectory.py          the single reader CLI     -> trajectory
         attempts.py            its reading/measuring views (a module, not a CLI)
         build.py               note-carrying entry point -> isabelle-build
@@ -430,6 +431,28 @@ already stated — which is what made its `bin/build` shim deletable. **ndtht**
 has ten ROOTs declaring thirteen sessions and builds several of them, so it
 cannot be derived and keeps `$BUILD_SESSION` per invocation; the error lists
 all thirteen with their ROOTs.
+
+**One parser, two readings** (`roots.py`). `build.py` holds a whole ROOT and
+must ignore commented-out declarations; `attempts.py` holds *fragments of a
+captured diff*, where an enclosing `(*` may never have been in the payload, so
+it matches line-wise and accepts that a commented-out session may map a name
+to a directory — an unused entry, against losing the mapping entirely. What
+they must share is the **name grammar**, and until this was unified they did
+not: a session declared `"Probe (AFP)"` was built under that name and
+attributed under `Probe`, and nothing downstream could tell.
+
+**Why not import `isabelle_query.common`**, which does this properly in 1015
+lines with a real tokenizer? The no-runtime-dependencies rule: the watchdog
+runs beside a build, and an unimportable dependency means an unsupervised,
+unrecorded build. The same call was already made for `run_guarded`, which came
+from that very module and is now six lines in `guard.py`. What is needed here
+is "the names in this file", not a session graph.
+
+The cost is divergence, and the answer to divergence is agreement pinned by
+tests rather than by a shared import: `tests/test_roots.py` holds a
+conformance table produced by diffing against
+`isabelle_query.common.parse_root_sessions`. It found the two disagreements
+above. If Isabelle's syntax moves, that table is what fails.
 
 Two details worth keeping:
 

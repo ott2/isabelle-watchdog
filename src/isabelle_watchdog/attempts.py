@@ -49,6 +49,7 @@ import sys
 from pathlib import Path, PurePosixPath
 
 from . import corpus
+from . import roots
 
 # This module was kept deliberately import-free while it lived in an
 # application repo, so that it could survive being split out.  It has now
@@ -386,9 +387,15 @@ _THY_BY_LINE = re.compile(r"\bline \d+ of ([A-Za-z][A-Za-z0-9_]*)")
 # produce a label.
 _TARGET_DOMINANCE = 3
 
-# `session <Name>` at the head of a ROOT stanza.  Isabelle allows an optional
-# quoted form and a `= parent` tail; only the name is wanted.
-_ROOT_SESSION = re.compile(r'\s*session\s+"?([A-Za-z0-9_\']+)"?')
+# `session <Name>` at the head of a ROOT stanza, via the grammar `build.py`
+# uses -- a private copy here spelt names differently, so a session declared
+# `"Probe (AFP)"` was built under that name and attributed under `Probe`.
+#
+# Line-wise, deliberately: this reads *fragments of a captured diff*, where
+# an enclosing `(*` may never have been in the payload, so a commented-out
+# declaration can map a name to a directory.  That costs an unused entry;
+# refusing to match without whole-file context would cost the mapping.
+_root_session = roots.session_in_line
 
 
 class Attribution:
@@ -539,9 +546,9 @@ class Attribution:
                 for line in body:
                     if line[:1] not in ("+", " "):
                         continue
-                    m = _ROOT_SESSION.match(line[1:])
-                    if m:
-                        out[m.group(1)] = d
+                    name = _root_session(line[1:])
+                    if name:
+                        out[name] = d
 
         # (2) Co-occurrence, for whatever route 1 could not see.
         tally: dict[str, dict[str, int]] = {}

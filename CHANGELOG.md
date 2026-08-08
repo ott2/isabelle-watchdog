@@ -46,6 +46,23 @@ still regenerates.
   with both derived, "which session does this project build" stopped being
   answerable by reading a Makefile.
 
+### Fixed
+
+- **Two ROOT parsers in one package disagreed about session names.**
+  `build.py` and `attempts.py` each had a regex, and measured against
+  `isabelle-query`'s tokenizing parser both were wrong in different ways: a
+  quoted name truncated at its first space (`"Probe (AFP)"` → `Probe`) and a
+  bare one at its first `.` or `-` (`HOL-Analysis` → `HOL`). A session built
+  under one name and attributed under another is undetectable downstream.
+  Both now share `roots.py`, whose conformance table was produced by diffing
+  against that parser.
+- **A session commented out across lines was read as real**, so a project
+  with one live session and one `(* … *)`'d one was refused as ambiguous
+  rather than derived. Isabelle's comments nest and its cartouches carry free
+  text; both are now stripped before matching. `attempts.py` still matches
+  line-wise, because it reads diff fragments and cannot strip what it cannot
+  see.
+
 ### Changed
 
 - `$BUILD_SESSION_DIR` unset no longer means `.`. It means "wherever the ROOT
