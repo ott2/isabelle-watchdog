@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""recount-lengths.py — three ways to count a trajectory, side by side.
+"""trajectory audit lengths — three ways to count a trajectory, side by side.
 
 `attempts.py` measures a trajectory's length as its number of **code-class
 records**.  That was a conservative choice against doc-only noise, but it
@@ -19,12 +19,10 @@ captured, which is what the error head shows it to be.  Comparing the three
 says whether the shipped number is an artefact of counting rather than of
 the underlying search.
 
-Usage:  bin/recount-lengths.py [-i BUILDS_JSONL]
+Usage:  trajectory audit lengths [-i CORPUS]
 """
 
 from __future__ import annotations
-
-import argparse
 
 import math
 import sys
@@ -35,10 +33,8 @@ from pathlib import Path
 # `bin/attempts.py` was a script whose name argparse-dispatched rather than
 # a module anything could import.  Packaging removed that obstacle.
 from .. import attempts as A
+from .. import audits
 from .. import corpus
-
-
-
 
 
 def touches_proof(rec: dict) -> bool:
@@ -46,7 +42,6 @@ def touches_proof(rec: dict) -> bool:
         if path.endswith(".thy") and A._thy_code_change(A._hunks(body)):
             return True
     return False
-
 
 
 def compare(a_name: str, a: list[int], b_name: str, b: list[int]) -> None:
@@ -100,17 +95,13 @@ def mean(xs: list[int]) -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("-i", "--input", default=None)
+    ap = audits.parser(__name__, __doc__)
     ap.add_argument("--split", metavar="SESS",
                     help="also pool SESS against the other proof sessions "
                          "and compare (e.g. --split ntr)")
-    ap.add_argument("--attribution", metavar="FILE", default=None,
-                    help="JSON of attribution facts this corpus cannot show "
-                         "(default: $TRAJECTORY_ATTRIBUTION)")
     ns = ap.parse_args()
     # Resolve once, here: the default is not a constant any more
-    # (bin/corpus.py -- it depends on where the operator is standing).
+    # (corpus.py -- it depends on where the operator is standing).
     try:
         ns.input = corpus.resolve(ns.input)
     except corpus.CorpusError as e:

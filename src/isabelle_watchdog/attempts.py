@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """attempts.py — the reading and measuring views over a trajectory corpus.
 
-An implementation module, not a command: `bin/trajectory.py` is the entry
-point for all thirteen views, and `list` / `show` / `episodes` / `classify` /
-`lengths` / `size` are the ones defined here.  They were a separate script
-until the two frontends were reconciled; the split had no meaning for a
-caller, who only ever wanted a verb.
+An implementation module, not a command: `trajectory` is the entry point for
+every view, and `list` / `show` / `episodes` / `classify` / `lengths` / `size`
+are the ones defined here.  They were a separate script until the two
+frontends were reconciled; the split had no meaning for a caller, who only
+ever wanted a verb.
 
 Each record carries its own incremental diff inline, so nothing here needs a
 git object store -- these views run against any builds.jsonl, including a
@@ -38,7 +38,6 @@ when the touched lines are code-bearing (e.g. appending a `\\<comment>` to
 a `by` line).  Run `classify -v` to see the evidence for any verdict.
 """
 
-import argparse
 import gzip
 import json
 import math
@@ -1491,18 +1490,18 @@ def cmd_lengths(recs: list[dict], n: int, include_all: bool, fmt: str,
 # --------------------------------------------------------------------- main
 
 def main() -> int:
-    """Retired: these views are subcommands of bin/trajectory.py now.
+    """Retired: these views are subcommands of `trajectory` now.
 
     The two frontends grew in different projects and split the same thirteen
     verbs over two scripts, so using them meant knowing which script had which
-    verb -- and, until bin/corpus.py, meant two different answers to "which
+    verb -- and, until `corpus.py`, meant two different answers to "which
     corpus?".  Everything here is still the implementation; only the entry
     point moved.
     """
     argv = " ".join(sys.argv[1:])
     print(f"attempts.py is a module now; its views are subcommands of "
-          f"trajectory.py:\n\n    bin/trajectory.py {argv or 'list'}\n\n"
-          f"`bin/trajectory.py --help` lists all thirteen, grouped.",
+          f"`trajectory`:\n\n    trajectory {argv or 'list'}\n\n"
+          f"`trajectory --help` lists them all, grouped.",
           file=sys.stderr)
     return 2
 

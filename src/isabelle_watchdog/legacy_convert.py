@@ -10,7 +10,7 @@ diff-bearing log for that prototype data, so the early trajectories carry
 forward in the new format.  It is run ONCE; thereafter it is kept only as
 a record — in git history — of how the initial dataset was produced.
 Going forward, bin/build_record.py writes diffs directly and
-bin/trajectory-export.py materialises episodes; this script is not on that
+`python -m isabelle_watchdog.export` materialises episodes; this script is not on that
 path.
 
 Inputs (READ-ONLY — the source data is never mutated):
@@ -24,7 +24,7 @@ Inputs (READ-ONLY — the source data is never mutated):
 Output:
   - a diff-bearing builds.jsonl written to --out, with instance_id +
     provenance stamped and the incremental `diff` added per record.  Feed
-    it to bin/trajectory-export.py to materialise the episode files.
+    it to `python -m isabelle_watchdog.export` to materialise the episode files.
 
 Identity continuity: the checkout's t/logs/instance-id is reused if
 present, else minted and written there — so the legacy records and the
@@ -145,7 +145,7 @@ def main() -> int:
     print(f"  instance_id={instance} "
           f"({'established in ' if established else 'reused from '}{inst_file})")
     print(f"PASS: wrote diff-bearing log to {outp}")
-    print(f"  next: bin/trajectory-export.py --log {outp} --apply")
+    print(f"  next: python -m isabelle_watchdog.export --log {outp} --apply")
     return 0
 
 

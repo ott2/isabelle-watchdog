@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -23,7 +24,17 @@ pytestmark = pytest.mark.slow
 
 ALL_COMMANDS = ("check", "repair", "replay", "extract",
                 "list", "show", "episodes", "notes", "classify",
-                "lengths", "size", "progress", "flips")
+                "lengths", "size", "progress", "flips", "audit")
+
+# Every name a user ever typed to reach this code before it was a package.
+# They survived into `--help` as the first line a reader sees: `trajectory
+# audit oneshot -h` opened "audit-1shot.py — …", naming a file that is not
+# installed, not on disk, and not runnable.
+RETIRED_SCRIPT_NAMES = (
+    "audit-1shot.py", "audit-attribution.py", "audit-timeouts.py",
+    "audit-zerodiff.py", "recount-lengths.py", "oneshot-significance.py",
+    "trajectory-export.py", "bin/trajectory.py", "bin/attempts.py",
+)
 
 
 def run(args, cwd, corpus=None, **env):
@@ -69,8 +80,79 @@ def test_every_documented_subcommand_is_reachable(trajectory):
     assert p.returncode == 0
     for name in ALL_COMMANDS:
         assert name in p.stdout, f"{name} is not in the help"
-    for group in ("integrity", "reading", "measuring"):
+    for group in ("integrity", "reading", "measuring", "auditing"):
         assert group in p.stdout
+
+
+# ---------------------------------------------------------------------- audits
+#
+# The audits guard the statistics that get published, and were reachable only
+# as `python -m isabelle_watchdog.audits.<name>` -- which is to say reachable
+# only by someone who already knew they were there, since nothing in `--help`
+# said so.  A validation suite nobody can find is one nobody runs.
+
+def test_every_audit_on_disk_is_listed(trajectory):
+    """The catalogue is derived, so it cannot drift from the directory.
+
+    It drifted once: the package docstring carried a hand-written inventory
+    naming a `loci` module that never existed here (those checks are
+    `test_attribution.py`).  An inventory beside the thing it inventories
+    reads as authoritative and is the last thing anyone updates.
+    """
+    from isabelle_watchdog import audits
+    on_disk = {p.stem for p in
+               (Path(audits.__file__).parent).glob("*.py")
+               if not p.stem.startswith("_")}
+    assert {name for name, _ in audits.catalogue()} == on_disk
+
+    p = run(["audit"], cwd=trajectory.root, corpus=trajectory.corpus)
+    assert p.returncode == 0, p.stderr
+    for name in on_disk:
+        assert name in p.stdout, f"{name} is on disk but not listed"
+
+
+def test_an_audit_runs_through_the_dispatcher(trajectory):
+    """Flags reach the audit's own parser, and the corpus it reads is the one
+    it resolves for itself -- `-i`, not the positional every other verb takes."""
+    p = run(["audit", "zerodiff", "-i", str(trajectory.corpus)],
+            cwd=trajectory.root)
+    assert p.returncode == 0, f"{p.stdout}\n{p.stderr}"
+    assert p.stdout.strip()
+
+
+def test_an_unknown_audit_names_the_ones_that_exist(trajectory):
+    p = run(["audit", "nosuch"], cwd=trajectory.root, corpus=trajectory.corpus)
+    assert p.returncode == 2
+    assert "no audit named" in p.stderr and "zerodiff" in p.stderr
+
+
+@pytest.mark.parametrize("name", ["oneshot", "zerodiff", "significance"])
+def test_an_audits_own_help_quotes_a_command_that_works(trajectory, name):
+    """argparse takes `prog` from how the interpreter was launched, not from
+    `sys.argv[0]`, so an audit reached through the dispatcher used to head its
+    help with the *dispatcher's* usage -- a command that does not accept the
+    flags printed under it."""
+    p = run(["audit", name, "-h"], cwd=trajectory.root, corpus=trajectory.corpus)
+    assert p.returncode == 0
+    assert f"usage: trajectory audit {name}" in p.stdout
+
+
+def test_no_help_text_names_a_script_that_no_longer_exists(trajectory):
+    """These names predate the package.  A first line naming an uninstallable
+    file is the worst place to spend a reader's first guess."""
+    helps = [run(["--help"], cwd=trajectory.root, corpus=trajectory.corpus),
+             run(["audit"], cwd=trajectory.root, corpus=trajectory.corpus)]
+    helps += [run(["audit", name, "-h"], cwd=trajectory.root,
+                  corpus=trajectory.corpus)
+              for name, _ in _catalogue()]
+    for p in helps:
+        for retired in RETIRED_SCRIPT_NAMES:
+            assert retired not in p.stdout, f"{retired} in:\n{p.stdout}"
+
+
+def _catalogue():
+    from isabelle_watchdog import audits
+    return audits.catalogue()
 
 
 def test_repo_is_only_offered_where_it_does_something(trajectory):

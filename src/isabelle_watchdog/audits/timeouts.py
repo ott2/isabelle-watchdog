@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""audit-timeouts.py — is a session's failure rate load, or genuine proof failure?
+"""trajectory audit timeouts — is a session's failure rate load, or genuine proof failure?
 
 The watchdog kills a build that exceeds its wall budget and records
 `outcome: timeout`.  A timeout is *not* evidence that the edit was wrong: it
@@ -43,12 +43,10 @@ and ar.  So the phenomenon exists and is already separated; it is not
 hiding inside the failure counts.  Check 6 asks whether separating it is
 enough, or whether it should also be counted differently.
 
-Usage:  bin/audit-timeouts.py [-i BUILDS_JSONL]
+Usage:  trajectory audit timeouts [-i CORPUS]
 """
 
 from __future__ import annotations
-
-import argparse
 
 import re
 import statistics
@@ -61,8 +59,8 @@ from pathlib import Path
 # `bin/attempts.py` was a script whose name argparse-dispatched rather than
 # a module anything could import.  Packaging removed that obstacle.
 from .. import attempts as A
+from .. import audits
 from .. import corpus
-
 
 
 # `attempts.project()` labels an episode with the development it belongs to,
@@ -111,14 +109,10 @@ def rate(lengths: list[int]) -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("-i", "--input", default=None)
-    ap.add_argument("--attribution", metavar="FILE", default=None,
-                    help="JSON of attribution facts this corpus cannot show "
-                         "(default: $TRAJECTORY_ATTRIBUTION)")
+    ap = audits.parser(__name__, __doc__)
     ns = ap.parse_args()
     # Resolve once, here: the default is not a constant any more
-    # (bin/corpus.py -- it depends on where the operator is standing).
+    # (corpus.py -- it depends on where the operator is standing).
     try:
         ns.input = corpus.resolve(ns.input)
     except corpus.CorpusError as e:

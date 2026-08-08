@@ -7,7 +7,7 @@ timing, error head, provenance, the commit it built against
 (`git_head`), and — the payload — the **incremental diff** of the
 tracked-file changes since the previous attempt.  Episodes (runs of
 attempts ending in a success) are materialised into portable per-episode
-files by `bin/trajectory-export.py`; see logging-design.md §16.
+files by `python -m isabelle_watchdog.export`; see logging-design.md §16.
 
 Design choices (see logging-design.md §§12–16 for the full design):
 
@@ -66,7 +66,7 @@ Design choices (see logging-design.md §§12–16 for the full design):
     into a one-line stderr warning; the caller's exit code is
     untouched.  Trajectory capture must never cost a build.
 
-Inspect captured data with `bin/attempts.py`; `bin/trajectory.py notes`
+Inspect captured data with `trajectory list`; `trajectory notes`
 shows the notes against their outcomes.
 """
 

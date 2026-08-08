@@ -416,6 +416,29 @@ def test_the_observations_are_recorded_not_just_the_verdict(watchdog, stub_bin,
     assert run.record["limits"]["load_factor_max"] == 4.0
 
 
+def test_a_run_too_short_to_sample_claims_no_cpu_time(watchdog, stub_bin,
+                                                      tmp_path):
+    """The pair has to be consistent, because a reader will trust the number.
+
+    One sample is taken at spawn, as the baseline the first duty cycle is
+    measured against.  It says what the tree had used a millisecond into the
+    run -- nothing about the run.  Reporting it as `cpu_time_s` gave a 3.4 s
+    build `0.02` beside a correctly-null `duty_cycle`: two fields describing
+    the same run, one of which could not be true.  Null is the honest answer
+    when nothing was measured, and it is the one `duty_cycle` already gives.
+    """
+    cpu_stub(stub_bin, tmp_path, 50)
+    # Sampling every 30 s, so only the spawn baseline is ever taken.
+    run = watchdog("sh", "-c", STARTED + "sleep 1", WATCHDOG_TIMEOUT=30,
+                   **with_stub(stub_bin, WALL_TIMEOUT=10, LOAD_FACTOR_MAX=4.0,
+                               CPU_SAMPLE_INTERVAL=30.0))
+    assert run.code == 0, run
+    c = run.record["contention"]
+    assert c["duty_cycle"] is None
+    assert c["cpu_time_s"] is None, "the spawn baseline reached the record"
+    assert c["verdict"] == "unknown"
+
+
 # --------------------------------------------------- capture never costs a build
 
 def test_a_broken_recorder_does_not_change_the_exit_code(watchdog, tmp_path, logs):

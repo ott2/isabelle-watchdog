@@ -913,7 +913,7 @@ follow a failure.  Everything else did work:
 - a **green after a green** with nothing recorded is a re-run of an
   unchanged tree, and is the only category that is not an attempt.
 
-`bin/audit-zerodiff.py` measures the population this recovers.  Empty
+`trajectory audit zerodiff` measures the population this recovers.  Empty
 diffs are 259 of 1360 records (19.0%, all pre-fix): 124 failures, 56
 greens closing a failed run, and 79 no-op rebuilds.  So 180 of 259 are
 real events.  Under the old counting, 35 closed episodes were dropped
@@ -951,7 +951,7 @@ first time" from "there was no proof edit to get wrong".
 
 `bin/shape-vs-trajectory.py` therefore counts only trajectories
 containing a `.thy` change that passes §13.1's own code test — a
-strictening in *scope*, not in kind.  `bin/audit-1shot.py` is the
+strictening in *scope*, not in kind.  `trajectory audit oneshot` is the
 standing check: it reports both scopes side by side, plus the dropped
 runs, so the effect of the filter stays visible rather than becoming
 invisible policy.

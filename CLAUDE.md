@@ -213,7 +213,14 @@ One JSON line per attempt. Design commitments, all load-bearing:
   hard proof" and "that timeout was a busy laptop" are indistinguishable,
   which is the same failure `limits` exists to prevent one layer up.
   `limits.load_factor_max` holds the *ceiling* rather than the factor, since
-  the factor is measured during the run and can vary.
+  the factor is measured during the run and can vary. All four are `null`
+  when nothing was measured, and that includes a run too short to sample: the
+  first sample is taken at *spawn*, as the baseline the first duty cycle is
+  measured against, so it describes the machine a millisecond before the build
+  rather than the build. Reporting it gave a 3.4 s build `cpu_time_s: 0.02`
+  beside a correctly-null `duty_cycle` — two fields about one run, one of them
+  false. `cpu_total` is now set only from an in-loop sample, so the baseline
+  cannot reach a record at all.
 - **Notes carry the reasoning the diff cannot.** Keys `diagnosis:` / `change:`
   / `expect:` / `ref:`, parsed into `note_fields` while `note` keeps text
   verbatim. `expect:` is the field worth the trouble: a prediction recorded
@@ -223,13 +230,14 @@ One JSON line per attempt. Design commitments, all load-bearing:
 
 ### 3. `trajectory.py` — the single reader
 
-Thirteen subcommands, grouped by the question rather than by which of the two
-original scripts implemented them:
+Subcommands grouped by the question rather than by which of the two original
+scripts implemented them:
 
 - **integrity** — `check` `repair` `replay` `extract` (the only ones taking
   `--repo`)
 - **reading** — `list` `show` `episodes` `notes` `classify`
 - **measuring** — `lengths` `size` `progress` `flips`
+- **auditing** — `audit`, the gateway to `audits/` (below)
 
 Governing principle: **regeneration is the ground truth.** Where both tree
 objects survive, the payload is exactly `git diff --no-color -M <base> <tree>`,
@@ -237,6 +245,17 @@ so it can be regenerated and compared — both the strongest check and the exact
 repair. Defects are classified on two independent axes (payload integrity vs
 capture coverage), and the tool refuses to repair what it would have to
 fabricate (`damaged`, `empty-blind`).
+
+`empty-blind` has **two causes and one date**, and `check` separates them
+(`corpus.UNTRACKED_CAPTURE_FIX`, which `audits/zerodiff.py` now shares rather
+than keeping its own copy of). Before 2026-07-27 it is the tracked-only
+capture gap — a recorder bug, since fixed, and nothing a reader can act on.
+After it, the edit was to a path `$BUILD_SOURCE_PATHSPECS` does not admit,
+which is a question about the project rather than a fault. `check` used to
+close by telling everyone to "widen the allowlist", which contradicted a
+narrowing the recorder makes deliberately and, on both real corpora, named a
+cause that applies to none of the records: all 46 of ndtht's blind payloads
+predate the fix. An instruction that cannot be followed is worse than none.
 
 `attempts.py` implements the reading and measuring views and is **a module, not
 a command** — running it prints the equivalent `trajectory.py` line. Its
@@ -517,20 +536,37 @@ isabelle-build --lint -m '...'         # check the note, do not build
 isabelle-build -- -o quick_and_dirty   # extra args to isabelle build
 
 # read the corpus — CORPUS is optional everywhere
-trajectory --help                      # all thirteen, grouped
+trajectory --help                      # all of them, grouped
 trajectory check                       # regenerate every payload, compare
 trajectory repair --apply [--heuristic]
 trajectory replay [--from N] [--to N]
 trajectory extract N DEST              # materialise attempt N's sources
 trajectory lengths --fit --by-project
 trajectory classify BUILD_ID -v
+trajectory audit                       # list the audits
+trajectory audit oneshot [-i CORPUS]   # run one
 ```
 
 `audits/` is the validation suite for the readers: each module interrogates one
 measurement decision (is the 1-shot rate measuring search or bookkeeping? is a
 timeout a proof event or load?) and re-derives the quantity a second way, so
-agreement is evidence rather than tautology. Run one with
-`python -m isabelle_watchdog.audits.<name> -i CORPUS`.
+agreement is evidence rather than tautology.
+
+**The catalogue is derived, not declared** (`audits.catalogue()`, which parses
+each module's docstring rather than importing it, so one broken audit does not
+hide the other five). The docstring here used to carry the list and it drifted
+— it named a `loci` module that has never existed, those checks being
+`tests/test_attribution.py`. An inventory beside the thing it inventories
+reads as authoritative and is the last thing anyone updates; the same argument
+as *attribution is derived, not declared* one section up.
+
+Reachability was the other half. These were `python -m
+isabelle_watchdog.audits.<name>` and unmentioned in `trajectory --help`, so
+finding them required already knowing they were there — for a suite whose
+whole job is guarding numbers that get published, that is not reachable at
+all. `audit` is deliberately unlike the other subcommands: it takes `-i
+CORPUS` and passes its remaining argv through, because an audit resolves its
+own corpus and fits its own attribution.
 
 ### Packaging
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""audit-attribution.py — is the attribution ladder still reaching everything?
+"""trajectory audit attribution — is the attribution ladder still reaching everything?
 
 `attempts.project()` tries three routes in descending order of evidential
 strength (logging-design.md §13.2.1): the paths a trajectory's code deltas
@@ -23,12 +23,10 @@ Exits non-zero on an unmapped target that a trajectory actually relied on --
 i.e. one whose absence left a trajectory unattributed.  A target that is
 merely unmapped and unneeded is reported, not failed.
 
-Usage:  python -m isabelle_watchdog.audits.attribution [-i CORPUS]
+Usage:  trajectory audit attribution [-i CORPUS]
 """
 
 from __future__ import annotations
-
-import argparse
 
 import sys
 from collections import Counter
@@ -39,10 +37,8 @@ from pathlib import Path
 # `bin/attempts.py` was a script whose name argparse-dispatched rather than
 # a module anything could import.  Packaging removed that obstacle.
 from .. import attempts as A
+from .. import audits
 from .. import corpus
-
-
-
 
 
 def targets(rec: dict) -> list[str]:
@@ -91,14 +87,10 @@ def rung(ep: list[dict]) -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("-i", "--input", default=None)
-    ap.add_argument("--attribution", metavar="FILE", default=None,
-                    help="JSON of attribution facts this corpus cannot show "
-                         "(default: $TRAJECTORY_ATTRIBUTION)")
+    ap = audits.parser(__name__, __doc__)
     ns = ap.parse_args()
     # Resolve once, here: the default is not a constant any more
-    # (bin/corpus.py -- it depends on where the operator is standing).
+    # (corpus.py -- it depends on where the operator is standing).
     try:
         ns.input = corpus.resolve(ns.input)
     except corpus.CorpusError as e:

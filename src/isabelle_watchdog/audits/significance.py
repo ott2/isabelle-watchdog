@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""oneshot-significance.py — how much does the pre-ntr/ntr 1-shot gap survive?
+"""trajectory audit significance — how much does the pre-ntr/ntr 1-shot gap survive?
 
 The gap is large (.633 vs .354 on the pooled corpus) over hundreds of
 trajectories, so a textbook two-proportion test returns an absurdly small p.
@@ -33,12 +33,11 @@ What the number cannot settle, and no amount of resampling will:
 Leave-one-day-out on `ntr` is the cheap robustness check against the last
 of those: five days is few enough that one bad afternoon could carry it.
 
-Usage:  bin/oneshot-significance.py [-i BUILDS_JSONL] [-B REPLICATES]
+Usage:  trajectory audit significance [-i CORPUS] [-B REPLICATES]
 """
 
 from __future__ import annotations
 
-import argparse
 import collections
 
 import math
@@ -51,6 +50,7 @@ from pathlib import Path
 # `bin/attempts.py` was a script whose name argparse-dispatched rather than
 # a module anything could import.  Packaging removed that obstacle.
 from .. import attempts as A
+from .. import audits
 from .. import corpus
 
 # Which developments to contrast.  Was `PRE_NTR = ["base", "ae", "ar", "art"]`
@@ -84,8 +84,6 @@ def choose_groups(rows, a_arg=None, b_arg=None):
         name_a, name_b = "+".join(sorted(a_set)), biggest
     return (name_a, [r for r in rows if r[0] in a_set],
             name_b, [r for r in rows if r[0] in b_set])
-
-
 
 
 def trials(log: Path) -> list[tuple[str, str, bool]]:
@@ -143,20 +141,16 @@ def day_bootstrap(rows: list, B: int, a_set: set, b_set: set) -> list[float]:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("-i", "--input", default=None)
+    ap = audits.parser(__name__, __doc__)
     ap.add_argument("-B", type=int, default=10000, help="bootstrap replicates")
     ap.add_argument("--a", metavar="S,S", help="comma-separated sessions for "
                     "the first group (default: every development except the "
                     "largest)")
     ap.add_argument("--b", metavar="S,S", help="comma-separated sessions for "
                     "the second group (default: the largest development)")
-    ap.add_argument("--attribution", metavar="FILE", default=None,
-                    help="JSON of attribution facts this corpus cannot show "
-                         "(default: $TRAJECTORY_ATTRIBUTION)")
     ns = ap.parse_args()
     # Resolve once, here: the default is not a constant any more
-    # (bin/corpus.py -- it depends on where the operator is standing).
+    # (corpus.py -- it depends on where the operator is standing).
     try:
         ns.input = corpus.resolve(ns.input)
     except corpus.CorpusError as e:

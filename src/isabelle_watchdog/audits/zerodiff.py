@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""audit-zerodiff.py — what is a build whose recorded diff is empty?
+"""trajectory audit zerodiff — what is a build whose recorded diff is empty?
 
 A record with no diff (delta class `none`) is dropped from the length count
 and, if a whole episode is empty, from the dataset.  That is only safe if
@@ -21,12 +21,10 @@ So this reports class x outcome x era, and splits the empty greens by their
 predecessor.  The 2026-07-27 fix is the era boundary: after it, untracked
 `.thy`/`ROOT`/`ROOTS` are staged, so an empty diff should mean what it says.
 
-Usage:  bin/audit-zerodiff.py [-i BUILDS_JSONL]
+Usage:  trajectory audit zerodiff [-i CORPUS]
 """
 
 from __future__ import annotations
-
-import argparse
 
 import re
 import sys
@@ -38,9 +36,11 @@ from pathlib import Path
 # `bin/attempts.py` was a script whose name argparse-dispatched rather than
 # a module anything could import.  Packaging removed that obstacle.
 from .. import attempts as A
+from .. import audits
 from .. import corpus
 
-FIX = "2026-07-27"          # untracked-source capture fix (logging-design 13.1)
+FIX = corpus.UNTRACKED_CAPTURE_FIX   # see there: `trajectory check` dates
+                                     # records against the same boundary
 
 # An Isabelle error head carries the failing file's path, which survives even
 # when the diff does not — the one handle on an episode the recorder missed.
@@ -49,21 +49,15 @@ FIX = "2026-07-27"          # untracked-source capture fix (logging-design 13.1)
 # meant a second place ndtht's layout was assumed and a second thing to fix.
 
 
-
-
 def era(rec: dict) -> str:
     return "post-fix" if (rec.get("timestamp") or "") >= FIX else "pre-fix"
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("-i", "--input", default=None)
-    ap.add_argument("--attribution", metavar="FILE", default=None,
-                    help="JSON of attribution facts this corpus cannot show "
-                         "(default: $TRAJECTORY_ATTRIBUTION)")
+    ap = audits.parser(__name__, __doc__)
     ns = ap.parse_args()
     # Resolve once, here: the default is not a constant any more
-    # (bin/corpus.py -- it depends on where the operator is standing).
+    # (corpus.py -- it depends on where the operator is standing).
     try:
         ns.input = corpus.resolve(ns.input)
     except corpus.CorpusError as e:

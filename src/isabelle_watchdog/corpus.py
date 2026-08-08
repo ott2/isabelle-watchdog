@@ -78,6 +78,19 @@ LEGACY_LAYOUTS = ("t/logs", "results/isabelle-logs")
 # 43sp, whose real one is the other layout above.
 DEFAULT_LAYOUT = "t/logs"
 
+# The day capture stopped being tracked-only (logging-design.md §13.1).  Until
+# then a `git add -u` snapshot could not see a theory that had never been
+# committed, so every edit made while a new theory was being authored recorded
+# as an empty diff -- 26 of the first month's 28 otherwise-inexplicable fail->ok
+# flips.
+#
+# A property of the *data*, not of either reader, which is why it lives here
+# rather than in the one that noticed it first.  Both `trajectory check` and
+# `trajectory audit zerodiff` have to date a record to say what an empty
+# payload means, and a second copy of this string would eventually disagree
+# about which records are explained and which are open questions.
+UNTRACKED_CAPTURE_FIX = "2026-07-27"
+
 
 class CorpusError(Exception):
     """No corpus could be resolved, or the one named does not exist."""

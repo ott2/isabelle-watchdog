@@ -8,8 +8,10 @@ history -- or that re-baselines on mid-flight commits -- is handled correctly.
 
 The measuring and reading commands are implemented in `attempts.py` and the
 integrity ones here; the split is historical (two projects, two scripts) and
-is not something a caller should have to know.  `trajectory.py --help` groups
-all thirteen by the question they answer.
+is not something a caller should have to know.  `trajectory --help` groups
+them by the question they answer, `audit` among them -- the validation suite
+for these statistics was reachable only by someone who already knew it was
+there, which for a suite guarding published numbers is not reachable at all.
 
 BASE TREE PER RECORD.  `build_record` anchors each diff on the previous
 attempt's snapshot tree, *except* when HEAD has moved since (a commit landed
@@ -71,13 +73,16 @@ DEFECT CLASSES (`check`):
   empty-blind        empty payload, snapshot tree unchanged, yet the outcome
                      flips between `fail` and `ok`.  A prover is deterministic
                      on identical sources, so the sources must have changed and
-                     the snapshot did not see them -- the signature of
-                     tracked-only capture while a new theory is being authored.
-                     The payload is faithful; the *allowlist* is at fault.
-                     Unrecoverable -- the content was never captured.  Flips
-                     involving `timeout` are excluded, a timeout being
-                     wall-clock dependent and so able to differ on identical
-                     input.
+                     the snapshot did not see them.  The payload is faithful;
+                     the *capture* missed the edit.  Unrecoverable -- the
+                     content was never captured.  Two causes, dated apart by
+                     `check`: before 2026-07-27 it is the tracked-only gap,
+                     which was a recorder bug and is fixed; after it, a source
+                     path outside `$BUILD_SOURCE_PATHSPECS`, which is a
+                     deliberate narrowing and so a question rather than a
+                     fault.  Flips involving `timeout` are excluded, a timeout
+                     being wall-clock dependent and so able to differ on
+                     identical input.
 
 ATTRIBUTING AN OUTCOME.  An outcome is only interpretable against the
 conditions that produced it, so each record also carries the watchdog budgets
@@ -94,25 +99,27 @@ the project the caller is standing in.  The first three are declarations and
 win outright; only the last can be ambiguous.  See corpus.py.
 
 Usage:
-    bin/trajectory.py check    [CORPUS] [--repo PATH]
-    bin/trajectory.py repair   [CORPUS] [--repo PATH] [--apply] [--heuristic]
-    bin/trajectory.py replay   [CORPUS] [--repo PATH] [--from N] [--to N]
-    bin/trajectory.py extract  [CORPUS] N DEST [--repo PATH]
-    bin/trajectory.py list     [CORPUS] [-n N] [--all]
-    bin/trajectory.py show     [CORPUS] BUILD_ID [--full]
-    bin/trajectory.py episodes [CORPUS] [-n N] [--diffs] [--full] [--all]
-    bin/trajectory.py notes    [CORPUS] [--raw] [--loci]
-    bin/trajectory.py classify [CORPUS] BUILD_ID [-v]
-    bin/trajectory.py lengths  [CORPUS] [--fit] [--by-project] [--csv|--json]
-    bin/trajectory.py size     [CORPUS] [--compare DIR...] [--json]
-    bin/trajectory.py progress [CORPUS]
-    bin/trajectory.py flips    [CORPUS]
+    trajectory check    [CORPUS] [--repo PATH]
+    trajectory repair   [CORPUS] [--repo PATH] [--apply] [--heuristic]
+    trajectory replay   [CORPUS] [--repo PATH] [--from N] [--to N]
+    trajectory extract  [CORPUS] N DEST [--repo PATH]
+    trajectory list     [CORPUS] [-n N] [--all]
+    trajectory show     [CORPUS] BUILD_ID [--full]
+    trajectory episodes [CORPUS] [-n N] [--diffs] [--full] [--all]
+    trajectory notes    [CORPUS] [--raw] [--loci]
+    trajectory classify [CORPUS] BUILD_ID [-v]
+    trajectory lengths  [CORPUS] [--fit] [--by-project] [--csv|--json]
+    trajectory size     [CORPUS] [--compare DIR...] [--json]
+    trajectory progress [CORPUS]
+    trajectory flips    [CORPUS]
+    trajectory audit    [NAME] [-i CORPUS] [...]
 """
 
 from __future__ import annotations
 
 import argparse
 import collections
+import importlib
 import json
 import re
 import shutil
@@ -348,11 +355,31 @@ def cmd_check(records, repo, args) -> int:
         print(f"{unjudged} unverifiable -- structurally well-formed, but the tree "
               "objects needed to confirm the content have been pruned.")
     if counts["empty-blind"]:
-        print(f"{counts['empty-blind']} empty payloads are FAITHFUL but BLIND: the "
-              "snapshot did not move, yet the outcome flipped between fail and ok.\n"
-              "  A prover is deterministic on identical sources, so the edit was to a "
-              "file outside the\n  snapshot's allowlist.  Unrecoverable, and not a "
-              "defect in the payload -- widen the allowlist.")
+        blind = [v for v in verdicts if v["class"] == "empty-blind"]
+        old = sum(1 for v in blind
+                  if (records[v["i"]].get("timestamp") or "")
+                  < corpus.UNTRACKED_CAPTURE_FIX)
+        print(f"{len(blind)} empty payloads are FAITHFUL but BLIND: the snapshot "
+              "did not move, yet the\n  outcome flipped between fail and ok.  A "
+              "prover is deterministic on identical\n  sources, so the edit was to "
+              "a file the snapshot did not see.  Unrecoverable\n  either way -- the "
+              "content was never captured -- but the two causes are\n  different "
+              "questions, so they are counted apart.")
+        # Telling every reader to "widen the allowlist" was wrong twice over:
+        # it contradicted a narrowing the recorder makes deliberately, and on
+        # both real corpora the population is almost entirely the pre-fix
+        # tracked-only gap, where there is no allowlist question to answer.
+        if old:
+            print(f"\n  {old} predate {corpus.UNTRACKED_CAPTURE_FIX}, when capture "
+                  "was tracked-only: a theory being\n  authored was invisible until "
+                  "its first commit.  Nothing to change -- the\n  recorder was "
+                  "fixed, and these records cannot be.")
+        if len(blind) - old:
+            print(f"\n  {len(blind) - old} were recorded after it, so the edit was "
+                  "to a path $BUILD_SOURCE_PATHSPECS\n  does not admit (default "
+                  "`*.thy *ROOT *ROOTS`).  That default is narrow on\n  purpose, so "
+                  "widening it is a decision about this project rather than a\n  fix "
+                  "-- `trajectory show` on the flip says which files changed.")
     if lost - counts["empty-blind"]:
         print(f"{lost - counts['empty-blind']} unrecoverable for other reasons.")
     return 0
@@ -798,6 +825,13 @@ GROUPS = (
      ("list", "show", "episodes", "notes", "classify")),
     ("measuring", "what does the corpus say about the work?",
      ("lengths", "size", "progress", "flips")),
+    # The fourth question is about the answers to the other three.  The audits
+    # were reachable only as `python -m isabelle_watchdog.audits.<name>`, which
+    # is to say reachable only by someone who already knew they existed --
+    # nothing in `--help` said so.  A validation suite nobody can find is one
+    # nobody runs, and these guard exactly the numbers that get published.
+    ("auditing", "do these readers' own statistics hold up?",
+     ("audit",)),
 )
 
 HELP = {
@@ -814,6 +848,7 @@ HELP = {
     "size":     "byte accounting for a project-size breakdown",
     "progress": "classify whether each edit made progress",
     "flips":    "attribute every outcome change to a cause",
+    "audit":    "re-derive a published statistic a second way",
 }
 
 # Views that count trajectories, and so have to decide whether a prose-only
@@ -840,6 +875,59 @@ def _attempts():
     return attempts
 
 
+def _add_audit(sub) -> None:
+    """`audit [NAME] [ARGS…]`, deliberately unlike every other subcommand.
+
+    An audit resolves its own corpus and fits its own attribution -- it
+    attributes far more than any reader here does -- so it takes `-i CORPUS`
+    rather than this parser's positional, and each has flags of its own.
+    REMAINDER hands those over untouched.  Restating six argument lists here
+    would give this parser a second opinion about them, and a second opinion
+    is a thing that drifts; the cost is that a flag must follow NAME.
+    """
+    s = sub.add_parser("audit", description=HELP["audit"],
+                       usage="trajectory audit [NAME] [ARGS ...]")
+    s.add_argument("name", nargs="?", default=None,
+                   help="which audit to run; omit to list them")
+    s.add_argument("rest", nargs=argparse.REMAINDER, metavar="ARGS",
+                   help="passed to the audit itself; `NAME -h` lists them")
+
+
+def cmd_audit(args) -> int:
+    """List the audits, or run one.
+
+    Not routed through `main`'s corpus resolution and loading: an audit that
+    was handed pre-loaded records would still resolve and load for itself
+    (it fits attribution over the whole corpus first), so the work would be
+    done twice and, worse, the two resolutions could differ.
+    """
+    from . import audits
+    entries = audits.catalogue()
+    known = dict(entries)
+    if args.name is None:
+        print("Audits of the readers' own measurement decisions.  Each\n"
+              "re-derives its quantity a second way rather than re-running\n"
+              "the same code path, so agreement is evidence, not tautology.\n")
+        for name, gloss in entries:
+            print(f"    {name:<13} {gloss}")
+        print("\n    trajectory audit NAME [-i CORPUS] [...]"
+              "        (`NAME -h` for its own flags)")
+        return 0
+    if args.name not in known:
+        print(f"FAIL: no audit named {args.name!r}.  Known: "
+              f"{', '.join(known)}", file=sys.stderr)
+        return 2
+    mod = importlib.import_module(f"{__package__}.audits.{args.name}")
+    # Each audit's `main` parses `sys.argv` itself.  Give it an argv whose
+    # program name is how the user actually got here, so its own `--help`
+    # and errors quote a command that can be run again.
+    saved, sys.argv = sys.argv, [f"trajectory audit {args.name}", *args.rest]
+    try:
+        return mod.main()
+    finally:
+        sys.argv = saved
+
+
 def build_parser() -> argparse.ArgumentParser:
     epilog = "\n".join(
         [""] + [f"{title} -- {gloss}\n" +
@@ -859,6 +947,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     for _, _, cmds in GROUPS:
         for name in cmds:
+            if name == "audit":
+                _add_audit(sub)
+                continue
             s = sub.add_parser(name, description=HELP[name])
             s.add_argument("corpus", nargs="?", default=None,
                            help="builds.jsonl to read (default: "
@@ -968,6 +1059,11 @@ def dispatch_attempts(name, records, path, args) -> int:
 
 def main() -> int:
     args = build_parser().parse_args()
+
+    # Before the corpus is touched: `audit` owns its own resolution, and
+    # `audit` with no name is a listing that needs no corpus at all.
+    if args.cmd == "audit":
+        return cmd_audit(args)
 
     try:
         path = corpus.resolve(args.corpus)

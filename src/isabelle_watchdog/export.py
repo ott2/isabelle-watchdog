@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""trajectory-export.py — materialise per-episode trajectory files from
-the build log (logging-design.md §16).
+"""python -m isabelle_watchdog.export — materialise per-episode trajectory
+files from the build log (logging-design.md §16).
 
 An *episode* is a maximal run of attempts ending in a successful build
 (outcome == "ok"); a trailing run with no success is an *open* episode.

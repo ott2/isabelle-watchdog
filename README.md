@@ -30,10 +30,11 @@ BUILD_SESSION=MySession isabelle-build -m 'diagnosis: the induction is too weak;
 isabelle-watchdog isabelle build -d t MySession
 
 # read the corpus
-trajectory --help          # thirteen views, grouped by the question they answer
+trajectory --help          # every view, grouped by the question it answers
 trajectory lengths --fit   # how many attempts did each proof take?
 trajectory notes           # what did you predict, and were you right?
 trajectory check           # is every recorded diff still intact?
+trajectory audit           # do these readers' own statistics hold up?
 ```
 
 ## Why record a build at all

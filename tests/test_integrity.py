@@ -225,6 +225,55 @@ def test_an_empty_payload_across_an_outcome_flip_is_blind_not_broken(corpus,
     assert verdicts(corpus, trajectory)[4] == "empty-blind"
 
 
+def _blind(corpus, timestamp):
+    """The same damage as above, dated.
+
+    Flipping record 3 makes it blind as well as record 4 -- it is the fixture's
+    no-op rebuild, so its payload is already empty and its outcome now differs
+    from record 2's.  Both get the timestamp: the point here is the era split,
+    and a stray record from the other era would test the wrong thing.
+    """
+    corpus[3]["outcome"] = "fail"
+    corpus[4]["diff"] = ""
+    corpus[4]["tree"] = corpus[3]["tree"]
+    corpus[3]["timestamp"] = corpus[4]["timestamp"] = timestamp
+    return corpus
+
+
+@pytest.mark.slow
+def test_a_blind_payload_from_the_tracked_only_era_asks_for_nothing(corpus,
+                                                                    trajectory,
+                                                                    capsys):
+    """`check` used to close by telling every reader to "widen the allowlist",
+    which was wrong twice over: it contradicts a narrowing the recorder makes
+    deliberately, and on both real corpora the entire population predates the
+    2026-07-27 capture fix, where there is no allowlist question to answer --
+    a theory being authored was invisible until its first commit.
+
+    An instruction that cannot be followed is worse than none: it sends a
+    reader to change a setting that was never the cause.
+    """
+    T.cmd_check(_blind(corpus, "2026-01-01T12:00:00"), trajectory.root,
+                SimpleNamespace())
+    out = capsys.readouterr().out
+    assert "2 predate 2026-07-27" in out
+    assert "Nothing to change" in out
+    assert "BUILD_SOURCE_PATHSPECS" not in out
+
+
+@pytest.mark.slow
+def test_a_blind_payload_recorded_since_is_a_question_about_this_project(
+        corpus, trajectory, capsys):
+    """After the fix the allowlist genuinely is the remaining explanation --
+    but it is narrow on purpose, so widening it is a decision rather than a
+    repair, and the message says which files to look at first."""
+    T.cmd_check(_blind(corpus, "2026-08-01T12:00:00"), trajectory.root,
+                SimpleNamespace())
+    out = capsys.readouterr().out
+    assert "BUILD_SOURCE_PATHSPECS" in out
+    assert "predate" not in out
+
+
 @pytest.mark.slow
 def test_a_timeout_flip_is_not_read_as_blindness(corpus, trajectory):
     """A timeout is wall-clock dependent and so can differ on identical

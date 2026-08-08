@@ -646,6 +646,15 @@ def main() -> int:
     cpu_samples: list[tuple[float, float]] = []
     load_factor = 1.0
     duty: float | None = None
+    # The run's CPU seconds, and deliberately NOT `cpu_samples[-1]`: the
+    # sample below is taken at *spawn*, as a baseline for the first duty
+    # cycle, and is a claim about the machine a millisecond before the build
+    # rather than about the build.  Reading the list's tail reported that
+    # baseline for any run too short to sample again -- a 3.4 s build filed
+    # `cpu_time_s: 0.02` beside a correctly-null `duty_cycle`, a pair that
+    # cannot both be true.  Set only from an in-loop sample, so the baseline
+    # cannot reach the record at all.
+    cpu_total: float | None = None
     contention_verdict = "unknown"
     if load_factor_max > 1.0:
         c0 = tree_cpu_seconds(proc.pid)
@@ -744,6 +753,10 @@ def main() -> int:
                 cpu_now = tree_cpu_seconds(proc.pid)
                 if cpu_now is not None:
                     cpu_samples.append((now, cpu_now))
+                    # Cumulative for the tree since it spawned, so the latest
+                    # reading is the run's total regardless of what the window
+                    # below prunes.
+                    cpu_total = cpu_now
                     cpu_samples = [s for s in cpu_samples
                                    if now - s[0] <= cpu_window] or cpu_samples[-1:]
                     # 0.9 of the interval: samples land where the 1-second
@@ -844,7 +857,8 @@ def main() -> int:
         # duty cycle and CPU seconds stay meaningful whatever this file
         # decides to do with them next.
         contention_rec = {
-            "cpu_time_s": (round(cpu_samples[-1][1], 2) if cpu_samples else None),
+            "cpu_time_s": (round(cpu_total, 2) if cpu_total is not None
+                           else None),
             "duty_cycle": (round(duty, 3) if duty is not None else None),
             "verdict": contention_verdict,
             "load_factor_applied": round(load_factor, 2),
@@ -868,7 +882,7 @@ def main() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Attempt capture (trajectory axis — see bin/build_record.py)
+# Attempt capture (trajectory axis — see record.py)
 # ---------------------------------------------------------------------------
 
 def _first_error(lines: list[str]) -> str:

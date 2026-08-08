@@ -45,6 +45,18 @@ still regenerates.
 - **`isabelle-build --where` reports the session and its directory**, since
   with both derived, "which session does this project build" stopped being
   answerable by reading a Makefile.
+- **`trajectory audit`**, making the validation suite reachable. The six
+  audits — the modules that re-derive each published statistic a second way —
+  were `python -m isabelle_watchdog.audits.<name>` and were named nowhere in
+  `trajectory --help`, so finding one required already knowing it existed. A
+  suite guarding numbers that get published, reachable only by the people who
+  wrote it, is not reachable.
+
+  `trajectory audit` lists them; `trajectory audit NAME [-i CORPUS] [...]`
+  runs one, passing the rest of the argv through to the audit's own parser.
+  Deliberately unlike every other subcommand, which take a positional corpus:
+  an audit resolves its own corpus and fits its own attribution, so routing it
+  through the shared one would do that work twice and could do it two ways.
 
 ### Fixed
 
@@ -62,6 +74,57 @@ still regenerates.
   text; both are now stripped before matching. `attempts.py` still matches
   line-wise, because it reads diff fragments and cannot strip what it cannot
   see.
+- **`contention.cpu_time_s` reported the spawn baseline on a run too short to
+  sample.** The first CPU sample is taken when the child is spawned, as the
+  baseline the first duty cycle is measured against; it says what the tree had
+  used a millisecond into the run, which is a claim about the machine and not
+  about the build. Reading the sample list's tail published it as the run's
+  CPU time, so a 3.4 s build recorded `cpu_time_s: 0.02` beside a correctly
+  null `duty_cycle` — two fields describing one run, one of which could not be
+  true. The field is now set only from an in-loop sample, so the baseline
+  cannot reach a record; a run with nothing measured records `null`, which is
+  what `duty_cycle` already did.
+
+  *No schema change* — the key and its type are unchanged, and every reader
+  already treated absent-or-null as unmeasured. Existing corpora keep whatever
+  they recorded; the number was wrong only where `duty_cycle` was already
+  `null`, which is exactly where a reader had been told not to trust it.
+- **The audits package listed a module that has never existed.** Its docstring
+  carried a hand-written inventory naming `loci`, so
+  `python -m isabelle_watchdog.audits.loci` failed — those checks are in
+  `tests/test_attribution.py`. `audits.catalogue()` now reads the directory
+  (parsing each module's docstring rather than importing it, so one broken
+  audit cannot hide the other five), and `trajectory audit` prints that. An
+  inventory maintained beside the thing it inventories reads as authoritative
+  and is the last thing anyone updates.
+- **Pre-package script names in user-facing help.** `trajectory audit oneshot
+  -h` opened `audit-1shot.py — …`, `python -m isabelle_watchdog.export`
+  opened `trajectory-export.py — …`, and `trajectory.py`'s usage block listed
+  `bin/trajectory.py check`. Every one names a file that is not installed, not
+  on disk and not runnable, on the first line a reader sees. Each now names
+  the command that actually reaches it, and a test asserts no retired name
+  appears in any help output.
+
+  The audits' `--help` also headed itself with the *dispatcher's* usage,
+  because argparse derives `prog` from how the interpreter was launched rather
+  than from `sys.argv[0]`. They now share one parser constructor
+  (`audits.parser`), which sets `prog` and carries the `-i`/`--attribution`
+  pair all six had separately.
+- **`trajectory check` told every reader to widen an allowlist the recorder
+  narrows on purpose.** Its closing line on `empty-blind` payloads was
+  "Unrecoverable, and not a defect in the payload — widen the allowlist",
+  which named a cause that applies to none of the records in either real
+  corpus: all 46 of ndtht's blind payloads predate the 2026-07-27 capture fix,
+  when `git add -u` could not see a theory that had never been committed. An
+  instruction that cannot be followed is worse than none.
+
+  `check` now dates them. Before the fix: the tracked-only gap, nothing to
+  change, and these records cannot be repaired. After it: a path
+  `$BUILD_SOURCE_PATHSPECS` does not admit, which is a decision about the
+  project rather than a repair, with a pointer to `trajectory show`. The date
+  is `corpus.UNTRACKED_CAPTURE_FIX`, which `audits/zerodiff.py` now shares
+  instead of keeping a second copy that could come to disagree about which
+  records are explained.
 
 ### Changed
 

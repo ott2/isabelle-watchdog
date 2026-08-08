@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""audit-1shot.py — is the 1-shot rate measuring proof search, or bookkeeping?
+"""trajectory audit oneshot — is the 1-shot rate measuring proof search, or bookkeeping?
 
 `attempts.py` keeps a delta when *any* file in it looks code-bearing, and
 attributes the trajectory to a `t/<dir>` session from the paths its code-class
@@ -22,12 +22,10 @@ contain a genuine `.thy` **code** change -- the same evidence test
 reports what the restriction moves.  It answers whether the static/dynamic
 contrast survives, not whether the classifier is right.
 
-Usage:  bin/audit-1shot.py [-i BUILDS_JSONL] [--examples N]
+Usage:  trajectory audit oneshot [-i CORPUS] [--examples N]
 """
 
 from __future__ import annotations
-
-import argparse
 
 import sys
 from pathlib import Path
@@ -37,10 +35,8 @@ from pathlib import Path
 # `bin/attempts.py` was a script whose name argparse-dispatched rather than
 # a module anything could import.  Packaging removed that obstacle.
 from .. import attempts as A
+from .. import audits
 from .. import corpus
-
-
-
 
 
 def trajectories(log: Path) -> dict[str, list[tuple[int, bool]]]:
@@ -67,17 +63,12 @@ def pct(n: int, d: int) -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("-i", "--input", default=None,
-                    help="builds.jsonl to read")
+    ap = audits.parser(__name__, __doc__)
     ap.add_argument("--examples", type=int, default=0, metavar="N",
                     help="show N no-theory trajectories booked against a session")
-    ap.add_argument("--attribution", metavar="FILE", default=None,
-                    help="JSON of attribution facts this corpus cannot show "
-                         "(default: $TRAJECTORY_ATTRIBUTION)")
     ns = ap.parse_args()
     # Resolve once, here: the default is not a constant any more
-    # (bin/corpus.py -- it depends on where the operator is standing).
+    # (corpus.py -- it depends on where the operator is standing).
     try:
         ns.input = corpus.resolve(ns.input)
     except corpus.CorpusError as e:
