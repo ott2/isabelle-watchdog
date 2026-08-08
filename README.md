@@ -198,6 +198,10 @@ imported by the package. The `isabelle` marker covers the end-to-end test,
 which needs a real Isabelle and a prebuilt HOL heap and skips cleanly without
 them.
 
+Validating a change against a real project writes to that project's real
+corpus unless you point `WATCHDOG_LOG_DIR` at a scratch directory first —
+see [`docs/working-on-the-tooling.md`](docs/working-on-the-tooling.md).
+
 ## Licence
 
 MIT.

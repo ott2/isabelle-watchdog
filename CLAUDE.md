@@ -20,6 +20,7 @@ prose belongs in it.
         audits/                validation suite for the readers' statistics
     tests/                     pytest; conftest.py holds the fixtures
     docs/logging-design.md     the design doc the code cites by section
+    docs/working-on-the-tooling.md   validating against a real project safely
 
 Consolidated from the two application projects that grew it, with history —
 `git log` reaches back to 2026-04-23. `~/projects/claudecode/ndtht` contributed
@@ -560,6 +561,14 @@ For the *write* path, that is now what the `trajectory` fixture does — `git
 init` a scratch repo, edit theories, capture, then `check` and `replay` against
 the result. It is the shape of test that caught the `PROJECT_DIR` bug, and no
 amount of reading would have.
+
+**Validating against a real project writes to its real corpus** unless you
+say otherwise. Set `WATCHDOG_LOG_DIR` to a scratch directory and confirm with
+`isabelle-build --where` before building; `--no-record` is the wrong tool,
+since it switches off the recorder you came to test.
+[`docs/working-on-the-tooling.md`](docs/working-on-the-tooling.md) has the
+rest, including what to do when something does get into a corpus, and why
+generating load needs cleanup that cannot be skipped.
 
 ## Corpora are separate repos
 
