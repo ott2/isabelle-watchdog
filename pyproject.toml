@@ -31,6 +31,21 @@ dependencies = []
 # test runner that every contributor then has to learn.
 [project.optional-dependencies]
 test = ["pytest>=7"]
+# `isabelle-layout` is the extracted ROOT/theory-header parser (formerly
+# `isabelle_query.common`).  It is what `roots.py` is checked *against*, never
+# what it calls: a runtime dependency here would put an import between
+# `isabelle-build` and a build, which is the failure the empty `dependencies`
+# above exists to prevent.  It ships its conformance corpus as package data
+# for exactly this arrangement.
+#
+# A separate extra rather than a line in `test` because it is not on PyPI yet,
+# and an unresolvable requirement would break the documented `pip install -e
+# ".[test]"` for everyone.  Fold it into `test` on publication; until then:
+#
+#     pip install ../isabelle-layout
+#
+# Without it `test_roots.py` skips the corpus checks and says so.
+conformance = ["isabelle-layout>=0.1.0"]
 
 [project.urls]
 Homepage = "https://github.com/salamon/isabelle-watchdog"

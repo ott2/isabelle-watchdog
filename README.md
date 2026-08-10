@@ -210,6 +210,18 @@ imported by the package. The `isabelle` marker covers the end-to-end test,
 which needs a real Isabelle and a prebuilt HOL heap and skips cleanly without
 them.
 
+The ROOT reader is checked against
+[`isabelle-layout`](https://github.com/ott2/isabelle-layout), which ships a
+conformance corpus verified against a real Isabelle. It is a *test*
+dependency and will stay one: this package imports nothing at runtime, so a
+consumer of a parser it cannot depend on is exactly what that corpus is for.
+
+```sh
+pip install ../isabelle-layout   # not on PyPI yet; `.[conformance]` after
+```
+
+Without it those checks skip and name the command that enables them.
+
 Validating a change against a real project writes to that project's real
 corpus unless you point `WATCHDOG_LOG_DIR` at a scratch directory first —
 see [`docs/working-on-the-tooling.md`](docs/working-on-the-tooling.md).

@@ -457,21 +457,37 @@ captured diff*, where an enclosing `(*` may never have been in the payload, so
 it matches line-wise and accepts that a commented-out session may map a name
 to a directory — an unused entry, against losing the mapping entirely. What
 they must share is the **name grammar**, and until this was unified they did
-not: a session declared `"Probe (AFP)"` was built under that name and
-attributed under `Probe`, and nothing downstream could tell.
+not: `attempts.py` matched `"?([A-Za-z0-9_']+)"?`, which stops at the first
+character outside that class *inside* the quotes, so a session declared
+`"HOL-Analysis"` was built under that name and attributed under `HOL` — a
+different real session — and nothing downstream could tell.
 
-**Why not import `isabelle_query.common`**, which does this properly in 1015
-lines with a real tokenizer? The no-runtime-dependencies rule: the watchdog
-runs beside a build, and an unimportable dependency means an unsupervised,
-unrecorded build. The same call was already made for `run_guarded`, which came
-from that very module and is now six lines in `guard.py`. What is needed here
-is "the names in this file", not a session graph.
+**Why not import `isabelle-layout`**, which does this properly with a real
+tokenizer? The no-runtime-dependencies rule: the watchdog runs beside a build,
+and an unimportable dependency means an unsupervised, unrecorded build. The
+same call was already made for `run_guarded`, which came from that same
+codebase and is now six lines in `guard.py`. What is needed here is "the names
+in this file", not a session graph.
 
 The cost is divergence, and the answer to divergence is agreement pinned by
-tests rather than by a shared import: `tests/test_roots.py` holds a
-conformance table produced by diffing against
-`isabelle_query.common.parse_root_sessions`. It found the two disagreements
-above. If Isabelle's syntax moves, that table is what fails.
+tests rather than by a shared import. `isabelle-layout` ships a **conformance
+corpus as package data** for exactly this arrangement — a consumer that cannot
+import it at runtime can still prove it agrees — so `tests/test_roots.py`
+reads that artefact (25 cases, each carrying the verdict of a real
+`isabelle sessions -d`) instead of holding a copy. It is declared as the
+`conformance` extra rather than in `test`, since it is not on PyPI yet and an
+unresolvable requirement would break `pip install -e ".[test]"`; without it,
+those five checks skip and say so. Fold it into `test` on publication.
+
+**The copy is what went wrong.** That table was eight literals transcribed
+into `tests/test_roots.py`, produced by diffing one parser against another
+with no Isabelle involved — and four of the eight are ROOTs `isabelle build`
+refuses (`session "Probe (AFP)"`, a bare `session With.Dots-2`, two sessions
+sharing a directory, an unterminated comment). So it asserted behaviour
+Isabelle does not have, and the docstring it justified told a story that could
+not have happened. The defect was real; the illustration was invented. This is
+the same species as the `loci` audit that was listed but never existed: a
+hand-maintained fixture beside the thing it describes.
 
 Two details worth keeping:
 
@@ -594,6 +610,7 @@ hand-roll a runner every contributor then has to learn.
 
 ```sh
 pip install -e ".[test]"
+pip install ../isabelle-layout          # the ROOT conformance corpus
 pytest -m "not slow and not isabelle"   # pure logic — seconds
 pytest -m "not isabelle"                # + real subprocesses
 pytest                                  # + a real isabelle build

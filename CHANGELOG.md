@@ -57,23 +57,55 @@ still regenerates.
   Deliberately unlike every other subcommand, which take a positional corpus:
   an audit resolves its own corpus and fits its own attribution, so routing it
   through the shared one would do that work twice and could do it two ways.
+- **`isabelle-layout` as a `conformance` extra.** It is the ROOT and
+  theory-header parser extracted from `isabelle_query.common`, and it ships
+  its conformance corpus as *package data* precisely so that a consumer which
+  cannot import it at runtime can still prove it agrees. That is this package:
+  `roots.py` stays a 15-line reader and stays uncalled by anything external,
+  because a runtime dependency would put an import between `isabelle-build`
+  and a build.
+
+  A separate extra rather than a line in `test`, because it is not on PyPI yet
+  and an unresolvable requirement would break the documented
+  `pip install -e ".[test]"`. Install it from the sibling checkout
+  (`pip install ../isabelle-layout`); without it the five corpus checks skip
+  and say which command would enable them. Fold it into `test` on publication.
 
 ### Fixed
 
 - **Two ROOT parsers in one package disagreed about session names.**
-  `build.py` and `attempts.py` each had a regex, and measured against
-  `isabelle-query`'s tokenizing parser both were wrong in different ways: a
-  quoted name truncated at its first space (`"Probe (AFP)"` → `Probe`) and a
-  bare one at its first `.` or `-` (`HOL-Analysis` → `HOL`). A session built
-  under one name and attributed under another is undetectable downstream.
-  Both now share `roots.py`, whose conformance table was produced by diffing
-  against that parser.
+  `build.py` and `attempts.py` each had a regex, and `attempts.py`'s
+  (`"?([A-Za-z0-9_']+)"?`) stopped at the first character outside that class
+  *inside* the quotes: `session "HOL-Analysis"` was built under that name and
+  attributed under `HOL`, a different real session. `"With.Dots-2"` truncated
+  to `With`. A session built under one name and attributed under another is
+  undetectable downstream. Both now share `roots.py`.
 - **A session commented out across lines was read as real**, so a project
   with one live session and one `(* … *)`'d one was refused as ambiguous
   rather than derived. Isabelle's comments nest and its cartouches carry free
   text; both are now stripped before matching. `attempts.py` still matches
   line-wise, because it reads diff fragments and cannot strip what it cannot
   see.
+- **The ROOT conformance table asserted behaviour Isabelle does not have.**
+  Its eight cases were transcribed into `tests/test_roots.py` from a diff of
+  one parser against another, with no Isabelle involved. Checked against a
+  real `isabelle sessions -d` (Isabelle2025-2), **four of the eight are ROOTs
+  `isabelle build` refuses**: `session "Probe (AFP)"` (a quoted name may not
+  contain spaces), a bare `session With.Dots-2` (bare names take `.` but not
+  `-`), two sessions sharing a directory, and an unterminated comment.
+
+  So the fixture that justified unifying the parsers was partly fiction, and
+  the docstring it supported described a build — `"Probe (AFP)"` built under
+  that name — that could not have occurred. The defect was real: the valid
+  spelling is `"HOL-Analysis"`, quoted, which the old regex truncated to
+  `HOL`. The illustration was invented.
+
+  `tests/test_roots.py` now reads `isabelle-layout`'s shipped corpus: 25
+  cases, each carrying Isabelle's own verdict, and the two kinds kept apart.
+  A case Isabelle *accepts* has a ground truth, so disagreement is a defect;
+  a case it *rejects* has none, so agreement there is only about not
+  inventing two different silent renamings. `roots.py` agrees on all 25,
+  unchanged — this corrected the record rather than the parser.
 - **`contention.cpu_time_s` reported the spawn baseline on a run too short to
   sample.** The first CPU sample is taken when the child is spawned, as the
   baseline the first duty cycle is measured against; it says what the tree had

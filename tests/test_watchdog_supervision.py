@@ -294,16 +294,37 @@ def test_an_undetectable_power_state_scales_nothing(watchdog, stub_bin):
 # real one on a spinner reports whatever the machine happens to be doing while
 # the suite runs.
 
-def cpu_stub(stub_bin, tmp_path, cs_per_call: int):
-    """A fake `ps` whose reported tree CPU advances `cs_per_call` centiseconds
-    per sample.  With CPU_SAMPLE_INTERVAL=1 that is the duty cycle x 100."""
-    counter = tmp_path / "ps-calls"
+def cpu_stub(stub_bin, tmp_path, duty_pct: int):
+    """A fake `ps` reporting a tree that has used `duty_pct`% of a core.
+
+    Reported CPU advances with **wall time since the first call**, not per
+    call, and that distinction is the whole of the fixture.  Advancing per
+    call made the measured duty `advance x calls-per-second`, and
+    calls-per-second is only approximately one: the sampler fires from a
+    `select()` loop polling on its own timer, so a poll that lands a few
+    milliseconds early skips a sample and the next window spans two seconds
+    with one call in it -- halving the duty and, in the `running` case,
+    flipping the verdict to `starved` so the build was never killed at all.
+    Two tests failed roughly a third of the time on that.
+
+    Tying the stub to the clock makes the answer `duty_pct/100` whatever the
+    sampling cadence does, which is what these tests mean to say.  Nothing
+    about the code under test changed; the fixture was measuring itself.
+    """
+    started = tmp_path / "ps-start"
     stub_bin("ps", f"""
-n=$(cat {counter} 2>/dev/null || echo 0)
-n=$((n + 1))
-echo $n > {counter}
-cs=$((n * {cs_per_call}))
-printf '  0:%d.%02d\\n' $((cs / 100)) $((cs % 100))
+exec python3 - <<'EOF'
+import os, time
+started, duty = {str(started)!r}, {duty_pct} / 100.0
+now = time.time()
+if not os.path.exists(started):
+    with open(started, "w") as f:
+        f.write(repr(now))
+with open(started) as f:
+    t0 = float(f.read())
+cs = int((now - t0) * duty * 100)
+print("  %d:%02d.%02d" % (cs // 6000, (cs // 100) % 60, cs % 100))
+EOF
 """)
 
 
@@ -328,7 +349,13 @@ def test_a_starved_build_is_given_back_the_time_it_did_not_get(watchdog, stub_bi
     assert run.code == 0, run                             # 3s x 4 = 12s > 5s
     c = run.record["contention"]
     assert c["verdict"] == "starved"
-    assert c["load_factor_applied"] == 4.0
+    # A band, not `== 4.0`: the factor is `1/duty` over a *measured* duty, so
+    # it lands near 4 and not on it.  The old exact assertion held only
+    # because the fixture's duty came out slightly *low* and `min(cap, …)`
+    # clamped the result back to the cap -- reading as precision when it was
+    # saturation.  An accurate fixture gives 3.9-something, which is the
+    # honest answer.
+    assert 3.5 <= c["load_factor_applied"] <= 4.0
 
 
 def test_a_build_running_flat_out_still_trips_its_budget(watchdog, stub_bin,
