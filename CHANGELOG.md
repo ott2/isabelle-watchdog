@@ -94,6 +94,12 @@ still regenerates.
   Until `isabelle-layout` reaches PyPI, install it from the sibling checkout
   (`pip install ../isabelle-layout`) before `pip install -e ".[test]"`.
 
+- `$BUILD_SESSION_DIR` unset no longer means `.`. It means "wherever the ROOT
+  declaring this session lives", which is the same answer in the case `.` was
+  right and the correct one otherwise. If no ROOT git can see declares the
+  named session, it still falls back to `.` — a project whose ROOT is outside
+  git's view is no worse off than before.
+
 ### Fixed
 
 - **Two ROOT parsers in one package disagreed about session names.**
@@ -106,9 +112,9 @@ still regenerates.
 - **A session commented out across lines was read as real**, so a project
   with one live session and one `(* … *)`'d one was refused as ambiguous
   rather than derived. Isabelle's comments nest and its cartouches carry free
-  text; both are now stripped before matching. `attempts.py` still matches
-  line-wise, because it reads diff fragments and cannot strip what it cannot
-  see.
+  text; both are now stripped before matching. `attempts.py` reads diff
+  fragments, so it can only strip a comment whose `(*` was actually captured
+  — one opened outside the hunk is invisible to anything.
 - **The ROOT conformance table asserted behaviour Isabelle does not have.**
   Its eight cases were transcribed into `tests/test_roots.py` from a diff of
   one parser against another, with no Isabelle involved. Checked against a
@@ -190,14 +196,6 @@ still regenerates.
   is `corpus.UNTRACKED_CAPTURE_FIX`, which `audits/zerodiff.py` now shares
   instead of keeping a second copy that could come to disagree about which
   records are explained.
-
-### Changed
-
-- `$BUILD_SESSION_DIR` unset no longer means `.`. It means "wherever the ROOT
-  declaring this session lives", which is the same answer in the case `.` was
-  right and the correct one otherwise. If no ROOT git can see declares the
-  named session, it still falls back to `.` — a project whose ROOT is outside
-  git's view is no worse off than before.
 
 ## [0.3.0] — 2026-08-07
 
