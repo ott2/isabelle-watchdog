@@ -1,133 +1,91 @@
-"""roots.py — what an Isabelle ROOT declares.
+"""roots.py — reading what a ROOT declares, including when it is not a file.
 
-Two callers with genuinely different inputs, which is why this is one module
-and not one function:
+The grammar is `isabelle_layout`'s, entirely. This module holds no regex, no
+comment stripper and no notion of what a session name may contain; it exists
+because one of the two callers here does not have a ROOT *file* to hand, and
+`isabelle_layout.parse_root_sessions` takes a path.
 
-  - `build.py` has a **whole ROOT file** and must know which sessions exist,
-    because it derives what to build from that. It can and must ignore
-    commented-out declarations.
-  - `attempts.py` has **fragments of a captured diff** — added and context
-    lines from a hunk, with no guarantee that an enclosing `(*` was ever in
-    the payload. It cannot strip comments it cannot see, so it matches line
-    by line and accepts that a commented-out session may map a name to a
-    directory. That costs an unused entry in an attribution map; refusing to
-    match at all would cost the mapping entirely.
+  - `build.py` has a real ROOT and asks which sessions it declares, to derive
+    what to build. `sessions_in` is a one-line adapter for it.
+  - `attempts.py` has **fragments of a captured diff** — the added and context
+    lines of a hunk in a ROOT — and asks which session names they mention, to
+    map a name to the directory it was declared in. `sessions_in_fragment`
+    is for that.
 
-What they must share is the **name grammar**, and they did not. `attempts.py`
-matched `"?([A-Za-z0-9_']+)"?`, which stops at the first character outside
-that class *inside* the quotes:
+Both go through the same parser, which is the point. A private copy here used
+to spell names differently from `build.py`'s, and `session "HOL-Analysis"` was
+built under that name while the record was attributed to `HOL` — a different
+real session, with nothing downstream able to tell.
 
-    session "HOL-Analysis"    -> `HOL-Analysis`, but `HOL` in attempts.py
-    session "With.Dots-2"     -> `With.Dots-2`, but `With` in attempts.py
+**Why a dependency now, when there deliberately was none.** The old rule said
+the watchdog runs beside a build so anything it imports can break one, and it
+was formed against `isabelle_query.common` — a module inside an 11k-line
+querying CLI, with that tool's release cadence and its userbase's constraints
+attached. `isabelle-layout` is that parser extracted for exactly this reason:
+it declares no dependencies of its own, so the transitive tree stays empty,
+and it is the parser rather than a tool that happens to contain one. The rule
+was a proxy for the weight, and the weight is gone.
 
-Both are ROOTs Isabelle accepts, and both truncate to a name that is either
-a different real session or nothing at all. Two spellings of "what is a
-session called" inside one package is the failure this repo documents
-everywhere else in a different guise: `build.py` would build `HOL-Analysis`
-while `attempts.py` attributed the record to a session named `HOL`, and
-nothing downstream could tell.
+Nor does the import land mid-build. Both callers reach it *before* `isabelle
+build` is spawned (deriving the session) or long *after* (reading a corpus),
+so a failure here is in the class `build.py` already treats as configuration —
+loud, before anything runs, with the fix in the message — rather than the
+class `guard.py` swallows.
 
-(An earlier version of this note used `session "Probe (AFP)"` and a bare
-`session With.Dots-2` as the examples. Neither is a ROOT `isabelle build`
-will accept — checked against Isabelle2025-2 — so no such build could have
-happened. The defect was real; those illustrations were not. See the head of
-`tests/test_roots.py`, which is where the mistake came from.)
+**The fragment bridge.** `sessions_in_fragment` writes the fragment to a
+temporary ROOT and parses that, because the public entry point takes a path.
+Sixty hunks across both real corpora, so the cost is nothing; it is a bridge
+rather than a design, and a text-taking entry point upstream would remove it.
 
-**Why not import `isabelle-layout`**, which does all of this properly with a
-real tokenizer? Because this package has no runtime dependencies on purpose:
-it runs beside a build, and anything it imports is something that can break
-one — an unsupervised, unrecorded build is the exact failure the watchdog
-exists to prevent. The same call was made for `run_guarded`, six lines in
-`guard.py`. What is needed here is "the names in this file", not a session
-graph with parent resolution and import classification.
-
-The cost of that decision is divergence, and the answer to divergence is
-agreement pinned by tests rather than by a shared import. `isabelle-layout`
-ships a conformance corpus as package data for exactly this arrangement — a
-consumer that cannot import it at runtime can still prove it agrees — and
-`tests/test_roots.py` checks this file against that artefact rather than
-against a transcription of it. If Isabelle's syntax moves, the corpus is
-regenerated against the new release and those tests are what fail.
+Parsing the fragment as a *unit* rather than line by line is strictly better
+than what it replaces: a `(* … *)` wholly inside the hunk now correctly hides
+what it encloses, where the line-wise reader saw through it. What neither can
+do is see an enclosing `(*` that was never in the payload — so a commented-out
+session may still map a name to a directory. That costs an unused entry in an
+attribution map, against losing the mapping entirely.
 """
 
 from __future__ import annotations
 
-import re
+import tempfile
 from pathlib import Path
 
-# A session name: quoted, or bare.
+from isabelle_layout import parse_root_sessions
+
+# `isabelle_layout` names a `session` stanza that has no name `<anon>` --
+# a bare `session` keyword with nothing after it, which Isabelle rejects
+# (`error: bad input`).  It is the *absence* of a name, so it is dropped
+# here rather than treated as one.
 #
-# Quoted is the case that matters.  Isabelle accepts `.` in a bare name but
-# not `-` or `'` (Isabelle2025-2), so `HOL-Analysis` and `With.Dots-2` must be
-# written `"HOL-Analysis"` and `"With.Dots-2"` — and `[^"]+` is what keeps
-# them whole.  Anything up to the closing quote is the name, including spaces,
-# even though Isabelle rejects those: over-accepting here costs an entry in an
-# attribution map for a ROOT nobody can build, and under-accepting silently
-# renames a session that builds fine.
-#
-# The bare alternative admits `-` and `'` for the same reason — they only
-# occur in input a build would refuse, and reading such a line as a *different*
-# session is worse than reading it as an unbuildable one.
-SESSION_DECL = re.compile(r'^\s*session\s+(?:"([^"]+)"|([A-Za-z0-9_\'.\-]+))')
-
-# Isabelle's block comments nest, and its cartouches (`\<open> … \<close>`)
-# carry free text — a `description \<open>…\<close>` spanning lines can hold
-# anything, including the word `session` at the start of one.
-_COMMENT_TOKENS = re.compile(r"\(\*|\*\)|\\<open>|\\<close>")
+# This is not hypothetical for the fragment reader: the tokeniser's
+# identifier class excludes `#`, so a line like `# not a session` reduces to
+# the keyword alone, and prose reaching a hunk boundary does that easily.
+# Letting it through would put an `<anon> -> some/directory` entry into an
+# attribution map, where a name that cannot be built has no business.
+_ANON = "<anon>"
 
 
-def session_in_line(line: str) -> str | None:
-    """The session a single line declares, ignoring any comment context.
-
-    For callers holding fragments rather than files. A commented-out
-    declaration matches, because deciding otherwise needs the enclosing text.
-    """
-    m = SESSION_DECL.match(line)
-    return (m.group(1) or m.group(2)) if m else None
-
-
-def strip_comments(text: str) -> str:
-    """Blank out `(* … *)` and `\\<open> … \\<close>` spans, keeping newlines.
-
-    Newlines survive so line-oriented matching downstream still sees the
-    file's shape; the content inside a comment becomes spaces, so a
-    declaration inside one cannot match. Nesting is counted rather than
-    matched non-greedily, because Isabelle's comments nest and a non-greedy
-    `.*?` closes at the first `*)`, re-exposing the tail of an outer comment.
-    """
-    out, depth, start = list(text), 0, 0
-    for m in _COMMENT_TOKENS.finditer(text):
-        if m.group(0) in ("(*", "\\<open>"):
-            if depth == 0:
-                start = m.start()
-            depth += 1
-        elif depth:
-            depth -= 1
-            if depth == 0:
-                _blank(out, start, m.end())
-    # An unterminated span runs to end of file, which is what Isabelle does.
-    if depth:
-        _blank(out, start, len(out))
-    return "".join(out)
-
-
-def _blank(chars: list[str], start: int, end: int) -> None:
-    """Spaces, but keep newlines: line-oriented matching downstream still has
-    to see the file's shape."""
-    for i in range(start, end):
-        if chars[i] != "\n":
-            chars[i] = " "
-
-
-def sessions_in_text(text: str) -> list[str]:
-    """Sessions a whole ROOT declares, in file order, comments excluded."""
-    return [s for line in strip_comments(text).splitlines()
-            if (s := session_in_line(line))]
+def _named(sessions) -> list[str]:
+    return [s.name for s in sessions if s.name != _ANON]
 
 
 def sessions_in(root_file: Path) -> list[str]:
-    """Sessions a ROOT file declares.  Unreadable file → none."""
+    """Sessions a ROOT file declares, in file order.  Unreadable → none."""
     try:
-        return sessions_in_text(root_file.read_text(errors="replace"))
+        return _named(parse_root_sessions(Path(root_file)))
     except OSError:
         return []
+
+
+def sessions_in_fragment(lines: list[str]) -> list[str]:
+    """Sessions named in a fragment of a ROOT — a captured diff hunk's worth.
+
+    `lines` are ROOT source lines with their diff prefixes already stripped.
+    """
+    text = "\n".join(lines)
+    if "session" not in text:            # the overwhelming majority of hunks
+        return []
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d) / "ROOT"
+        root.write_text(text)
+        return _named(parse_root_sessions(root))

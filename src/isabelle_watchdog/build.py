@@ -79,10 +79,14 @@ DEFAULT_SESSION = os.environ.get("BUILD_SESSION")
 DEFAULT_SESSION_DIR = os.environ.get("BUILD_SESSION_DIR")
 
 
-# ROOT parsing lives in `roots.py`, shared with `attempts.py`.  It was two
-# regexes, one here and one there, and they disagreed: a session declared as
-# `"Probe (AFP)"` built under that name and was attributed under `Probe`.  See
-# that module for why `isabelle_query.common` is not imported instead.
+# ROOT parsing is `isabelle-layout`'s, reached through `roots.py` and shared
+# with `attempts.py`.  It was two regexes, one here and one there, and they
+# disagreed: `session "HOL-Analysis"` built under that name and was attributed
+# to `HOL`.  Neither survives; see `roots.py`.
+#
+# What stays here is *which* ROOTs to read, which is a question about this
+# project rather than about ROOT syntax -- `root_files` asks git, deliberately
+# (below), where `isabelle_layout.discover_roots` walks the filesystem.
 sessions_in = roots.sessions_in
 
 

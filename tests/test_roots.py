@@ -1,43 +1,23 @@
-"""What a ROOT declares, and the contract with `isabelle-layout`.
+"""What this project needs from `isabelle-layout`, and the fragment adapter.
 
-`roots.py` is a 15-line reader of session *names*, deliberately not an import
-of the real parser: this package declares no runtime dependencies because it
-runs beside a build, and anything it imports is something that can break one
-(an unsupervised, unrecorded build is what the watchdog exists to prevent).
+`roots.py` no longer holds a ROOT grammar -- there is one parser now, and it
+is `isabelle_layout`'s. So this is not a conformance suite: whether that
+parser matches Isabelle is its own repository's problem, checked there against
+a corpus it regenerates from a real `isabelle sessions -d`. Duplicating that
+here would mean asserting a dependency's behaviour back at it, and failing
+whenever it legitimately improved.
 
-That buys independence and costs divergence, so agreement is pinned here
-instead.  `isabelle-layout` ships its conformance corpus as **package data**
-for precisely this arrangement -- a consumer that cannot import it at runtime
-can still prove it agrees -- and this module consumes that artefact rather
-than a copy of it.
+What is left is genuinely local, and it is two things.
 
-**The copy is what went wrong before.** These cases used to be eight literals
-transcribed into this file, produced by diffing against
-`isabelle_query.common.parse_root_sessions` -- one parser checked against
-another, with no Isabelle anywhere near it.  Four of the eight were ROOTs
-`isabelle build` *refuses*:
+**A fragment is not a file.** `attempts.py` reads the added and context lines
+of a hunk in a ROOT, which is a ROOT with holes in it, and the public entry
+point takes a path. Everything about that seam belongs here.
 
-    session "Probe (AFP)" = HOL +      error: session ... (line 1)
-    session With.Dots-2 = HOL +        error: keyword ... (line 1)
-    session A = HOL +                  *** Duplicate use of directory
-    session B = A +
-    session A = HOL +                  error: bad input (line 2)
-    (* oops
-
-So the table asserted things about Isabelle that Isabelle does not do, and the
-docstring it justified told a story -- a session *built* as `Probe (AFP)` and
-attributed as `Probe` -- that could not have happened, because that ROOT does
-not build.  The underlying defect was real and the illustration was not; see
-`roots.py`, where it now uses the spelling Isabelle accepts.
-
-The corpus keeps the distinction the transcription lost.  A case Isabelle
-`accepts` has a ground truth and any parser that disagrees is wrong.  A case
-it `rejects` has none, and exists only so that readers agree on malformed
-input rather than each inventing a different silent renaming.  Both are
-checked, for different reasons and with different force.
-
-If Isabelle's ROOT syntax moves, `isabelle-layout` regenerates that corpus
-against the new release and this is what fails.
+**The names this project acts on.** `build.py` builds what a ROOT declares and
+`attempts.py` attributes records to it, so the two must agree about spelling
+-- they once did not, and `session "HOL-Analysis"` was built under that name
+and attributed to `HOL`. A handful of cases pin the shapes real projects use.
+They are a statement of requirements, not a re-derivation of the grammar.
 """
 from __future__ import annotations
 
@@ -45,145 +25,87 @@ import pytest
 
 from isabelle_watchdog import roots
 
-# Scoped to the checks that need it, rather than `importorskip` at module
-# level: the comment, fragment and line-structure tests below are about *this*
-# parser and need no reference at all, and skipping them along with the corpus
-# would quietly halve what a contributor without the sibling package runs.
-try:
-    import isabelle_layout as layout
-    from isabelle_layout import conformance
-    CASES = conformance.cases()
-except ImportError:                      # pragma: no cover - environment
-    layout = conformance = None
-    CASES = []
 
-needs_layout = pytest.mark.skipif(
-    layout is None,
-    reason="needs isabelle-layout: `pip install ../isabelle-layout`, or "
-           "`.[conformance]` once it is published.  Without it the ROOT name "
-           "grammar is checked against nothing, which is the state this "
-           "module exists to end")
-
-ACCEPTED = [c for c in CASES if c["isabelle"] == "accepts"]
-REJECTED = [c for c in CASES if c["isabelle"] != "accepts"]
-
-
-def ids(cases):
-    return [c["id"] for c in cases]
+# The spellings the two real projects and the AFP actually contain.  If one of
+# these ever changes meaning, something here builds or attributes the wrong
+# session, so the assertion is about *this* package regardless of where the
+# parsing happens.
+REQUIRED = [
+    ("plain",            "session Probe = HOL +\n",            ["Probe"]),
+    ("quoted",           'session "MHComputation" = HOL +\n',  ["MHComputation"]),
+    # The defect that forced one parser: `[A-Za-z0-9_']+` stopped inside the
+    # quotes, and `HOL-Analysis` is a session that exists.
+    ("quoted-hyphen",    'session "HOL-Analysis" = HOL +\n',   ["HOL-Analysis"]),
+    ("quoted-dots",      'session "With.Dots-2" = HOL +\n',    ["With.Dots-2"]),
+    ("in-subdir",        "session Probe in sub = HOL +\n",     ["Probe"]),
+    ("groups",           "session Probe (slow) = HOL +\n",     ["Probe"]),
+    ("qualified-parent", 'session Probe = "HOL-Library" +\n',  ["Probe"]),
+    ("two",              "session A = HOL +\n\nsession B in sub = A +\n",
+                                                               ["A", "B"]),
+    ("chapter-first",    "chapter AFP\n\nsession Probe = HOL +\n", ["Probe"]),
+    ("commented-out",    "(* session Retired = HOL + *)\nsession Live = HOL +\n",
+                                                               ["Live"]),
+    ("no-session",       "chapter_definition AFP\n",           []),
+]
 
 
-# ------------------------------------------------------------- conformance
-
-@needs_layout
-@pytest.mark.parametrize("case", ACCEPTED, ids=ids(ACCEPTED))
-def test_a_root_isabelle_accepts_is_read_the_way_isabelle_reads_it(case):
-    """Ground truth, so a disagreement here is a defect and not a difference.
-
-    `why` on each case says what it would catch; it is printed on failure
-    because a bare "expected [X] got [Y]" over a two-line ROOT is not enough
-    to tell whether the fix is in the parser or in the expectation.
-    """
-    want = conformance.session_names(case)
-    got = roots.sessions_in_text(case["root"])
-    assert got == want, f"{case['id']}: {case['why']}\n{case['root']!r}"
-
-
-@needs_layout
-@pytest.mark.parametrize("case", REJECTED, ids=ids(REJECTED))
-def test_a_root_isabelle_refuses_is_read_the_way_the_reference_reads_it(case):
-    """No ground truth -- `isabelle build` would not accept this at all.
-
-    Checked anyway, and this is the weaker claim of the two: the corpus
-    records what `isabelle-layout` does, so agreeing means the two readers
-    fail the same way rather than silently producing two different names for
-    input neither can build.  A change here is a decision, not a bug.
-    """
-    want = conformance.session_names(case)
-    got = roots.sessions_in_text(case["root"])
-    assert got == want, f"{case['id']}: {case['why']}\n{case['root']!r}"
-
-
-@needs_layout
-def test_the_corpus_is_checked_against_a_real_isabelle():
-    """The corpus's value is its provenance, so a consumer should assert it
-    has some.  A fixture that stopped being regenerated would otherwise go on
-    passing forever while Isabelle moved underneath it."""
-    meta = conformance.load()
-    assert meta["verified_against"].startswith("Isabelle")
-    assert ACCEPTED and REJECTED, "both kinds of case must be present"
-
-
-@needs_layout
-def test_the_two_parsers_agree_directly_not_only_via_the_corpus(tmp_path):
-    """The corpus is a fixed set; this is the live comparison.
-
-    They are different checks: the corpus survives `isabelle-layout` being
-    wrong (its cases carry Isabelle's own verdict), and this one survives the
-    corpus being incomplete.  Neither subsumes the other.
-
-    Through the file-taking public entry point, which is the one a consumer
-    would call -- `sessions_in` is this package's equivalent, and the pair is
-    what has to agree.
-    """
-    for case in CASES:
-        root = tmp_path / case["id"] / "ROOT"
-        root.parent.mkdir(parents=True, exist_ok=True)
-        root.write_text(case["root"])
-        assert roots.sessions_in(root) == \
-            [s.name for s in layout.parse_root_sessions(root)], case["id"]
-
-
-# ------------------------------------------------------------------ comments
-
-def test_a_nested_comment_closes_at_the_outer_end():
-    """Isabelle's block comments nest.  A non-greedy `.*?` closes at the first
-    `*)` and re-exposes the tail of the outer comment, which would resurrect
-    exactly the declaration that was commented out."""
-    text = "(* outer (* inner *)\nsession Ghost = HOL +\n*)\nsession Live = HOL +\n"
-    assert roots.sessions_in_text(text) == ["Live"]
-
-
-def test_an_unterminated_comment_swallows_the_rest():
-    """Isabelle rejects this outright (`error: bad input`), so there is no
-    behaviour to conform to -- only a choice.  Swallowing to end of file is
-    the same choice `isabelle-layout` makes, and it beats the alternative:
-    guessing otherwise would mean a typo'd `(*` yields a session list nobody
-    can build, silently."""
-    assert roots.sessions_in_text("session A = HOL +\n(* oops\nsession B = A +\n") \
-        == ["A"]
-
-
-def test_blanking_keeps_the_line_structure():
-    """Content becomes spaces, newlines survive: matching downstream is
-    line-oriented and has to see the file's shape."""
-    text = "session A = HOL +\n(*\nx\n*)\nsession B = A +\n"
-    assert roots.strip_comments(text).count("\n") == text.count("\n")
-
-
-# ----------------------------------------------------- fragments versus files
-
-def test_a_line_is_matched_without_its_context():
-    """`attempts.py` reads added and context lines out of a captured diff
-    hunk, where an enclosing `(*` may never have been in the payload.  It
-    cannot strip what it cannot see."""
-    assert roots.session_in_line("session Probe = HOL +") == "Probe"
-    assert roots.session_in_line("  theories") is None
-    assert roots.session_in_line("chapter Foo") is None
-
-
-@needs_layout
-def test_the_two_readers_share_one_name_grammar():
-    """The property that was broken.  Whole-file and line-wise reading differ
-    on *comments* by design; differing on what a session is *called* meant
-    building one name and attributing another."""
-    for case in CASES:
-        named = [n for n in
-                 (roots.session_in_line(l) for l in case["root"].splitlines())
-                 if n]
-        # Every name the whole-file reader keeps is spelt the same way by the
-        # line reader; the line reader may additionally see commented ones.
-        assert set(roots.sessions_in_text(case["root"])) <= set(named), case["id"]
+@pytest.mark.parametrize("label, text, want", REQUIRED,
+                         ids=[c[0] for c in REQUIRED])
+def test_a_root_file_yields_the_names_this_project_acts_on(tmp_path, label,
+                                                           text, want):
+    root = tmp_path / "ROOT"
+    root.write_text(text)
+    assert roots.sessions_in(root) == want
 
 
 def test_an_unreadable_root_yields_nothing(tmp_path):
     assert roots.sessions_in(tmp_path / "absent") == []
+
+
+# ------------------------------------------------------- fragments, not files
+
+@pytest.mark.parametrize("label, text, want", REQUIRED,
+                         ids=[c[0] for c in REQUIRED])
+def test_a_whole_root_read_as_a_fragment_reads_the_same(label, text, want):
+    """The seam must not change the answer.  A hunk covering a whole ROOT is
+    the case where the two readers are asked the identical question."""
+    assert roots.sessions_in_fragment(text.splitlines()) == want
+
+
+def test_a_comment_inside_the_fragment_hides_what_it_encloses():
+    """Better than the line-wise reader this replaced, which saw through it.
+
+    Parsing the hunk as a unit is what buys this: the `(*` is *in* the
+    payload, so there is no reason to guess.
+    """
+    assert roots.sessions_in_fragment(
+        ["(*", "session Old = HOL +", "*)", "session Live = HOL +"]) == ["Live"]
+
+
+def test_a_comment_opened_outside_the_fragment_cannot_be_seen():
+    """The limit, and it is a property of diffs rather than of parsing: the
+    enclosing `(*` was never captured, so nothing can know it was there.
+
+    A commented-out session therefore still maps its name to a directory.
+    That costs an unused entry in an attribution map, against losing the
+    mapping entirely -- which is the trade `attempts.py` documents.
+    """
+    assert roots.sessions_in_fragment(["session Old = HOL +", "*)"]) == ["Old"]
+
+
+def test_a_nameless_session_stanza_is_not_a_name():
+    """`isabelle_layout` calls a `session` keyword with nothing after it
+    `<anon>`.  Isabelle rejects that outright, so it is the absence of a name
+    and must not reach an attribution map as one.
+
+    Reached more easily than it looks: the tokeniser's identifier class
+    excludes `#`, so `# not a session` reduces to the bare keyword, and prose
+    landing on a hunk boundary does that without trying.
+    """
+    assert roots.sessions_in_fragment(["# not a session"]) == []
+    assert roots.sessions_in_fragment(["session"]) == []
+
+
+def test_a_fragment_with_no_declaration_yields_nothing():
+    assert roots.sessions_in_fragment(["  theories", "    X", "chapter Foo"]) == []
+    assert roots.sessions_in_fragment([]) == []

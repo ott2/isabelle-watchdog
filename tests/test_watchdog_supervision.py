@@ -294,37 +294,42 @@ def test_an_undetectable_power_state_scales_nothing(watchdog, stub_bin):
 # real one on a spinner reports whatever the machine happens to be doing while
 # the suite runs.
 
-def cpu_stub(stub_bin, tmp_path, duty_pct: int):
-    """A fake `ps` reporting a tree that has used `duty_pct`% of a core.
+def cpu_stub(stub_bin, tmp_path, cs_per_call: int):
+    """A fake `ps` whose reported tree CPU advances `cs_per_call` centiseconds
+    per sample.  With CPU_SAMPLE_INTERVAL=1 that is the duty cycle x 100.
 
-    Reported CPU advances with **wall time since the first call**, not per
-    call, and that distinction is the whole of the fixture.  Advancing per
-    call made the measured duty `advance x calls-per-second`, and
-    calls-per-second is only approximately one: the sampler fires from a
-    `select()` loop polling on its own timer, so a poll that lands a few
-    milliseconds early skips a sample and the next window spans two seconds
-    with one call in it -- halving the duty and, in the `running` case,
-    flipping the verdict to `starved` so the build was never killed at all.
-    Two tests failed roughly a third of the time on that.
+    Pure `sh`, and that is a requirement rather than a style: this stands in
+    for `ps` inside the supervisor's `select()` loop, which is the loop whose
+    timing these tests are about.  A version that shelled out to `python3` to
+    read a real clock cost 0.34 s per call on a Mac with a security agent in
+    the exec path -- a hundred times the real thing -- and blocked the read
+    loop for that long each sample, inflating the runs it was measuring.  A
+    fixture must not perturb the quantity under test.
 
-    Tying the stub to the clock makes the answer `duty_pct/100` whatever the
-    sampling cadence does, which is what these tests mean to say.  Nothing
-    about the code under test changed; the fixture was measuring itself.
+    The cost of staying cheap is that duty is `cs_per_call x calls-per-second`
+    rather than a fraction of the clock, and calls-per-second is only
+    approximately one: the sampler fires on its own timer from a loop polling
+    with a 1 s timeout, so a poll landing a hair early skips a sample and the
+    next window spans two seconds with one call in it, halving the measured
+    duty.
+
+    Rather than chase determinism there, each test below is made robust to a
+    skipped sample -- which is a fair demand, since a real machine can deliver
+    an irregular sample too.  Two ways, and which one applies is worth
+    knowing when adding a case:
+
+      - where a *verdict* is asserted, the value has headroom, so halving it
+        does not cross a threshold;
+      - where a *factor* is asserted, `min(cap, 1/duty)` already saturates,
+        so halving the duty changes nothing.
     """
-    started = tmp_path / "ps-start"
+    counter = tmp_path / "ps-calls"
     stub_bin("ps", f"""
-exec python3 - <<'EOF'
-import os, time
-started, duty = {str(started)!r}, {duty_pct} / 100.0
-now = time.time()
-if not os.path.exists(started):
-    with open(started, "w") as f:
-        f.write(repr(now))
-with open(started) as f:
-    t0 = float(f.read())
-cs = int((now - t0) * duty * 100)
-print("  %d:%02d.%02d" % (cs // 6000, (cs // 100) % 60, cs % 100))
-EOF
+n=$(cat {counter} 2>/dev/null || echo 0)
+n=$((n + 1))
+echo $n > {counter}
+cs=$((n * {cs_per_call}))
+printf '  %d:%02d.%02d\\n' $((cs / 6000)) $((cs / 100 % 60)) $((cs % 100))
 """)
 
 
@@ -367,7 +372,11 @@ def test_a_build_running_flat_out_still_trips_its_budget(watchdog, stub_bin,
     would have made those two indistinguishable and quietly destroyed the
     cost-regression signal the tight wall budget exists to carry.
     """
-    cpu_stub(stub_bin, tmp_path, 100)                     # duty 1.0 -> factor 1
+    # Three cores' worth, not exactly one: a parallel build is the ordinary
+    # instance of this, and the headroom means a skipped sample still reads
+    # `running` rather than flipping to `starved` and sparing the build --
+    # which is how this test used to fail about a third of the time.
+    cpu_stub(stub_bin, tmp_path, 300)                     # duty 3.0 -> factor 1
     run = watchdog("sh", "-c", STARTED + "sleep 20", WATCHDOG_TIMEOUT=30,
                    **with_stub(stub_bin, WALL_TIMEOUT=3, LOAD_FACTOR_MAX=4.0))
     assert run.code == 124, run
@@ -433,12 +442,19 @@ def test_the_observations_are_recorded_not_just_the_verdict(watchdog, stub_bin,
                                                             tmp_path):
     """A record keeping only the applied factor could never answer "was that
     timeout a hard proof or a busy laptop" once the policy above it changed.
-    Duty cycle and CPU seconds stay meaningful whatever the policy becomes."""
-    cpu_stub(stub_bin, tmp_path, 50)
+    Duty cycle and CPU seconds stay meaningful whatever the policy becomes.
+
+    The band is wide because this test is about the fields being *stored*, and
+    a skipped sample halves the stub's duty (see `cpu_stub`).  What the number
+    means exactly is settled by the pure `duty_cycle` tests, which compute it
+    from synthetic samples and can assert 0.25 and 4.0 on the nose.
+    """
+    cpu_stub(stub_bin, tmp_path, 50)                      # ~half a core
     run = watchdog("sh", "-c", STARTED + "sleep 4", WATCHDOG_TIMEOUT=30,
                    **with_stub(stub_bin, WALL_TIMEOUT=6, LOAD_FACTOR_MAX=4.0))
     c = run.record["contention"]
-    assert 0.45 <= c["duty_cycle"] <= 0.55        # sampled, so not exact
+    assert 0.2 <= c["duty_cycle"] <= 0.6
+    assert c["verdict"] == "starved"               # the band stays inside one
     assert c["cpu_time_s"] > 0
     assert run.record["limits"]["load_factor_max"] == 4.0
 

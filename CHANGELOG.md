@@ -57,19 +57,42 @@ still regenerates.
   Deliberately unlike every other subcommand, which take a positional corpus:
   an audit resolves its own corpus and fits its own attribution, so routing it
   through the shared one would do that work twice and could do it two ways.
-- **`isabelle-layout` as a `conformance` extra.** It is the ROOT and
-  theory-header parser extracted from `isabelle_query.common`, and it ships
-  its conformance corpus as *package data* precisely so that a consumer which
-  cannot import it at runtime can still prove it agrees. That is this package:
-  `roots.py` stays a 15-line reader and stays uncalled by anything external,
-  because a runtime dependency would put an import between `isabelle-build`
-  and a build.
 
-  A separate extra rather than a line in `test`, because it is not on PyPI yet
-  and an unresolvable requirement would break the documented
-  `pip install -e ".[test]"`. Install it from the sibling checkout
-  (`pip install ../isabelle-layout`); without it the five corpus checks skip
-  and say which command would enable them. Fold it into `test` on publication.
+### Changed
+
+- **`isabelle-layout` is now a runtime dependency, and this package's ROOT
+  grammar is gone.** `roots.py` was a regex that agreed with the reference
+  parser; it is now a twenty-line adapter over
+  `isabelle_layout.parse_root_sessions`, holding no regex and no notion of
+  what a session name may contain.
+
+  The no-runtime-dependencies rule was formed against `isabelle_query.common`
+  — a parser reachable only by installing an 11k-line querying CLI, with that
+  tool's release cadence and its userbase's constraints attached. That weight
+  is what "anything it imports can break a build" was refusing.
+  `isabelle-layout` is the same parser split out for this purpose and declares
+  no dependencies of its own, so the transitive tree stays empty. Keeping a
+  private copy would have been applying the proxy after the thing it stood for
+  was fixed.
+
+  Nor does the import land mid-build: `build.py` reaches it while deriving the
+  session, *before* `isabelle build` is spawned, and `attempts.py` long after,
+  reading a corpus. A failure there is configuration — loud, before anything
+  runs — not the class `guard.py` swallows.
+
+  Two things stayed local, and are all `roots.py` now is. A **fragment is not
+  a file**: `attempts.py` reads the added and context lines of a hunk in a
+  ROOT, and the public entry point takes a path, so `sessions_in_fragment`
+  writes the fragment to a temporary ROOT and parses that (sixty hunks across
+  both real corpora, so the cost is nothing; a text-taking entry point
+  upstream would remove it). And **`<anon>` is not a name** — see *Fixed*.
+
+  Reading a hunk as a unit rather than line by line is also more accurate than
+  what it replaced: a `(* … *)` wholly inside the payload now hides what it
+  encloses, where the line-wise reader saw through it.
+
+  Until `isabelle-layout` reaches PyPI, install it from the sibling checkout
+  (`pip install ../isabelle-layout`) before `pip install -e ".[test]"`.
 
 ### Fixed
 
@@ -100,12 +123,22 @@ still regenerates.
   spelling is `"HOL-Analysis"`, quoted, which the old regex truncated to
   `HOL`. The illustration was invented.
 
-  `tests/test_roots.py` now reads `isabelle-layout`'s shipped corpus: 25
-  cases, each carrying Isabelle's own verdict, and the two kinds kept apart.
-  A case Isabelle *accepts* has a ground truth, so disagreement is a defect;
-  a case it *rejects* has none, so agreement there is only about not
-  inventing two different silent renamings. `roots.py` agrees on all 25,
-  unchanged — this corrected the record rather than the parser.
+  That fixture is gone with the grammar it pinned. `tests/test_roots.py` is
+  no longer a conformance suite: whether the parser matches Isabelle is
+  checked in `isabelle-layout`, against a corpus it regenerates from a real
+  `isabelle sessions -d`. Asserting a dependency's behaviour back at it would
+  fail whenever it legitimately improved. What is tested here is the fragment
+  seam and the spellings this project acts on.
+- **A nameless `session` stanza reached the attribution map as a name.**
+  `isabelle-layout` calls a `session` keyword with nothing after it `<anon>`,
+  and Isabelle rejects that input outright, so it is the *absence* of a name.
+  `roots.py` drops it.
+
+  Not hypothetical for the fragment reader: the tokeniser's identifier class
+  excludes `#`, so a line like `# not a session` reduces to the bare keyword,
+  and prose landing on a hunk boundary does that without trying. An
+  `<anon> -> some/directory` entry in an attribution map is a name nothing
+  can build.
 - **`contention.cpu_time_s` reported the spawn baseline on a run too short to
   sample.** The first CPU sample is taken when the child is spawned, as the
   baseline the first duty cycle is measured against; it says what the tree had

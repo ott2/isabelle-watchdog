@@ -386,15 +386,10 @@ _THY_BY_LINE = re.compile(r"\bline \d+ of ([A-Za-z][A-Za-z0-9_]*)")
 # produce a label.
 _TARGET_DOMINANCE = 3
 
-# `session <Name>` at the head of a ROOT stanza, via the grammar `build.py`
-# uses -- a private copy here spelt names differently, so a session declared
-# `"Probe (AFP)"` was built under that name and attributed under `Probe`.
-#
-# Line-wise, deliberately: this reads *fragments of a captured diff*, where
-# an enclosing `(*` may never have been in the payload, so a commented-out
-# declaration can map a name to a directory.  That costs an unused entry;
-# refusing to match without whole-file context would cost the mapping.
-_root_session = roots.session_in_line
+# Sessions named in a ROOT hunk, via the same parser `build.py` derives from.
+# A private regex here once spelt names differently, so `session
+# "HOL-Analysis"` was built under that name and attributed to `HOL`.
+_root_sessions = roots.sessions_in_fragment
 
 
 class Attribution:
@@ -542,12 +537,15 @@ class Attribution:
                 d = str(PurePosixPath(path).parent)
                 if d not in dirs:
                     continue
-                for line in body:
-                    if line[:1] not in ("+", " "):
-                        continue
-                    name = _root_session(line[1:])
-                    if name:
-                        out[name] = d
+                # The hunk is parsed as a unit rather than line by line, so a
+                # `(* … *)` wholly inside it hides what it encloses.  A
+                # comment that opened *before* the hunk is still invisible --
+                # nothing in the payload can show it -- and such a session
+                # still maps a name to a directory.  An unused entry, against
+                # losing the mapping.
+                visible = [l[1:] for l in body if l[:1] in ("+", " ")]
+                for name in _root_sessions(visible):
+                    out[name] = d
 
         # (2) Co-occurrence, for whatever route 1 could not see.
         tally: dict[str, dict[str, int]] = {}

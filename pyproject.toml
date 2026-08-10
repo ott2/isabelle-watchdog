@@ -20,36 +20,28 @@ classifiers = [
     "Topic :: Software Development :: Build Tools",
 ]
 
-# No runtime dependencies, deliberately.  This runs beside a build, and
-# anything it pulls in is something that can break one.  The only external
-# tool it needs is `git`, which the projects it records already require.
-dependencies = []
+# One runtime dependency, and the bar it had to clear is why there is only
+# one.  This runs beside a build, so anything it pulls in is something that
+# can break one; `isabelle-layout` itself declares no dependencies, so the
+# transitive tree stays empty, and it is the ROOT parser rather than a tool
+# that happens to contain one.  That distinction is the whole reason it was
+# split out of `isabelle-query`, whose 11k lines and release cadence were
+# what the no-dependencies rule was really refusing.
+#
+# `git` remains the other external requirement, and the projects this records
+# already require it.
+dependencies = ["isabelle-layout>=0.1.0"]
 
 # A *test* dependency is not a runtime one: nothing under `tests/` is
-# installed, imported by the package, or present when a build runs.  The
-# no-dependencies rule protects the build; it is not a reason to hand-roll a
+# installed, imported by the package, or present when a build runs.  Keeping
+# the runtime list short is the rule; it was never a reason to hand-roll a
 # test runner that every contributor then has to learn.
 [project.optional-dependencies]
 test = ["pytest>=7"]
-# `isabelle-layout` is the extracted ROOT/theory-header parser (formerly
-# `isabelle_query.common`).  It is what `roots.py` is checked *against*, never
-# what it calls: a runtime dependency here would put an import between
-# `isabelle-build` and a build, which is the failure the empty `dependencies`
-# above exists to prevent.  It ships its conformance corpus as package data
-# for exactly this arrangement.
-#
-# A separate extra rather than a line in `test` because it is not on PyPI yet,
-# and an unresolvable requirement would break the documented `pip install -e
-# ".[test]"` for everyone.  Fold it into `test` on publication; until then:
-#
-#     pip install ../isabelle-layout
-#
-# Without it `test_roots.py` skips the corpus checks and says so.
-conformance = ["isabelle-layout>=0.1.0"]
 
 [project.urls]
-Homepage = "https://github.com/salamon/isabelle-watchdog"
-Source = "https://github.com/salamon/isabelle-watchdog"
+Homepage = "https://github.com/ott2/isabelle-watchdog"
+Source = "https://github.com/ott2/isabelle-watchdog"
 
 [project.scripts]
 isabelle-watchdog = "isabelle_watchdog.watchdog:main"

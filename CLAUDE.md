@@ -451,43 +451,61 @@ has ten ROOTs declaring thirteen sessions and builds several of them, so it
 cannot be derived and keeps `$BUILD_SESSION` per invocation; the error lists
 all thirteen with their ROOTs.
 
-**One parser, two readings** (`roots.py`). `build.py` holds a whole ROOT and
-must ignore commented-out declarations; `attempts.py` holds *fragments of a
-captured diff*, where an enclosing `(*` may never have been in the payload, so
-it matches line-wise and accepts that a commented-out session may map a name
-to a directory — an unused entry, against losing the mapping entirely. What
-they must share is the **name grammar**, and until this was unified they did
-not: `attempts.py` matched `"?([A-Za-z0-9_']+)"?`, which stops at the first
-character outside that class *inside* the quotes, so a session declared
-`"HOL-Analysis"` was built under that name and attributed under `HOL` — a
-different real session — and nothing downstream could tell.
+**The ROOT parser is `isabelle-layout`'s** — the one runtime dependency, and
+the only place this package imports anything external. `roots.py` is a
+twenty-line adapter over `parse_root_sessions`, holding no regex and no notion
+of what a session name may contain.
 
-**Why not import `isabelle-layout`**, which does this properly with a real
-tokenizer? The no-runtime-dependencies rule: the watchdog runs beside a build,
-and an unimportable dependency means an unsupervised, unrecorded build. The
-same call was already made for `run_guarded`, which came from that same
-codebase and is now six lines in `guard.py`. What is needed here is "the names
-in this file", not a session graph.
+It used to hold a grammar, in two copies. `build.py` and `attempts.py` each
+had a regex and they disagreed: `attempts.py` matched `"?([A-Za-z0-9_']+)"?`,
+which stops at the first character outside that class *inside* the quotes, so
+`session "HOL-Analysis"` was built under that name and attributed to `HOL` — a
+different real session — with nothing downstream able to tell.
 
-The cost is divergence, and the answer to divergence is agreement pinned by
-tests rather than by a shared import. `isabelle-layout` ships a **conformance
-corpus as package data** for exactly this arrangement — a consumer that cannot
-import it at runtime can still prove it agrees — so `tests/test_roots.py`
-reads that artefact (25 cases, each carrying the verdict of a real
-`isabelle sessions -d`) instead of holding a copy. It is declared as the
-`conformance` extra rather than in `test`, since it is not on PyPI yet and an
-unresolvable requirement would break `pip install -e ".[test]"`; without it,
-those five checks skip and say so. Fold it into `test` on publication.
+**Why a dependency, given the no-dependencies rule.** The rule was formed
+against `isabelle_query.common`: a parser reachable only by installing an
+11k-line querying CLI, with that tool's release cadence and its userbase's
+constraints attached. That is what "anything it imports is something that can
+break a build" was really refusing. `isabelle-layout` is that parser split out
+for this exact purpose — it declares no dependencies of its own, so the
+transitive tree stays empty, and it is the parser rather than a tool that
+contains one. Keeping a private copy after the weight was removed would have
+been applying the proxy after the thing it stood for was fixed.
 
-**The copy is what went wrong.** That table was eight literals transcribed
-into `tests/test_roots.py`, produced by diffing one parser against another
-with no Isabelle involved — and four of the eight are ROOTs `isabelle build`
-refuses (`session "Probe (AFP)"`, a bare `session With.Dots-2`, two sessions
-sharing a directory, an unterminated comment). So it asserted behaviour
-Isabelle does not have, and the docstring it justified told a story that could
-not have happened. The defect was real; the illustration was invented. This is
-the same species as the `loci` audit that was listed but never existed: a
-hand-maintained fixture beside the thing it describes.
+Nor does the import land mid-build: `build.py` reaches it while deriving the
+session, *before* `isabelle build` is spawned, and `attempts.py` long after,
+reading a corpus. A failure there is configuration — loud, before anything
+runs — which is the class `build.py` already puts "no session to build" in,
+not the class `guard.py` swallows.
+
+Two things stay local, and `roots.py` is exactly those two:
+
+- **A fragment is not a file.** `attempts.py` reads the added and context
+  lines of a hunk in a ROOT — a ROOT with holes — and the public entry point
+  takes a path, so `sessions_in_fragment` writes the fragment to a temporary
+  ROOT and parses that. Sixty hunks across both real corpora, so the cost is
+  nothing; it is a bridge, and a text-taking entry point upstream removes it.
+  Parsing per hunk rather than per line is *better* than what it replaced: a
+  `(* … *)` wholly inside the payload now hides what it encloses. What no
+  reader can see is an enclosing `(*` that was never captured, so a
+  commented-out session may still map a name to a directory — an unused entry,
+  against losing the mapping entirely.
+- **`<anon>` is not a name.** `isabelle-layout` calls a `session` keyword with
+  nothing after it `<anon>`; Isabelle rejects that outright. It is the absence
+  of a name, so `roots.py` drops it. Not hypothetical for the fragment reader:
+  the tokeniser's identifier class excludes `#`, so `# not a session` reduces
+  to the bare keyword, and prose reaching a hunk boundary does that easily.
+
+**Which ROOTs to read stays here too**, and that is a question about this
+project rather than about ROOT syntax: `build.py` asks git
+(`git ls-files --cached --others`), where `isabelle_layout.discover_roots`
+walks the filesystem. See below for why.
+
+`tests/test_roots.py` is therefore not a conformance suite — whether that
+parser matches Isabelle is checked in its own repository, against a corpus it
+regenerates from a real `isabelle sessions -d`. Asserting a dependency's
+behaviour back at it would fail whenever it legitimately improved. What is
+tested here is the fragment seam and the spellings this project acts on.
 
 Two details worth keeping:
 
@@ -605,12 +623,12 @@ own relative import failed), and a `readme = "README.md"` that did not exist.
 
 pytest, in the ordinary way. It is a *test* dependency, not a runtime one:
 nothing under `tests/` is installed, imported by the package, or present when a
-build runs. The no-dependencies rule protects the build; it is not a reason to
-hand-roll a runner every contributor then has to learn.
+build runs. Keeping the runtime list short protects the build; it was never a
+reason to hand-roll a runner every contributor then has to learn.
 
 ```sh
 pip install -e ".[test]"
-pip install ../isabelle-layout          # the ROOT conformance corpus
+pip install ../isabelle-layout          # runtime dep, until it reaches PyPI
 pytest -m "not slow and not isabelle"   # pure logic — seconds
 pytest -m "not isabelle"                # + real subprocesses
 pytest                                  # + a real isabelle build
