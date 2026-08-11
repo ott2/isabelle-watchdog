@@ -9,9 +9,16 @@ that changes what a record contains says so here explicitly, and
 `trajectory check` will tell you whether a corpus written by an older version
 still regenerates.
 
-## [Unreleased]
+## [0.3.1] — 2026-08-11
 
-**No record-schema change.**
+**No record-schema change.** Every reader that could open a 0.3.0 corpus can
+open this one, and vice versa.
+
+**One new runtime dependency**, `isabelle-layout` — the ROOT parser, split
+out of `isabelle-query` for exactly this, declaring no dependencies of its
+own. A patch number rather than a minor one because nothing existing breaks:
+no field changed, no flag changed meaning, and `pip` supplies the dependency
+without being asked.
 
 ### Added
 

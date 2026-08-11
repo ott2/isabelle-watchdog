@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "isabelle-watchdog"
-version = "0.3.0"
+version = "0.3.1"
 description = "Isabelle build watchdog, and the build-trajectory corpus it records"
 readme = "README.md"
 requires-python = ">=3.10"
