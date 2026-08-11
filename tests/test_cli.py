@@ -194,3 +194,42 @@ def test_a_named_attribution_file_must_exist(trajectory, tmp_path):
 def test_an_unknown_subcommand_is_rejected(repo):
     p = run(["frobnicate"], cwd=repo.root)
     assert p.returncode == 2
+
+
+def test_the_version_comes_from_pyproject_and_nowhere_else():
+    """One statement of what this project *is*, in the file that states the
+    rest of it.  `__version__` reads it back from the installed metadata, so
+    the two cannot drift -- unless someone reintroduces a literal here, which
+    is what this catches.
+
+    It also catches a stale environment, and that is worth a moment: an
+    editable install keeps serving the version recorded when it was made, so
+    right after a bump `-V` reports the *old* one until `pip install -e .` is
+    run again.  A release that skips that ships a binary disagreeing with its
+    own changelog.
+    """
+    import re
+    from isabelle_watchdog import __version__
+    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    if not pyproject.exists():          # installed from a wheel, no source tree
+        pytest.skip("no pyproject.toml beside the tests")
+    declared = re.search(r'(?m)^version\s*=\s*"([^"]+)"',
+                         pyproject.read_text())
+    assert declared, "pyproject.toml states no version"
+    assert __version__ == declared.group(1), (
+        f"installed metadata says {__version__}, pyproject says "
+        f"{declared.group(1)} -- re-run `pip install -e .`")
+
+
+@pytest.mark.parametrize("flag", ["-V", "--version"])
+def test_the_version_answers_before_the_required_subcommand(repo, flag):
+    """COMMAND is `required=True`, so the obvious reading is that `trajectory
+    -V` complains about a missing subcommand -- which is what it did.
+
+    argparse runs a `version` action the moment it sees the flag, before the
+    required check, and this pins that: it is behaviour of argparse rather
+    than of anything written here, so it should fail loudly if it changes.
+    """
+    p = run([flag], cwd=repo.root)
+    assert p.returncode == 0, p.stderr
+    assert "isabelle-watchdog" in p.stdout

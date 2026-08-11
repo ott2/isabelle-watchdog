@@ -604,20 +604,64 @@ own corpus and fits its own attribution.
 
 ### Packaging
 
-`hatchling`, src-layout, version single-sourced from
-`src/isabelle_watchdog/__init__.py` (`[tool.hatch.version]`). No runtime
-dependencies, deliberately: this runs beside a build, so anything it imports is
-something that can break one.
+`hatchling`, src-layout, one runtime dependency (`isabelle-layout`).
+
+**The version is stated once, in `pyproject.toml`.** One file holds what the
+project is — name, version, dependencies, entry points — rather than splitting
+it across a manifest and a module that then have to be kept agreeing.
+`__init__.__version__` reads it back from the installed metadata, so the two
+cannot drift; a source tree that was never installed reports `0+unknown`,
+because a wrong version sends a bug report to the wrong commit and an absent
+one does not.
+
+*It was the other way round*, dynamic from `__init__.py` via
+`[tool.hatch.version]`, justified by `__version__` working uninstalled. That
+justification was thin against a project whose own rule is *test against an
+install*.
+
+**One wart, and it bites at exactly the wrong moment.** An editable install
+serves the metadata recorded when it was made, so right after a version bump
+`-V` reports the *old* number until `pip install -e .` runs again. A release
+that skips it ships binaries disagreeing with their own changelog.
+`test_the_version_comes_from_pyproject_and_nowhere_else` fails when they
+disagree and says which command fixes it.
+
+**Why `hatchling`, now that the version is static?** Honestly, not much — the
+dynamic version was most of it. What is left is that
+`[tool.hatch.build.targets.sdist] include` puts the sdist contents in
+`pyproject.toml`; setuptools governs those from a separate `MANIFEST.in`, so
+switching would *add* a file and split the packaging story across two, against
+the same "one place" argument that moved the version. Not a strong reason,
+just the standing one. Nothing here needs a build step, so if the backend ever
+has to change, nothing depends on it beyond those two `[tool.hatch.build]`
+tables.
 
 ```sh
 python3 -m venv /tmp/v && /tmp/v/bin/pip install .   # or -e .
 /tmp/v/bin/trajectory --help
+/tmp/v/bin/trajectory --version
 ```
 
-**Test against an install, not `PYTHONPATH=src`.** Two failures showed up only
-under a real install and would have passed otherwise: `trajectory._attempts()`
-loading `attempts.py` via `spec_from_file_location` (no parent package, so its
-own relative import failed), and a `readme = "README.md"` that did not exist.
+**Test against an install, not `PYTHONPATH=src`.** Three failures showed up
+only under a real install and would have passed otherwise:
+`trajectory._attempts()` loading `attempts.py` via `spec_from_file_location`
+(no parent package, so its own relative import failed), a
+`readme = "README.md"` that did not exist, and now `__version__`, which has no
+metadata to read outside one.
+
+### `-V` / `--version`
+
+All three entry points, both spellings. Absent, they did more than say
+nothing: `isabelle-watchdog -V` treated `-V` as *the command to supervise*, so
+it resolved a log directory, **created a corpus** and recorded the failure as
+an attempt — the silent-creation failure this file documents twice over,
+reached by a typo. `--version` was quieter: the child is wrapped in `stdbuf`,
+so it ran `stdbuf --version` and reported that program's version instead.
+
+Hence the other half of the fix: **an unrecognised leading `-word` is a usage
+error**, not a command name, exit 2, before anything is resolved or created.
+A program genuinely named that way is what `--` is for, which the wrapper's
+own docstring already said.
 
 ### Tests
 

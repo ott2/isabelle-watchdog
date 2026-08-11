@@ -50,6 +50,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import __version__
 from . import corpus
 from . import guard
 from . import roots
@@ -316,6 +317,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description=SYNOPSIS, epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("-V", "--version", action="version",
+                    version=f"isabelle-build (isabelle-watchdog) {__version__}")
     ap.add_argument("-m", "--note", metavar="TEXT",
                     help="reasoning for this attempt; '-' reads stdin. "
                          "Sections: diagnosis: / change: / expect: / ref:, "

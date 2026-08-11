@@ -57,6 +57,9 @@ still regenerates.
   Deliberately unlike every other subcommand, which take a positional corpus:
   an audit resolves its own corpus and fits its own attribution, so routing it
   through the shared one would do that work twice and could do it two ways.
+- **`-V` / `--version` on all three commands**, both spellings, because
+  someone who tries one and gets nothing concludes the tool has no version
+  rather than trying the other.
 
 ### Changed
 
@@ -91,8 +94,28 @@ still regenerates.
   what it replaced: a `(* … *)` wholly inside the payload now hides what it
   encloses, where the line-wise reader saw through it.
 
-  Until `isabelle-layout` reaches PyPI, install it from the sibling checkout
-  (`pip install ../isabelle-layout`) before `pip install -e ".[test]"`.
+  Required as `>=0.2.0` — a floor and no ceiling, which is what that package
+  asks consumers for. An upper bound cannot tell "0.3 broke something" from
+  "0.3 exists", since it is evaluated before anything runs, and it propagates
+  to *our* consumers, who never chose it. 0.2.0 rather than 0.1.0 because
+  0.1.x was never published. Until it reaches PyPI, install it from the
+  sibling checkout (`pip install ../isabelle-layout`) first.
+
+- **The version is stated in `pyproject.toml`**, not in
+  `src/isabelle_watchdog/__init__.py` via `[tool.hatch.version]`. One file
+  holds what the project is — name, version, dependencies, entry points —
+  instead of splitting it across a manifest and a module that have to be kept
+  agreeing. `__version__` reads it back from the installed metadata, so they
+  cannot drift; a source tree that was never installed reports `0+unknown`,
+  since a wrong version sends a bug report to the wrong commit and an absent
+  one does not.
+
+  The old arrangement was justified by `__version__` working uninstalled,
+  which is thin against a project whose own rule is *test against an install*.
+  Note the wart it trades for: an editable install serves the metadata
+  recorded when it was made, so after a bump `-V` reports the old number until
+  `pip install -e .` runs again. A test fails when those disagree and names
+  the command.
 
 - `$BUILD_SESSION_DIR` unset no longer means `.`. It means "wherever the ROOT
   declaring this session lives", which is the same answer in the case `.` was
@@ -135,6 +158,20 @@ still regenerates.
   `isabelle sessions -d`. Asserting a dependency's behaviour back at it would
   fail whenever it legitimately improved. What is tested here is the fragment
   seam and the spellings this project acts on.
+- **A mistyped flag made `isabelle-watchdog` create a corpus.** An
+  unrecognised leading `-word` fell through to the child as the command to
+  supervise, so `isabelle-watchdog -V` ran a program named `-V`: it resolved a
+  log directory, **created a corpus**, and recorded the failure as an attempt.
+  Appending to the wrong file is loud; creating one is silent and looks
+  exactly like a first build — and a typo was enough to do it.
+
+  `--version` failed more quietly still. The child is wrapped in `stdbuf`, so
+  it ran `stdbuf --version` and confidently reported *that* program's version.
+
+  An unrecognised leading `-word` is now a usage error, exit 2, before
+  anything is resolved or created; a program genuinely named that way is what
+  `--` is for, which the wrapper's own docstring already said.
+
 - **A nameless `session` stanza reached the attribution map as a name.**
   `isabelle-layout` calls a `session` keyword with nothing after it `<anon>`,
   and Isabelle rejects that input outright, so it is the *absence* of a name.

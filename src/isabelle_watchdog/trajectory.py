@@ -127,6 +127,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import __version__
 from . import corpus
 
 HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
@@ -939,6 +940,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description=__doc__.split("\n\n")[0], epilog=epilog,
         formatter_class=argparse.RawDescriptionHelpFormatter)
+    # Before the required subcommand: argparse runs the version action as soon
+    # as it sees the flag, so `trajectory -V` answers rather than complaining
+    # that COMMAND is missing.
+    ap.add_argument("-V", "--version", action="version",
+                    version=f"trajectory (isabelle-watchdog) {__version__}")
     # The grouped epilog is the command list, so argparse's own flat one would
     # just repeat it in a worse order.  Omitting `help=` (rather than setting
     # it to SUPPRESS, which argparse prints literally here) is what keeps a

@@ -442,6 +442,24 @@ def test_help_shows_the_synopsis_not_the_rationale(build_module):
     assert "Why a single command" not in build.SYNOPSIS
 
 
+@pytest.mark.parametrize("flag", ["-V", "--version"])
+def test_the_version_is_reported_without_building(build_module, repo, launched,
+                                                  capsys, flag):
+    """Both spellings, because someone reaching for one will not try the other
+    before concluding the tool has no version.
+
+    It also must not build: `-V` was an unrecognised argument, and on the
+    watchdog the same typo supervised a program called `-V` and minted a
+    corpus doing it.
+    """
+    build = build_module(BUILD_SESSION="S")
+    with pytest.raises(SystemExit) as exc:
+        main_with(build, [flag], repo)
+    assert exc.value.code == 0
+    assert "isabelle-watchdog" in capsys.readouterr().out
+    assert not launched, "reporting a version started a build"
+
+
 def test_the_build_runs_from_the_project_not_from_here(build_module, repo,
                                                         launched):
     build = build_module(BUILD_SESSION="S")

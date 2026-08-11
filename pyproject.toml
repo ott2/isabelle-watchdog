@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "isabelle-watchdog"
-dynamic = ["version"]
+version = "0.3.0"
 description = "Isabelle build watchdog, and the build-trajectory corpus it records"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,7 +30,14 @@ classifiers = [
 #
 # `git` remains the other external requirement, and the projects this records
 # already require it.
-dependencies = ["isabelle-layout>=0.1.0"]
+#
+# A floor and no ceiling, which is what that package asks consumers for and
+# is right: an upper bound cannot tell "0.3 broke something" from "0.3
+# exists", since it is evaluated before anything runs, and it propagates to
+# *our* consumers, who never chose it.  What detects a break is running this
+# suite against it.  0.2.0 because 0.1.x was never published -- an earlier
+# floor would have named versions that will never exist.
+dependencies = ["isabelle-layout>=0.2.0"]
 
 # A *test* dependency is not a runtime one: nothing under `tests/` is
 # installed, imported by the package, or present when a build runs.  Keeping
@@ -58,9 +65,6 @@ markers = [
     "isabelle: needs a real Isabelle on PATH and a prebuilt HOL heap (~3 min)",
     "slow: takes seconds rather than milliseconds -- supervises a real child process",
 ]
-
-[tool.hatch.version]
-path = "src/isabelle_watchdog/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/isabelle_watchdog"]

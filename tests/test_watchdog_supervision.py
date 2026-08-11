@@ -631,3 +631,34 @@ def test_a_double_dash_ends_the_wrappers_flags(watchdog):
     run = watchdog("--", "sh", "-c", 'echo "Session Probe"')
     assert run.code == 0, run
     assert run.records, run
+
+
+def test_the_version_is_this_packages_not_the_wrappers_stdbufs(watchdog):
+    """`--version` used to reach `stdbuf`, which the command is wrapped in, so
+    it answered confidently with the wrong program's version."""
+    for flag in ("-V", "--version"):
+        run = watchdog(flag)
+        assert run.code == 0, run
+        assert "isabelle-watchdog" in run.out
+        assert "stdbuf" not in run.out
+
+
+def test_an_unknown_flag_does_not_become_the_command(watchdog, logs):
+    """The bug behind the missing `--version`, and much the worse half.
+
+    An unrecognised leading `-word` fell through to the child, so
+    `isabelle-watchdog -V` supervised a program named `-V`: it resolved a log
+    directory, **created a corpus**, and recorded the failure as an attempt.
+    This project's own note on that failure class is that appending to the
+    wrong file is loud while creating one is silent and looks exactly like a
+    first build -- and a mistyped flag was enough to do it.
+
+    So: an error, before anything runs, naming `--` for the case where a
+    program really is called that.
+    """
+    run = watchdog("-Q", "sh", "-c", "true")
+    assert run.code == 2, run
+    assert "unrecognised option" in run.out and "'-Q'" in run.out
+    assert "--" in run.out                         # says how to mean it
+    assert not run.records, "a usage error minted a corpus"
+    assert not (logs / "builds.jsonl").exists()

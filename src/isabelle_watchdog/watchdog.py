@@ -15,7 +15,8 @@ Usage: isabelle-watchdog [--no-record] command [args...]
 
 Only *leading* flags are the wrapper's; everything from the first non-flag
 word on belongs to the command, so an option meant for `isabelle build` is
-never eaten here.
+never eaten here.  A leading `-word` this wrapper does not know is an error,
+not a command name -- use `--` for a program actually named that way.
 
 Options:
     --no-record / --record    Turn trajectory capture off / on for this run,
@@ -24,6 +25,7 @@ Options:
                               but the supervision is useful alone, so a
                               project that wants only that can say so instead
                               of accumulating records it will never read.
+    -V / --version            Print the version and exit.
     -h / --help               This text.
 
 WHERE RECORDS GO.  $WATCHDOG_LOG_DIR if set.  Otherwise the tools look rather
@@ -127,6 +129,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from . import __version__
 from . import corpus  # resolve_log_dir — one answer to "where do records go"
 from . import guard  # run_guarded — capture must never break the build
 
@@ -464,7 +467,11 @@ def on_battery() -> "bool | None":
 # Main
 # ---------------------------------------------------------------------------
 
-def _parse_leading_flags(argv: list[str]) -> tuple[list[str], bool | None, bool]:
+class UsageError(Exception):
+    """A flag this wrapper does not know, before anything has run."""
+
+
+def _parse_leading_flags(argv: list[str]) -> tuple[list[str], bool | None, str]:
     """Split the watchdog's own flags off the front of the command.
 
     Only *leading* flags are ours, the way `env`, `nice` and `timeout` do it:
@@ -473,32 +480,59 @@ def _parse_leading_flags(argv: list[str]) -> tuple[list[str], bool | None, bool]
     dash.  Anything else would mean this wrapper silently eating an option
     meant for `isabelle build`.
 
-    Returns `(command, record_override, help_wanted)`.
+    **An unrecognised leading `-word` is an error, not a command.**  It used
+    to fall through to the child, and the result was worse than a bad message:
+    `isabelle-watchdog -V` supervised a program called `-V`, so it resolved a
+    log directory, *created a corpus* and recorded the failure as an attempt.
+    That is the failure this project documents as the hard one to notice --
+    "appending to the wrong file is loud; creating the wrong file is silent
+    and looks exactly like a first build" -- reachable by mistyping a flag.
+    `--version` was quieter still: the command is wrapped in `stdbuf`, so it
+    ran `stdbuf --version` and cheerfully reported *stdbuf's* version.
+
+    A program whose own name begins with a dash is what `--` is for, and this
+    docstring already said so.
+
+    Returns `(command, record_override, action)`, where `action` is `""`,
+    `"help"` or `"version"`.
     """
     record: bool | None = None
     while argv:
         if argv[0] in ("-h", "--help"):
-            return [], record, True
+            return [], record, "help"
+        if argv[0] in ("-V", "--version"):
+            return [], record, "version"
         if argv[0] == "--no-record":
             record = False
         elif argv[0] == "--record":
             record = True
         elif argv[0] == "--":
-            return argv[1:], record, False
+            return argv[1:], record, ""
+        elif argv[0].startswith("-"):
+            raise UsageError(
+                f"unrecognised option {argv[0]!r}.  Watchdog options are "
+                "-h/--help, -V/--version, --record, --no-record; everything "
+                "after the first non-option word is the command.  To supervise "
+                f"a program actually named {argv[0]!r}, put `--` first.")
         else:
             break
         argv = argv[1:]
-    return argv, record, False
+    return argv, record, ""
 
 
 def main() -> int:
     # --- Parse args ---
-    args, record_override, help_wanted = _parse_leading_flags(sys.argv[1:])
-    if help_wanted:
+    try:
+        args, record_override, action = _parse_leading_flags(sys.argv[1:])
+    except UsageError as exc:
+        print(f"isabelle-watchdog: {exc}", file=sys.stderr)
+        return 2
+    if action:
         # To stdout, exit 0.  `--help` used to be taken as the command to
         # supervise -- the one entry point named after the package, and asking
         # it for help ran it.
-        print(__doc__.strip())
+        print(__doc__.strip() if action == "help"
+              else f"isabelle-watchdog {__version__}")
         return 0
     if not args:
         print(__doc__.strip(), file=sys.stderr)

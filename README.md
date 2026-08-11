@@ -35,6 +35,9 @@ trajectory lengths --fit   # how many attempts did each proof take?
 trajectory notes           # what did you predict, and were you right?
 trajectory check           # is every recorded diff still intact?
 trajectory audit           # do these readers' own statistics hold up?
+
+# every command takes -V/--version and -h/--help
+trajectory --version
 ```
 
 ## Why record a build at all

@@ -21,13 +21,22 @@ plain git and JSON, generic over what is being built.  Nothing below the
 watchdog imports it, and it should stay that way.
 """
 
-# The single source of the version; pyproject.toml reads it from here
-# (`[tool.hatch.version]`).  Kept in the package rather than stated statically
-# in pyproject so that `isabelle_watchdog.__version__` works when the package
-# is imported from a source tree that was never installed -- which is how the
-# watchdog is often run, and how its own tests run it.  Deriving it from
-# `importlib.metadata` instead would raise `PackageNotFoundError` in exactly
-# that case.
-__version__ = "0.3.0"
+# The version is stated once, in pyproject.toml, and read back from the
+# installed metadata.  One file holds what the project *is* -- name, version,
+# dependencies, entry points -- rather than splitting it across a manifest and
+# a module that have to be kept agreeing.
+#
+# The cost is the uninstalled case: a source tree that was never `pip
+# install`ed has no metadata to read.  That answer is `0+unknown` rather than
+# a guess, because a wrong version is worse than an absent one -- a bug report
+# quoting it would send someone to the wrong commit.  It is also a corner:
+# this package is meant to be installed (`Test against an install, not
+# PYTHONPATH=src` -- CLAUDE.md), because two defects have already been found
+# that only appear under one.
+try:
+    from importlib.metadata import PackageNotFoundError, version as _version
+    __version__ = _version("isabelle-watchdog")
+except PackageNotFoundError:          # a source tree, never installed
+    __version__ = "0+unknown"
 
 __all__ = ["__version__"]
