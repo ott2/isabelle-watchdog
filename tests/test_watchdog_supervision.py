@@ -484,7 +484,8 @@ def test_a_run_too_short_to_sample_claims_no_cpu_time(watchdog, stub_bin,
 
 # --------------------------------------------------- capture never costs a build
 
-def test_a_broken_recorder_does_not_change_the_exit_code(watchdog, tmp_path, logs):
+def test_a_recorder_that_cannot_run_does_not_change_the_exit_code(
+        watchdog, tmp_path, logs):
     """Run from somewhere that is not a git repository, so the recorder
     cannot do its job at all.
 
@@ -493,13 +494,21 @@ def test_a_broken_recorder_does_not_change_the_exit_code(watchdog, tmp_path, log
     that a refactor must never quietly lose: instrumentation is allowed to
     fail, and a failure in it is not allowed to be mistaken for a failure of
     the build.
+
+    It asserted `build-record: skipped` and now asserts the precondition
+    message, because this case stopped being a breakage: "there is no
+    repository here" is something the operator can act on, so it says what
+    and how rather than quoting a `CalledProcessError`.  The contract under
+    test is unchanged -- exit 7 is still exit 7.
     """
     outside = tmp_path / "not-a-repo"
     outside.mkdir()
     run = watchdog("sh", "-c", STARTED + "exit 7", cwd=outside)
     assert run.code == 7, run
     assert run.records == []                       # nothing captured...
-    assert "build-record: skipped" in run.out      # ...and it says so
+    assert "build-record: NOT recorded" in run.out          # ...and it says so
+    assert "is not a git repository" in run.out             # ...and why
+    assert "git init" in run.out                            # ...and what to do
 
 
 # ------------------------------------------------------- where the records land

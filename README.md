@@ -145,6 +145,29 @@ session: SPSlowdown
 dir: isabelle
 ```
 
+**Capture starts at your first commit.** A record is a diff anchored to a
+public commit — that anchoring is what makes a corpus portable — so a
+repository with no commits yet, or a directory that is not one, records
+nothing. It says so on each build and in `--where`, rather than failing
+quietly; the build itself is never affected.
+
+**One file in that directory is data; the rest is local state.**
+
+| file | commit it? | what it is |
+|---|---|---|
+| `builds.jsonl` | **yes** | the corpus — irreplaceable, and the reason for all of this |
+| `instance-id` | no | identifies this working copy, so parallel clones' records pool without collision. Sharing one would merge two machines into one identity |
+| `last-build.log` | no | the last build's output, overwritten every run |
+| `.last-attempt` | no | the chain pointer, naming throwaway git objects a clone never receives |
+| `next-note.md` | no | a note waiting for the next build to consume it |
+
+`.last-attempt` is the one worth being explicit about, because committing it
+looks harmless — it sits beside `builds.jsonl` and holds three hashes. Those
+hashes name tree objects nothing references, so they are strictly local. In a
+fresh clone they are simply absent; the recorder notices and re-baselines on
+`HEAD` rather than losing the attempt, but the diff it writes that once is the
+whole working tree rather than the edit.
+
 **The session is derived too.** One ROOT under the project declaring one
 session is unambiguous, so a single-session project needs no configuration at
 all: `isabelle-build -m '...'` and nothing else. Several ROOTs or several

@@ -1027,7 +1027,7 @@ def _record_attempt(args: list[str], outcome: str, exit_code: int,
             error_loci=error_loci or [], limits=limits,
             contention=contention_rec,
         )
-    guard.run_guarded("build-record", go)
+    guard.run_guarded("build-record", go, lost=guard.ATTEMPT_LOST)
 
 
 # ---------------------------------------------------------------------------

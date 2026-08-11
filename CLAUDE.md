@@ -95,6 +95,24 @@ Two call sites guard deliberately different scopes — `record` guards its own
 record logic, the watchdog additionally guards the `import` itself, which a
 guard inside `record` cannot cover. Do not collapse them into one.
 
+**A guarded failure must name its consequence, not its exception.** Both of
+those call sites pass `lost=guard.ATTEMPT_LOST`, and the resulting warning
+opens `build-record: FAILED -- this attempt was NOT recorded`. It used to
+open `build-record: skipped (CalledProcessError: …)`, which beside a green
+`OK 1 theories` reads as a note about something optional; a project took it
+that way and lost five attempts. Side tasks that lose nothing irreplaceable
+(`db-error`, enriching a message) still say "skipped" — the word now carries
+information rather than being the only one available. Same argument as
+`limits` and `contention` one layer down: what a reader needs is the thing
+they cannot reconstruct, stated first.
+
+`record._git` raises **`GitFailed`**, a `CalledProcessError` subclass whose
+`__str__` appends git's stderr. The base class prints the argv and the exit
+status only, so `fatal: pathspec '*.thy' did not match any files` — the
+whole diagnosis — was captured and discarded, one line above the operator
+who needed it. Subclassing keeps the `except CalledProcessError` callers
+(which expect certain commands to fail) working unchanged.
+
 ### 1. `watchdog.py` — process supervision
 
 Three independent kill conditions, each a distinct diagnosis: **activity** (no
@@ -199,6 +217,19 @@ One JSON line per attempt. Design commitments, all load-bearing:
   allowlist, so a brand-new untracked non-source file appears in neither.
   Narrow for Isabelle, where the untracked things able to flip an outcome are
   `.thy` and `ROOT` files, which the allowlist already admits.
+
+  **The two passes need different filters, and one filter for both cost a
+  downstream project its first five attempts.** A pathspec matching nothing
+  makes `git add` exit 128 — fatal, and not covered by `--ignore-errors` —
+  so each pass is handed only specs that match. But `add -u` can stage only
+  *tracked* files while `add -A` can stage untracked ones too, and the filter
+  asked one question (`ls-files --cached --others`) for both. A spec matching
+  untracked files alone passed the filter and killed pass 1. That is the
+  state of every source pathspec before the first commit, so it was the first
+  build of every new project — the case with no earlier record to notice the
+  absence against. `_matching_pathspecs(env, tracked_only=)` now asks per
+  pass. Every corpus that exists was written by a project that already had a
+  committed theory, which is why nothing downstream ever saw it.
 - **Re-baselining on commit.** Diffs are incremental against the previous
   attempt's tree — *except* when HEAD moved mid-run, where it re-baselines on
   the new HEAD so committed content never leaks into a payload. Any consumer
@@ -226,7 +257,18 @@ One JSON line per attempt. Design commitments, all load-bearing:
   verbatim. `expect:` is the field worth the trouble: a prediction recorded
   *before* the outcome is the one self-scoring signal in the corpus — hence
   `note_pre_build` and `note_age_s` record whether it really predated.
-- **Never breaks the build.** Preserve this in any refactor.
+- **A precondition is not a failure.** `capture_blocker()` separates the two
+  states where capture cannot work at all — no repository, and a repository
+  with no commits — from the ones where something broke. Both were raw git
+  errors, and both are what a formalisation *starts* in, so the highest-value
+  attempts were the ones being lost. They get `NOT recorded -- <what is
+  missing, why capture needs it, the command that supplies it>`, and nothing
+  is created: a project with no corpus should not acquire an `instance-id`
+  for one. `isabelle-build --where` reports the same thing before the first
+  build, which is where it does the most good.
+- **Never breaks the build.** Preserve this in any refactor. That includes
+  the precondition path: a project that wanted supervision and not a corpus
+  is not misconfigured, so this warns and continues.
 
 ### 3. `trajectory.py` — the single reader
 
@@ -455,6 +497,17 @@ all thirteen with their ROOTs.
 the only place this package imports anything external. `roots.py` is a
 twenty-line adapter over `parse_root_sessions`, holding no regex and no notion
 of what a session name may contain.
+
+It is also where a missing `isabelle-layout` is restated as
+`roots.MISSING_LAYOUT` — **at the import**, so both callers inherit one
+message, and `trajectory` turns it into `FAIL: …` and exit 2 rather than a
+traceback. Worth the six lines because of *which* half fails: `check` and the
+builds themselves never reach the ROOT parser, so an absent dependency looks
+like "the writer works, the readers don't", which reads as a corpus problem.
+The message names the editable-install trap by name, since that is how it
+actually arrived — an install made before the dependency was declared keeps
+serving the metadata it was made with, so `pip show` reports no requirements
+and the source it imports is nonetheless the new one.
 
 It used to hold a grammar, in two copies. `build.py` and `attempts.py` each
 had a regex and they disagreed: `attempts.py` matched `"?([A-Za-z0-9_']+)"?`,

@@ -50,7 +50,29 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from isabelle_layout import parse_root_sessions
+MISSING_LAYOUT = (
+    "isabelle-watchdog needs `isabelle-layout` to read Isabelle ROOT files.\n"
+    "    pip install isabelle-layout\n"
+    "  If this is an editable install made before that dependency was "
+    "declared, it\n"
+    "  is still serving the metadata it was made with -- `pip show "
+    "isabelle-watchdog`\n"
+    "  will list no requirements -- so re-run `pip install -e .` here too."
+)
+
+try:
+    from isabelle_layout import parse_root_sessions
+except ModuleNotFoundError as _exc:      # the dependency, not a typo inside it
+    if _exc.name != "isabelle_layout":
+        raise
+    # Restated here rather than left as a bare `No module named
+    # 'isabelle_layout'`, and restated *at the import* so both callers
+    # inherit it: `build.py` reaching it while deriving a session, and
+    # `attempts.py` reaching it while reading a corpus.  A reader hit the
+    # second and got a nine-frame traceback ending in the module name --
+    # true, and silent about which package to install or why a declared
+    # dependency was absent.
+    raise ModuleNotFoundError(MISSING_LAYOUT, name="isabelle_layout") from _exc
 
 # `isabelle_layout` names a `session` stanza that has no name `<anon>` --
 # a bare `session` keyword with nothing after it, which Isabelle rejects

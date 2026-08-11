@@ -27,6 +27,7 @@ import time
 import pytest
 
 from conftest import capture, package_env
+from helpers import Repo
 
 pytestmark = pytest.mark.slow
 
@@ -280,6 +281,117 @@ def test_a_project_with_no_matching_sources_still_records(tmp_path, logs, repo):
     assert rec["outcome"] == "ok"
 
 
+def test_the_very_first_theory_in_a_project_is_captured(tmp_path, logs):
+    """No source file has been committed yet -- the start of a formalisation.
+
+    Reported from a project whose every build printed `build-record: skipped
+    (CalledProcessError: ... exit status 128.)`; `builds.jsonl` was never
+    created and five attempts were lost, two of them the informative ones.
+
+    `git add -u` stages *tracked* files only, so a pathspec matching nothing
+    but untracked files is fatal to it -- and the filter guarding against
+    that asked `ls-files --cached --others`, which counts the untracked ones.
+    The filter passed the spec through and the command it protected died on
+    it.  Every source pathspec is in that state before the first commit, so
+    this was the first build of every new project, and there was no earlier
+    record to notice the absence against.
+
+    Deliberately not folded into the `repo` fixture, whose template commits a
+    theory and a ROOT: with one tracked `.thy` anywhere the specs match, the
+    bug is unreachable, which is exactly why it survived a suite that already
+    tested untracked capture.
+    """
+    r = Repo(tmp_path / "fresh")
+    r.write("README.md", "no theories yet\n")
+    r.commit("initial")
+    # Both source classes present, neither tracked.
+    r.write("isabelle/ROOT", "session Laminar = HOL +\n  theories\n    A\n")
+    r.write("isabelle/A.thy", "theory A\n  imports Main\nbegin\nend\n")
+
+    capture(r.root, logs, argv=["isabelle", "build", "-d", "isabelle", "X"])
+
+    rec = json.loads((logs / "builds.jsonl").read_text().splitlines()[-1])
+    assert "isabelle/A.thy" in rec["diff"], "the first theory must be captured"
+    assert "isabelle/ROOT" in rec["diff"], "so must the ROOT declaring it"
+    assert "README.md" not in rec["diff"], "the allowlist still applies"
+
+
+def test_a_tracked_source_change_survives_an_untracked_one_of_another_class(
+        tmp_path, logs):
+    """Pass 1 is filtered per-spec, so a class with tracked files must not be
+    dropped because another class has none.
+
+    The narrow fix -- skip pass 1 whenever anything is untracked -- would
+    pass the test above and silently stop recording edits to committed
+    theories, which is most of a corpus.
+    """
+    r = Repo(tmp_path / "mixed")
+    r.write("thy/A.thy", "theory A\n  imports Main\nbegin\nend\n")
+    r.commit("initial")                      # *.thy tracked, *ROOT is not
+    r.write("thy/A.thy", "theory A\n  imports Main\nbegin\n(*edit*)\nend\n")
+    r.write("thy/ROOT", "session S = HOL +\n  theories\n    A\n")
+
+    capture(r.root, logs, argv=["isabelle", "build", "X"])
+
+    diff = json.loads((logs / "builds.jsonl").read_text().splitlines()[-1])["diff"]
+    assert "+(*edit*)" in diff, "a tracked theory's edit must still be captured"
+    assert "thy/ROOT" in diff, "beside the untracked ROOT"
+
+
+def test_a_chain_pointer_naming_a_vanished_tree_re_baselines(tmp_path, logs):
+    """`.last-attempt` names throwaway tree objects that nothing references.
+
+    They are unreachable by design, so `git gc --prune` may drop them, and a
+    clone never receives them at all -- nothing points at them to fetch.  A
+    project that committed the file (reasonably: it sits beside
+    `builds.jsonl`, which certainly is data) would then hand every build a
+    base its object store cannot reach.
+
+    The cost of getting this wrong is not one record.  `git diff <gone>` is
+    fatal, and the pointer is rewritten only after a record lands, so the
+    same dead base is read again next time: the project captures nothing,
+    permanently, having done nothing wrong but commit a file.
+    """
+    r = Repo(tmp_path / "cloned")
+    r.write("thy/A.thy", "theory A\n  imports Main\nbegin\nend\n")
+    r.commit("initial")
+    logs.mkdir(parents=True, exist_ok=True)
+    # The *commit* is present -- it was pushed, so a clone has it.  Only the
+    # throwaway trees are absent, which is precisely the state that gets past
+    # the `last_head == head` check and into the fatal diff.  A pointer whose
+    # head is also bogus proves nothing: re-baselining already handles that.
+    (logs / ".last-attempt").write_text(f"{'b' * 40}\t{r.head()}\t{'c' * 40}\n")
+
+    r.write("thy/A.thy", "theory A\n  imports Main\nbegin\n(*edit*)\nend\n")
+    capture(r.root, logs, argv=["isabelle", "build", "X"])
+
+    rec = json.loads((logs / "builds.jsonl").read_text().splitlines()[-1])
+    assert "+(*edit*)" in rec["diff"], "re-baselined on HEAD, not lost"
+    # And the chain is healthy again, rather than dead for every later build.
+    r.write("thy/A.thy", "theory A\n  imports Main\nbegin\n(*two*)\nend\n")
+    capture(r.root, logs, argv=["isabelle", "build", "X"])
+    nxt = json.loads((logs / "builds.jsonl").read_text().splitlines()[-1])
+    # Against attempt 1 this is `-(*edit*)` / `+(*two*)`; against HEAD it
+    # would be `+(*two*)` alone, since HEAD's A.thy has neither line.  The
+    # removed line is what says the chain healed rather than staying stuck
+    # on HEAD.
+    assert "-(*edit*)" in nxt["diff"] and "+(*two*)" in nxt["diff"], \
+        f"the next diff must be incremental again:\n{nxt['diff']}"
+
+
+RECORD_ONCE = ("from isabelle_watchdog import record\n"
+               "record.record(argv=[], outcome='ok', exit_code=0, "
+               "timeout_reason='', elapsed_s=1.0, error_head='', "
+               "log_name='x.log')\n"
+               "print('returned normally')\n")
+
+
+def _record_in(cwd, logs, **env):
+    return subprocess.run([sys.executable, "-c", RECORD_ONCE], cwd=str(cwd),
+                          env=package_env(WATCHDOG_LOG_DIR=str(logs), **env),
+                          capture_output=True, text=True)
+
+
 def test_capture_failure_is_a_warning_not_an_exception(tmp_path):
     """Called from somewhere with no repository at all.
 
@@ -287,14 +399,123 @@ def test_capture_failure_is_a_warning_not_an_exception(tmp_path):
     has exited and before it returns the child's code, so an exception here
     would turn a green build red.
     """
-    code = ("from isabelle_watchdog import record\n"
-            "record.record(argv=[], outcome='ok', exit_code=0, "
-            "timeout_reason='', elapsed_s=1.0, error_head='', "
-            "log_name='x.log')\n"
-            "print('returned normally')\n")
-    p = subprocess.run([sys.executable, "-c", code], cwd=str(tmp_path),
-                       env=package_env(WATCHDOG_LOG_DIR=str(tmp_path / "l")),
-                       capture_output=True, text=True)
+    p = _record_in(tmp_path, tmp_path / "l")
     assert p.returncode == 0, p.stderr
     assert "returned normally" in p.stdout
-    assert "build-record: skipped" in p.stderr
+    assert "NOT recorded" in p.stderr
+
+
+# ------------------------------------------ what git has not been asked for
+#
+# Both of these are the state a formalisation starts in, which is where the
+# attempts are worth most -- the same observation that made the untracked
+# pathspec bug expensive.  Both were fatal a moment later and identically
+# unhelpful: `git rev-parse HEAD` reports `fatal: not a git repository` in one
+# and prints back the word `HEAD` in the other, either of them arriving
+# wrapped in a CalledProcessError beside a green build.
+
+def test_a_directory_that_is_not_a_repository_says_so_and_says_what_to_do(
+        tmp_path):
+    p = _record_in(tmp_path, tmp_path / "l")
+    assert "NOT recorded" in p.stderr, p.stderr
+    assert "is not a git repository" in p.stderr
+    assert "git init" in p.stderr, "the fix must be in the message"
+    assert "BUILD_RECORD=0" in p.stderr, \
+        "and the way out for someone who wanted only supervision"
+    assert "Traceback" not in p.stderr
+
+
+def test_a_repository_with_no_commits_yet_says_capture_starts_at_the_first(
+        tmp_path):
+    """`git init` and no commit: distinct from no repository at all, and it
+    gets a distinct message, because the remedy is different.
+
+    Capture is not broken here -- a record anchors its diff to a public
+    commit, which is what makes a corpus portable, so there is nothing to
+    anchor to yet.  Saying that is worth more than reporting the fatal.
+    """
+    r = Repo(tmp_path / "fresh")            # init, deliberately no commit
+    r.write("A.thy", "theory A imports Main begin end\n")
+    logs = tmp_path / "l"
+    p = _record_in(r.root, logs)
+    assert p.returncode == 0, p.stderr
+    assert "has no commits yet" in p.stderr, p.stderr
+    assert "capture starts at the first one" in p.stderr
+    assert "Traceback" not in p.stderr
+
+
+def test_nothing_is_created_for_a_project_that_cannot_be_captured(tmp_path):
+    """No `instance-id` for a corpus that will never exist.
+
+    The identity is minted once and persisted, so creating one here would
+    outlive the condition and attach a working copy to a corpus it never had.
+    The check therefore runs before anything is written.
+    """
+    r = Repo(tmp_path / "fresh")
+    logs = tmp_path / "l"
+    _record_in(r.root, logs)
+    assert not (logs / "instance-id").exists()
+    assert not (logs / "builds.jsonl").exists(), \
+        "an empty corpus reads as a project that has built nothing"
+
+
+def test_capture_resumes_at_the_first_commit(tmp_path, logs):
+    """The message promises "commit now and every attempt from there is
+    captured".  That promise is the test."""
+    r = Repo(tmp_path / "fresh")
+    r.write("thy/A.thy", "theory A\n  imports Main\nbegin\nend\n")
+    _record_in(r.root, logs)
+    assert not (logs / "builds.jsonl").exists()
+
+    r.commit("initial")
+    r.write("thy/A.thy", "theory A\n  imports Main\nbegin\n(*edit*)\nend\n")
+    capture(r.root, logs, argv=["isabelle", "build", "X"])
+
+    rec = json.loads((logs / "builds.jsonl").read_text().splitlines()[-1])
+    assert "+(*edit*)" in rec["diff"]
+
+
+def test_a_failed_capture_says_the_attempt_was_lost(tmp_path):
+    """The warning has to be readable as data loss by someone who did not
+    write it.
+
+    "skipped", beside a green `OK 1 theories`, was read downstream as a note
+    about something optional; five attempts went before anyone worked out
+    what it meant.  The consequence goes first, in the words of the thing
+    that is gone.
+
+    Provoked with an unwritable log directory -- a genuine unexpected
+    failure, as opposed to the preconditions above, which have their own
+    message because the operator can act on them.
+    """
+    r = Repo(tmp_path / "proj")
+    r.write("thy/A.thy", "theory A imports Main begin end\n")
+    r.commit("initial")
+    blocked = tmp_path / "notadir"
+    blocked.write_text("this is a file, so mkdir cannot make it a directory\n")
+
+    p = _record_in(r.root, blocked / "logs")
+    assert p.returncode == 0, "a broken capture still must not break a build"
+    assert "returned normally" in p.stdout
+    assert "build-record: FAILED" in p.stderr, p.stderr
+    assert "NOT recorded" in p.stderr
+    assert "cannot be reconstructed" in p.stderr
+    assert p.stderr.index("NOT recorded") < p.stderr.index("cause:"), \
+        "the consequence must precede the exception"
+
+
+def test_gits_own_diagnosis_reaches_the_warning():
+    """`CalledProcessError` prints the argv and the exit status and nothing
+    else, so the line that named the fault was captured and then discarded.
+
+    That is what made the reported failure unreadable: `returned non-zero
+    exit status 128` says a command failed, `fatal: pathspec '*.thy' did not
+    match any files` says which pathspec and why.
+    """
+    from isabelle_watchdog.record import GitFailed
+    exc = GitFailed(128, ["git", "add", "-u", "--", "*.thy"], "",
+                    "fatal: pathspec '*.thy' did not match any files\n")
+    assert "did not match any files" in str(exc)
+    assert "128" in str(exc)
+    assert isinstance(exc, subprocess.CalledProcessError), \
+        "callers catching CalledProcessError must keep working"

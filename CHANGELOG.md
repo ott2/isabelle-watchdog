@@ -125,6 +125,107 @@ still regenerates.
 
 ### Fixed
 
+- **Capture died on the first build of every new project, and said so in a
+  way nobody could read.** A project whose theories are not yet committed —
+  the start of any formalisation — hit `fatal: pathspec '*.thy' did not match
+  any files` on every build. No `builds.jsonl` was ever created; `trajectory
+  check` then reported `no corpus found`. A downstream project lost five
+  attempts this way, two of them the informative ones, and they are not
+  reconstructible: a hand-written record of an attempt nobody captured is
+  fabricated data.
+
+  `git add -u` stages **tracked** files only, so a pathspec matching nothing
+  but untracked ones is fatal to it. The filter that exists to prevent
+  exactly that (`_matching_pathspecs`, added when a project with no `ROOTS`
+  file lost every record the same way) asked git for `ls-files --cached
+  --others` — tracked *or* untracked. That is the right set for pass 2,
+  `git add -A`, and the wrong one for pass 1: the filter passed the spec
+  through and the command it was protecting died on it. Each pass is now
+  filtered against what that pass can actually stage.
+
+  Note where it hid. Every existing corpus was written by a project that
+  already had a committed theory, so one tracked `.thy` anywhere made the
+  bug unreachable — including in the fixture that tests untracked capture,
+  which adds an untracked theory *beside* a tracked one. The failure needed
+  a project with no committed sources at all, which is a state a corpus by
+  definition contains no record of.
+
+- **A repository with no commits, and a directory that is not a repository,
+  each failed as a raw git error.** Both are states a formalisation starts
+  in — the second is what `git init` leaves you in for as long as it takes to
+  write the first theory — and both went through `git rev-parse HEAD`, which
+  reports `fatal: not a git repository` in one and prints back the word
+  `HEAD` in the other. Either arrived wrapped in a `CalledProcessError`
+  beside a green build.
+
+  They are now told apart before anything is created, and each says what is
+  missing, why capture needs it, and the command that supplies it — the same
+  class as `build.py`'s "no session to build": a precondition the operator
+  can meet, not a failure. Capture still never blocks a build, and a project
+  that has no corpus yet no longer acquires an `instance-id` for one.
+
+  `isabelle-build --where` reports it too, which is the point at which it is
+  most useful: that command exists to answer "what will adopting this do to
+  my repo" *before* the first build, and "nothing will be recorded until you
+  commit" is exactly that answer.
+
+- **A failed capture said "skipped" beside a green build.** The warning
+  reported the event and not the consequence:
+
+      build-record: skipped (CalledProcessError: Command '['git', 'add',
+      '-u', '--', '*.thy', '*ROOT']' returned non-zero exit status 128.)
+
+  It was read as a note about something optional, which is what "skipped"
+  means everywhere else in a build log. It now leads with what was lost:
+
+      build-record: FAILED -- this attempt was NOT recorded.
+        The build itself is unaffected.  The source changes will be picked up
+        by the next recorded build (diffs are cumulative), but this attempt's
+        outcome, timing and error loci are gone -- they cannot be
+        reconstructed afterwards.
+        cause: GitFailed: ... exit status 128. fatal: pathspec '*ROOT' did
+        not match any files
+
+  `run_guarded` takes the consequence as an argument, so a side task whose
+  failure costs nothing irreplaceable — enriching an error message — still
+  says "skipped". The distinction now carries information instead of being
+  the only word available.
+
+  And git's own diagnosis reaches the operator. `CalledProcessError.__str__`
+  prints the argv and the exit status and nothing else, so the one line that
+  identified the fault was captured and then dropped. `GitFailed` subclasses
+  it — `except CalledProcessError` callers are unaffected — and appends what
+  git said.
+
+- **A `.last-attempt` naming an unreachable tree lost every later attempt,
+  not one.** The chain pointer names throwaway git objects that nothing
+  references, so `git gc --prune` may drop them and a clone never receives
+  them. `git diff <gone> <tree>` is fatal — and since the pointer is
+  rewritten only *after* a record lands, the same dead base is read again on
+  the next build. A project that committed the file, which is a reasonable
+  thing to do with something sitting beside `builds.jsonl`, would capture
+  nothing at all in a fresh clone, silently and permanently.
+
+  The base is now checked for reachability and falls back to `HEAD`'s tree,
+  which is what the first attempt in a fresh log directory already does. One
+  over-large diff, once, against a project that records nothing. README now
+  says which files in a log directory are data (`builds.jsonl`, and only
+  that) and which are local state.
+
+- **A missing `isabelle-layout` reached the reader as a traceback.**
+  `trajectory list` ended nine frames down at `ModuleNotFoundError: No module
+  named 'isabelle_layout'`, from a CLI whose other failures list what they
+  tried and how to fix it. Worse, `check` and the builds themselves do not
+  route through the ROOT parser, so an absent dependency presents as "the
+  writer works, the readers don't" — which reads like a corpus problem.
+
+  It now exits 2 with the install line. The message is raised at the import
+  in `roots.py`, so `build.py` inherits it too, and it names the editable
+  install specifically: one made before this release declared the dependency
+  keeps serving the metadata it was made with, so `pip show` reports no
+  requirements and `pip install -e .` has to be re-run. An unrelated
+  `ImportError` is re-raised rather than disguised as a missing package.
+
 - **Two ROOT parsers in one package disagreed about session names.**
   `build.py` and `attempts.py` each had a regex, and `attempts.py`'s
   (`"?([A-Za-z0-9_']+)"?`) stopped at the first character outside that class

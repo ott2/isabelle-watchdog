@@ -299,6 +299,22 @@ def report_where(project: Path, session: str | None = None,
     print(f"records: {log_dir / corpus.BASENAME}" if recording else
           f"records: none -- capture is off (${guard.ENV_RECORD})")
 
+    # The resolution above answers "where would records go"; this answers
+    # "would there be any".  A repository with no commits yet -- or a
+    # directory that is not one -- records nothing, and that is worth knowing
+    # here rather than from a warning after the first build has already gone
+    # uncaptured.  Imported locally: `record` resolves a project and a log
+    # directory at import time, which a `--where` that reports capture is off
+    # has no business paying for.
+    if recording:
+        from .record import capture_blocker
+        blocked = capture_blocker(project)
+        if blocked:
+            # Re-indented to this report's continuation column, as `why:`
+            # above is.  The message is shared with the build-time warning,
+            # which has no such column.
+            print("    but: " + blocked.replace("\n  ", "\n         "))
+
     # The other half of "what would this do".  Reported even when it fails,
     # and *after* the corpus lines, so a project that cannot derive its
     # session still learns where its records would go -- the two questions

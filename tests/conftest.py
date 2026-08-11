@@ -258,7 +258,11 @@ def capture(repo_root: Path, logs: Path, *, note: str | None = None,
                        cwd=str(repo_root),
                        env=package_env(WATCHDOG_LOG_DIR=str(logs), **extra),
                        capture_output=True, text=True)
-    assert "skipped" not in p.stderr, f"capture failed silently:\n{p.stderr}"
+    # Both words the guard can print: "skipped" for a side task whose failure
+    # costs nothing, "FAILED" for one that lost the attempt.  Checking only
+    # the first would have let the whole of `_snapshot_tree` fail unnoticed.
+    assert not ("skipped" in p.stderr or "FAILED" in p.stderr), \
+        f"capture failed silently:\n{p.stderr}"
     after = len(corpus.read_text().splitlines()) if corpus.exists() else 0
     assert after == before + 1, f"no record appended:\n{p.stdout}\n{p.stderr}"
 

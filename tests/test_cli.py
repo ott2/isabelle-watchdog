@@ -196,6 +196,50 @@ def test_an_unknown_subcommand_is_rejected(repo):
     assert p.returncode == 2
 
 
+# The reading views parse ROOT files, so they need `isabelle-layout`; `check`
+# and the builds themselves do not.  An absent dependency therefore presents
+# as "the writer works, the readers don't", which reads like a corpus problem
+# rather than an install problem -- and it arrived as a nine-frame traceback
+# ending in the module name, from a CLI whose other failures list their fixes.
+BLOCK_LAYOUT = """
+import sys
+class Absent:
+    def find_spec(self, name, path=None, target=None):
+        if name == "isabelle_layout" or name.startswith("isabelle_layout."):
+            raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+        return None
+sys.meta_path.insert(0, Absent())
+sys.modules.pop("isabelle_layout", None)
+from isabelle_watchdog.trajectory import main
+sys.argv = ["trajectory", "list"]
+sys.exit(main())
+"""
+
+
+def test_a_missing_isabelle_layout_is_reported_not_traced(trajectory):
+    p = subprocess.run([sys.executable, "-c", BLOCK_LAYOUT],
+                       cwd=str(trajectory.root),
+                       env=package_env(TRAJECTORY_CORPUS=str(trajectory.corpus)),
+                       capture_output=True, text=True)
+    assert p.returncode == 2, f"{p.stdout}\n{p.stderr}"
+    assert "Traceback" not in p.stderr, p.stderr
+    assert "pip install isabelle-layout" in p.stderr
+    assert "pip install -e ." in p.stderr, \
+        "an editable install predating the dependency keeps stale metadata"
+
+
+def test_an_unrelated_import_error_is_not_disguised_as_the_dependency(trajectory):
+    """Catching every ImportError here would report a typo inside
+    `attempts.py` as a missing package, sending the reader to pip for a
+    problem pip cannot fix."""
+    code = BLOCK_LAYOUT.replace('"isabelle_layout"', '"json"') \
+                       .replace('"isabelle_layout."', '"json."')
+    p = subprocess.run([sys.executable, "-c", code], cwd=str(trajectory.root),
+                       env=package_env(TRAJECTORY_CORPUS=str(trajectory.corpus)),
+                       capture_output=True, text=True)
+    assert "pip install isabelle-layout" not in p.stderr, p.stderr
+
+
 def test_the_version_comes_from_pyproject_and_nowhere_else():
     """One statement of what this project *is*, in the file that states the
     rest of it.  `__version__` reads it back from the installed metadata, so

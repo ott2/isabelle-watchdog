@@ -414,6 +414,40 @@ def test_where_does_not_promise_records_it_will_not_write(build_module, repo,
     assert "capture is off" in capsys.readouterr().out
 
 
+def test_where_says_when_nothing_would_be_recorded_yet(build_module, tmp_path,
+                                                       launched, capsys):
+    """Resolution answers "where would records go"; this answers "would there
+    be any".
+
+    A repository with no commits records nothing -- a diff is anchored to a
+    public commit and there is not one yet -- and `--where` is where a
+    project asks what adopting this will do, *before* the build that would
+    otherwise go uncaptured.
+    """
+    from helpers import Repo
+    r = Repo(tmp_path / "fresh")            # init, deliberately no commit
+    r.write("ROOT", "session S = HOL +\n  theories\n")
+    build = build_module(BUILD_SESSION="S")
+    main_with(build, ["--where"], r)
+    out = capsys.readouterr().out
+    assert "has no commits yet" in out, out
+    assert "records:" in out, "and it still says where they would go"
+
+
+def test_where_stays_quiet_about_capture_it_was_told_not_to_do(
+        build_module, tmp_path, launched, capsys):
+    """`--no-record` in a repository with no commits: nothing is missing,
+    because nothing was going to be written."""
+    from helpers import Repo
+    r = Repo(tmp_path / "fresh")
+    r.write("ROOT", "session S = HOL +\n  theories\n")
+    build = build_module(BUILD_SESSION="S")
+    main_with(build, ["--where", "--no-record"], r)
+    out = capsys.readouterr().out
+    assert "no commits yet" not in out
+    assert "capture is off" in out
+
+
 def test_where_needs_no_session(build_module, repo, launched, capsys):
     """It answers a question about the project, not about a build."""
     build = build_module()

@@ -84,7 +84,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import corpus
-from .guard import run_guarded
+from .guard import ATTEMPT_LOST, run_guarded
 
 def _project_dir() -> Path:
     """The repository whose sources this build is about.
@@ -166,15 +166,84 @@ INLINE_SPLIT_RE = re.compile(
 OUTCOME_RE = re.compile(r"^\W*(ok|fail|timeout)\b", re.IGNORECASE)
 
 
+class CaptureUnavailable(Exception):
+    """A precondition capture cannot supply for itself, and the operator can.
+
+    Distinct from the guard's `FAILED` path, which means something broke
+    unexpectedly.  These two mean capture was never going to work here, the
+    reason is stable, and there is a specific thing to do about it -- so the
+    warning says that thing instead of quoting an exception.  Same class as
+    `build.py`'s "no session to build": configuration, decided before
+    anything runs, with the fix in the message.
+
+    It still only warns.  Trajectory capture must never cost a build, and a
+    project that wanted supervision and not a corpus is not misconfigured.
+    """
+
+
+# Both say what is missing, why capture needs it, and the one command that
+# fixes it -- and both name the way out for someone who only wanted the
+# watchdog.  The condition persists until acted on, so this repeats every
+# build; going quiet after the first is how the reported failure went
+# unnoticed for five attempts.
+NO_REPOSITORY = (
+    "{dir} is not a git repository.\n"
+    "  A record is a diff anchored to a commit, so there is nothing here to "
+    "capture\n"
+    "  against.  `git init` and commit your theories -- or set BUILD_RECORD=0 "
+    "if\n"
+    "  supervision was all you wanted, and this stops."
+)
+NO_COMMITS = (
+    "{dir} has no commits yet.\n"
+    "  A record anchors its diff to a public commit -- that anchoring is what "
+    "makes\n"
+    "  a corpus portable -- so capture starts at the first one.  Commit, and "
+    "every\n"
+    "  attempt from there is captured.\n"
+    "  (Set BUILD_RECORD=0 if supervision was all you wanted, and this stops.)"
+)
+
+
+class GitFailed(subprocess.CalledProcessError):
+    """A git command that failed, carrying git's own account of why.
+
+    `CalledProcessError.__str__` reports the argv and the exit status and
+    nothing else, so a capture failure reached the operator as
+
+        build-record: skipped (CalledProcessError: Command '['git', 'add',
+        '-u', '--', '*.thy', '*ROOT']' returned non-zero exit status 128.)
+
+    while the one line that identified the fault --
+    `fatal: pathspec '*.thy' did not match any files` -- had been captured
+    and then dropped on the floor.  A downstream project read that warning,
+    could not tell what it was signalling, and lost five attempts before the
+    cause was found; git had said exactly what was wrong the whole time.
+
+    Subclasses rather than replaces, so the `except CalledProcessError`
+    callers that expect a command to fail keep working unchanged.
+    """
+
+    def __str__(self) -> str:
+        detail = " ".join((self.stderr or "").split())
+        return f"{super().__str__()} {detail}" if detail else super().__str__()
+
+
+def _run_git(args: list[str], env: dict | None, check: bool):
+    p = subprocess.run(["git", *args], cwd=PROJECT_DIR, env=env,
+                       capture_output=True, text=True)
+    if check and p.returncode != 0:
+        raise GitFailed(p.returncode, ["git", *args], p.stdout, p.stderr)
+    return p
+
+
 def _git(args: list[str], env: dict | None = None) -> str:
     """Run a git command from the project root, return stripped stdout.
 
-    Raises CalledProcessError on non-zero exit; callers that expect a
-    command to fail (e.g. resolving a not-yet-created ref) catch it."""
-    return subprocess.run(
-        ["git", *args], cwd=PROJECT_DIR, env=env,
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
+    Raises GitFailed (a CalledProcessError) on non-zero exit; callers that
+    expect a command to fail (e.g. resolving a not-yet-created ref) catch
+    it."""
+    return _run_git(args, env, check=True).stdout.strip()
 
 
 def _git_raw(args: list[str], env: dict | None = None) -> str:
@@ -188,20 +257,14 @@ def _git_raw(args: list[str], env: dict | None = None) -> str:
     since replay is sequential, also desynchronises every later attempt.  This
     was measured: 2 of 19 records in the 43sp corpus lost trailing context that
     way and took 5 of 19 down with them."""
-    return subprocess.run(
-        ["git", *args], cwd=PROJECT_DIR, env=env,
-        capture_output=True, text=True, check=True,
-    ).stdout
+    return _run_git(args, env, check=True).stdout
 
 
 def _git_opt(args: list[str]) -> str:
     """Like _git but returns "" instead of raising on non-zero exit — for
     optional provenance (user.email, origin url) that may be unset, so a
     missing value never drops the whole record."""
-    return subprocess.run(
-        ["git", *args], cwd=PROJECT_DIR,
-        capture_output=True, text=True,
-    ).stdout.strip()
+    return _run_git(args, None, check=False).stdout.strip()
 
 
 def _instance_id() -> str:
@@ -238,19 +301,104 @@ def _write_last_attempt(tree: str, head: str, full_tree: str) -> None:
     LAST_ATTEMPT_FILE.write_text(f"{tree}\t{head}\t{full_tree}\n")
 
 
-def _matching_pathspecs(env: dict) -> list[str]:
-    """The subset of SOURCE_PATHSPECS matching at least one file git would
-    add, so the caller never hands `git add` a pathspec that matches nothing.
+def capture_blocker(project: Path) -> str | None:
+    """Why capture cannot work in `project`, or None if it can.
 
-    Checked against tracked-or-untracked-but-not-ignored files, which is
-    exactly the set `git add -A -- <spec>` would stage."""
+    Public and taking a path, because `isabelle-build --where` asks the same
+    question at the other end of the timeline.  `--where` exists to answer
+    "what will adopting this do to my repo" *before* the first build, and
+    "nothing, until you commit something" is exactly that answer -- learning
+    it from a warning after the fact is how this is usually found out.
+
+    Its own subprocess calls rather than `_git_opt`, which is pinned to
+    `PROJECT_DIR`: the caller may be asking about a directory that is not the
+    one this module resolved at import.
+    """
+    def out(args: list[str]) -> str:
+        return subprocess.run(["git", *args], cwd=project,
+                              capture_output=True, text=True).stdout.strip()
+
+    if out(["rev-parse", "--verify", "-q", "HEAD"]):
+        return None
+    # `--is-inside-work-tree` is the discriminator: `true` in a repository
+    # whose branch is merely unborn, a fatal outside one.
+    if out(["rev-parse", "--is-inside-work-tree"]) != "true":
+        return NO_REPOSITORY.format(dir=project)
+    return NO_COMMITS.format(dir=project)
+
+
+def _head_or_why_not() -> str:
+    """HEAD's commit, or raise `CaptureUnavailable` saying what is missing.
+
+    Both states this separates were fatal a moment later and identically
+    unhelpful: `git rev-parse HEAD` says `fatal: not a git repository` in one
+    and prints back the word `HEAD` in the other, and either arrived wrapped
+    in a `CalledProcessError` beside a green build.  A brand-new
+    formalisation is exactly where a `git init` with nothing committed yet
+    happens, which is exactly where the attempts are worth most -- the same
+    observation that made the untracked-pathspec bug expensive.
+
+    The probe here *replaces* the `rev-parse HEAD` that was on this line, so
+    a healthy build costs the same one process it always did; the diagnosis
+    is deferred to the path that is about to print a paragraph anyway.
+    """
+    head = _git_opt(["rev-parse", "--verify", "-q", "HEAD"])
+    if head:
+        return head
+    raise CaptureUnavailable(capture_blocker(PROJECT_DIR)
+                             or NO_REPOSITORY.format(dir=PROJECT_DIR))
+
+
+def _have_tree(obj: str | None) -> bool:
+    """Whether this object store can still reach `obj` as a tree.
+
+    The chain pointer names throwaway tree objects that nothing references,
+    so they are unreachable by design and can go at any `git gc --prune` —
+    and they are strictly local: a clone never receives them, because nothing
+    points at them to fetch.
+
+    Both matter, because a missing base is not a recoverable error here.
+    `git diff <gone> <tree>` is fatal, so the record is lost, and the pointer
+    is rewritten only *after* a record lands — so the same stale base is read
+    again next build, and every subsequent attempt is lost too.  A project
+    that committed `.last-attempt` (reasonably enough: it sits beside
+    `builds.jsonl`, which certainly is data) would capture nothing at all in
+    a fresh clone, silently and permanently.
+
+    Re-baselining on HEAD instead costs one over-large diff, once.  It is the
+    same trade as a mid-flight commit, which re-baselines for a different
+    reason, and the same direction as everything else here: capturing too
+    much is recoverable, capturing nothing is not.
+    """
+    if not obj:
+        return False
+    return _run_git(["cat-file", "-e", f"{obj}^{{tree}}"], None,
+                    check=False).returncode == 0
+
+
+def _matching_pathspecs(env: dict, *, tracked_only: bool = False) -> list[str]:
+    """The subset of SOURCE_PATHSPECS matching at least one file git would
+    stage, so the caller never hands `git add` a pathspec that matches
+    nothing — which is fatal, exit 128, and not covered by --ignore-errors.
+
+    **The two passes need different denominators, and conflating them cost a
+    downstream project its first five attempts.**  `git add -A -- <spec>` can
+    stage anything tracked-or-untracked-but-not-ignored, which is the default
+    here.  `git add -u -- <spec>` can only ever stage something *tracked*, so
+    a spec matching untracked files alone passes an --others filter and then
+    kills the very command the filter exists to protect.
+
+    That is not an edge case: it is a project's first theory.  Before any
+    `.thy` or `ROOT` is committed, every source pathspec matches only
+    untracked files, so pass 1 was fatal on the first build of every new
+    formalisation — the case capture matters most for, and the one where
+    there is no earlier record to notice the gap against.
+    """
+    listing = ["ls-files", "--cached"] if tracked_only else \
+              ["ls-files", "--cached", "--others", "--exclude-standard"]
     out = []
     for spec in SOURCE_PATHSPECS:
-        listed = subprocess.run(
-            ["git", "ls-files", "--cached", "--others", "--exclude-standard",
-             "--", spec],
-            cwd=PROJECT_DIR, env=env, capture_output=True, text=True,
-        )
+        listed = _run_git([*listing, "--", spec], env, check=False)
         if listed.returncode == 0 and listed.stdout.strip():
             out.append(spec)
     return out
@@ -303,9 +451,18 @@ def _snapshot_tree(sources_only: bool) -> str:
         # --ignore-errors does NOT cover that (it covers unreadable files).
         # A project with no ROOTS file, or none of a whole source class,
         # would otherwise lose every record to a fatal on that one pathspec.
+        # Each pass is filtered against what *it* can stage; see
+        # `_matching_pathspecs` for why one filter for both was wrong.
         present = _matching_pathspecs(env)
         if sources_only and present:
-            _git(["add", "-u", "--", *present], env=env)
+            # Pass 1 may only be given specs matching something tracked.  An
+            # empty list is not the no-allowlist fallback below — it is the
+            # ordinary state of a project whose theories are all still
+            # untracked, where there is simply nothing for `-u` to update
+            # and pass 2 stages the lot.
+            tracked = _matching_pathspecs(env, tracked_only=True)
+            if tracked:
+                _git(["add", "-u", "--", *tracked], env=env)
         else:
             _git(["add", "-u"], env=env)
         # --ignore-errors so an unreadable stray file cannot cost a build.
@@ -465,20 +622,30 @@ def record(*, argv: list[str], outcome: str, exit_code: int,
            contention: "dict | None" = None) -> None:
     """Capture one build attempt.  Never raises into the caller (the
     shared `run_guarded` swallows and warns on any failure)."""
-    run_guarded("build-record", lambda: _record(
-        argv, outcome, exit_code, timeout_reason,
-        elapsed_s, error_head, log_name, power, battery_factor,
-        error_loci or [], limits, contention))
+    def go() -> None:
+        try:
+            _record(argv, outcome, exit_code, timeout_reason,
+                    elapsed_s, error_head, log_name, power, battery_factor,
+                    error_loci or [], limits, contention)
+        except CaptureUnavailable as why:
+            # Inside the guard, not before it: the reporting path is
+            # instrumentation too, and must not be the thing that breaks a
+            # build.
+            print(f"build-record: NOT recorded -- {why}", file=sys.stderr)
+    run_guarded("build-record", go, lost=ATTEMPT_LOST)
 
 
 def _record(argv, outcome, exit_code, timeout_reason,
             elapsed_s, error_head, log_name,
             power="unknown", battery_factor=1.0, error_loci=None,
             limits=None, contention=None) -> None:
+    # First, and before anything is created: a project that cannot be
+    # captured should not acquire an `instance-id` for a corpus it will
+    # never have.
+    head = _head_or_why_not()
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     instance = _instance_id()
     branch = _git(["rev-parse", "--abbrev-ref", "HEAD"]) or "DETACHED"
-    head = _git(["rev-parse", "HEAD"])
     head_tree = _git(["rev-parse", "HEAD^{tree}"])
 
     # Snapshot the tracked working tree to a tree object purely to diff it;
@@ -494,14 +661,18 @@ def _record(argv, outcome, exit_code, timeout_reason,
     # commit), re-baseline on the new HEAD's tree so the committed content is
     # excluded and the diff stays the small uncommitted edit.
     last_tree, last_head, last_full = _read_last_attempt()
-    same_run = last_tree is not None and last_head == head
+    # `_have_tree` is the third condition and not an optimisation: a chain
+    # pointer naming an object this store cannot reach makes the diff below
+    # fatal, and because the pointer is only rewritten once a record lands,
+    # that loses every attempt from here on rather than one.
+    same_run = last_head == head and _have_tree(last_tree)
     base = last_tree if same_run else head_tree
     # _git_raw, not _git: trailing blank context lines are part of the patch.
     diff = _git_raw(["diff", "--no-color", "-M", base, tree])
     # Same baseline logic, over the unfiltered snapshot, for the report of
     # what changed outside the sources.
-    other = _other_changed(last_full if (same_run and last_full) else head_tree,
-                           tree_full)
+    other = _other_changed(last_full if (same_run and _have_tree(last_full))
+                           else head_tree, tree_full)
     _write_last_attempt(tree, head, tree_full)
 
     note, note_source, note_pre_build, note_age_s = _read_note(elapsed_s)

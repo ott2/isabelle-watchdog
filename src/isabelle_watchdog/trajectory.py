@@ -871,8 +871,26 @@ def _attempts():
     was a script rather than a module.  Loading a file that way gives it no
     parent package, so its own `from . import corpus` cannot resolve -- the
     shim outlived the problem it solved and became one.
+
+    A missing `isabelle-layout` exits with the message rather than a
+    traceback, which is what the rest of this CLI does with a condition the
+    operator can fix -- `no corpus found` lists what it tried and all three
+    remedies.  This path was the exception, and it was the one most likely to
+    be met: `check` and the builds themselves do not route through here, so
+    an absent dependency presents as "the writer works, the readers don't",
+    which reads like a corpus problem rather than an install problem.
+
+    The message rides on the exception (`roots.MISSING_LAYOUT`) rather than
+    being restated here: reading it off a constant would mean importing
+    `roots`, which is the very import that fails.
     """
-    from . import attempts
+    try:
+        from . import attempts
+    except ModuleNotFoundError as exc:
+        if exc.name != "isabelle_layout":
+            raise
+        print(f"FAIL: {exc}", file=sys.stderr)
+        raise SystemExit(2)             # as every other fixable failure exits
     return attempts
 
 
