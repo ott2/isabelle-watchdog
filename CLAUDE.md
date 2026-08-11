@@ -806,6 +806,23 @@ lines at the right times exercises the real code path. It found two defects in
 the read loop that a corpus never could — see the fixtures in
 `tests/conftest.py`.
 
+**A fake that counts calls is measuring the test machine.** The contention
+tests drive a fake `ps` (`cpu_stub`, in the supervision test file) to hold a
+duty cycle still. It used to advance its reported CPU a fixed step *per call*,
+which makes the presented duty `step × calls-per-second` — and
+calls-per-second is not 1, because each sample costs the sampler two `pgrep`s
+and the stub itself, at 150–300 ms per exec on a Mac with a security agent in
+the path. A nominal 1 s interval measured 2.3 s, so every duty in the group
+arrived at 0.43× its nominal value: `duty 0.1` read 0.043, under `STALL_DUTY`,
+and the *starved* build one test had set up was measured as a *stalled* one.
+It failed 3/3 here and presumably passed wherever it was written, which is the
+tell — the error is systematic in the machine's exec latency, and unbounded as
+that grows. The stub now reports against the child's own `ps -o etime=`, so
+the sampler's cost changes *when* samples land rather than what they say; what
+is left is whole-second resolution, ±40% and bounded. The general form: **a
+fixture that stands in for a measurement must not derive its answer from the
+thing being measured.**
+
 `test_isabelle_integration.py` is the third layer: a green build, a false lemma
 (so a locus is extracted from genuine Isabelle output), and an axiom that
 rewrites `f x → f (Suc x)` forever. The last is the one worth its ~2m45s — it

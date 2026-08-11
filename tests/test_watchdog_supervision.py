@@ -294,9 +294,10 @@ def test_an_undetectable_power_state_scales_nothing(watchdog, stub_bin):
 # real one on a spinner reports whatever the machine happens to be doing while
 # the suite runs.
 
-def cpu_stub(stub_bin, tmp_path, cs_per_call: int):
-    """A fake `ps` whose reported tree CPU advances `cs_per_call` centiseconds
-    per sample.  With CPU_SAMPLE_INTERVAL=1 that is the duty cycle x 100.
+def cpu_stub(stub_bin, cs_per_second: int):
+    """A fake `ps` reporting `cs_per_second` centiseconds of tree CPU for every
+    second the supervised child has been alive -- so it presents a duty cycle
+    of `cs_per_second / 100`, whatever the sampler's own timing does.
 
     Pure `sh`, and that is a requirement rather than a style: this stands in
     for `ps` inside the supervisor's `select()` loop, which is the loop whose
@@ -306,29 +307,44 @@ def cpu_stub(stub_bin, tmp_path, cs_per_call: int):
     loop for that long each sample, inflating the runs it was measuring.  A
     fixture must not perturb the quantity under test.
 
-    The cost of staying cheap is that duty is `cs_per_call x calls-per-second`
-    rather than a fraction of the clock, and calls-per-second is only
-    approximately one: the sampler fires on its own timer from a loop polling
-    with a 1 s timeout, so a poll landing a hair early skips a sample and the
-    next window spans two seconds with one call in it, halving the measured
-    duty.
+    **It reports against a clock, not a call counter**, and that is the whole
+    of why these tests hold still.  Counting calls makes the presented duty
+    `cs_per_call x calls-per-second`, and calls-per-second is not 1: the
+    sampler pays two `pgrep`s and this stub per sample, and on the machine
+    above each exec costs 150-300 ms, so a nominal 1 s interval measures 2.3 s
+    and every duty here came out at 0.43x its nominal value.  That error is
+    systematic in the machine's exec latency rather than an occasional skipped
+    sample, and it is unbounded as that latency grows: it put a nominal duty
+    of 0.10 at 0.043, under STALL_DUTY, so the *starved* build a test had set
+    up was measured as a *stalled* one and the extension it was asserting was
+    never applied.  Anchoring to the child's own elapsed time makes the
+    sampler's cost change *when* samples land, not what they say.
 
-    Rather than chase determinism there, each test below is made robust to a
-    skipped sample -- which is a fair demand, since a real machine can deliver
-    an irregular sample too.  Two ways, and which one applies is worth
-    knowing when adding a case:
+    The real `ps` is reached by absolute path -- PATH now starts with this
+    stub -- and `-o etime=` is the field that answers "how long has this been
+    alive".  What is left is its whole-second resolution: both ends of a
+    window are floored independently, so a window of span `t` reads within
+    `1/t` of nominal, in *either* direction.  `t` is a sample interval or two
+    (2-3 s in practice), which puts the residue around +/-40%, and it does not
+    grow with the machine -- that is the difference that matters.  Measured
+    here: nominal 0.20 reads 0.227, 0.50 reads 0.478, 3.0 reads 2.83.
 
-      - where a *verdict* is asserted, the value has headroom, so halving it
-        does not cross a threshold;
-      - where a *factor* is asserted, `min(cap, 1/duty)` already saturates,
-        so halving the duty changes nothing.
+    Two rules follow for adding a case.  Leave a duty a factor of two clear of
+    any threshold it must stay one side of (STALL_DUTY 0.05, RUNNING_DUTY
+    0.9); and assert an exact `load_factor_applied` only where `min(cap,
+    1/duty)` saturates, since an unsaturated factor inherits the +/-40% and
+    can only be given a band.
     """
-    counter = tmp_path / "ps-calls"
     stub_bin("ps", f"""
-n=$(cat {counter} 2>/dev/null || echo 0)
-n=$((n + 1))
-echo $n > {counter}
-cs=$((n * {cs_per_call}))
+PS=/bin/ps
+[ -x "$PS" ] || PS=/usr/bin/ps
+for a in "$@"; do pids=$a; done          # the pid list is the last argument
+set -- $($PS -o etime= -p "${{pids%%,*}}")   # splitting strips ps's padding
+et=${{1#*-}}                                 # drop a DD- prefix if one appears
+secs=0
+IFS=:
+for f in $et; do f=${{f#0}}; secs=$((secs * 60 + ${{f:-0}})); done
+cs=$((secs * {cs_per_second}))
 printf '  %d:%02d.%02d\\n' $((cs / 6000)) $((cs / 100 % 60)) $((cs % 100))
 """)
 
@@ -339,8 +355,7 @@ def with_stub(stub_bin, **env):
     return env
 
 
-def test_a_starved_build_is_given_back_the_time_it_did_not_get(watchdog, stub_bin,
-                                                               tmp_path):
+def test_a_starved_build_is_given_back_the_time_it_did_not_get(watchdog, stub_bin):
     """A build getting a quarter of a core has had a quarter of the budget it
     was charged for, so 1/duty restores what it would have had uncontended.
 
@@ -348,23 +363,25 @@ def test_a_starved_build_is_given_back_the_time_it_did_not_get(watchdog, stub_bi
     core means the same thing on any machine, so nothing here is calibrated
     against the one it was written on.
     """
-    cpu_stub(stub_bin, tmp_path, 25)                      # duty 0.25 -> factor 4
+    cpu_stub(stub_bin, 25)                      # duty 0.25 -> factor ~4
     run = watchdog("sh", "-c", STARTED + "sleep 5", WATCHDOG_TIMEOUT=30,
                    **with_stub(stub_bin, WALL_TIMEOUT=3, LOAD_FACTOR_MAX=4.0))
-    assert run.code == 0, run                             # 3s x 4 = 12s > 5s
+    # The claim, and the one assertion here that carries no measurement error:
+    # unextended, a 3 s budget kills this at 3 s.  It lived, so it was given
+    # the time back.
+    assert run.code == 0, run                             # 3s x ~4 = ~12s > 5s
     c = run.record["contention"]
     assert c["verdict"] == "starved"
-    # A band, not `== 4.0`: the factor is `1/duty` over a *measured* duty, so
-    # it lands near 4 and not on it.  The old exact assertion held only
-    # because the fixture's duty came out slightly *low* and `min(cap, …)`
-    # clamped the result back to the cap -- reading as precision when it was
-    # saturation.  An accurate fixture gives 3.9-something, which is the
-    # honest answer.
-    assert 3.5 <= c["load_factor_applied"] <= 4.0
+    # A band, not `== 4.0`, and a wide one.  This is the only test in the
+    # group asserting an *unsaturated* factor, so it is the only one exposed
+    # to the fixture's whole-second `etime` resolution -- +/-40% on the duty,
+    # hence 1/duty anywhere from 2.8 to over the cap (see `cpu_stub`).  The
+    # exact arithmetic is settled by the pure `contention` tests, which take a
+    # duty as an argument and can assert 4.0 on the nose.
+    assert 2.7 <= c["load_factor_applied"] <= 4.0
 
 
-def test_a_build_running_flat_out_still_trips_its_budget(watchdog, stub_bin,
-                                                         tmp_path):
+def test_a_build_running_flat_out_still_trips_its_budget(watchdog, stub_bin):
     """The property the whole design turns on.
 
     A proof that got genuinely more expensive burns CPU at full rate, so it is
@@ -373,10 +390,10 @@ def test_a_build_running_flat_out_still_trips_its_budget(watchdog, stub_bin,
     cost-regression signal the tight wall budget exists to carry.
     """
     # Three cores' worth, not exactly one: a parallel build is the ordinary
-    # instance of this, and the headroom means a skipped sample still reads
-    # `running` rather than flipping to `starved` and sparing the build --
-    # which is how this test used to fail about a third of the time.
-    cpu_stub(stub_bin, tmp_path, 300)                     # duty 3.0 -> factor 1
+    # instance of this, and the headroom keeps the measurement clear of
+    # RUNNING_DUTY, so the build is never spared by a low reading -- which is
+    # how this test used to fail about a third of the time.
+    cpu_stub(stub_bin, 300)                     # duty 3.0 -> factor 1
     run = watchdog("sh", "-c", STARTED + "sleep 20", WATCHDOG_TIMEOUT=30,
                    **with_stub(stub_bin, WALL_TIMEOUT=3, LOAD_FACTOR_MAX=4.0))
     assert run.code == 124, run
@@ -386,7 +403,7 @@ def test_a_build_running_flat_out_still_trips_its_budget(watchdog, stub_bin,
     assert rec["contention"]["load_factor_applied"] == 1.0
 
 
-def test_a_stalled_tree_earns_no_extension(watchdog, stub_bin, tmp_path):
+def test_a_stalled_tree_earns_no_extension(watchdog, stub_bin):
     """1/duty is unbounded as duty goes to zero, so the naive rule would hand
     a deadlock four times its deadline.  No CPU is not slowness -- it is the
     absence of work, and more time does not fix it.
@@ -394,7 +411,7 @@ def test_a_stalled_tree_earns_no_extension(watchdog, stub_bin, tmp_path):
     It also sharpens the diagnosis: "no output" alone could be a build working
     quietly, and "no output and no CPU" could not.
     """
-    cpu_stub(stub_bin, tmp_path, 0)                       # duty 0 -> stalled
+    cpu_stub(stub_bin, 0)                       # duty 0 -> stalled
     run = watchdog("sh", "-c", STARTED + "sleep 20", WATCHDOG_TIMEOUT=30,
                    **with_stub(stub_bin, WALL_TIMEOUT=3, LOAD_FACTOR_MAX=4.0))
     assert run.code == 124, run
@@ -407,19 +424,29 @@ def test_a_stalled_tree_earns_no_extension(watchdog, stub_bin, tmp_path):
     assert "used no CPU" in run.out, run
 
 
-def test_the_cap_bounds_what_starvation_can_buy(watchdog, stub_bin, tmp_path):
-    """A budget that stretches without limit is not a budget."""
-    cpu_stub(stub_bin, tmp_path, 10)                      # duty 0.1 -> 1/duty=10
+def test_the_cap_bounds_what_starvation_can_buy(watchdog, stub_bin):
+    """A budget that stretches without limit is not a budget.
+
+    0.2 rather than a more dramatic 0.02, because the duty has to stay a
+    factor of two clear of STALL_DUTY: below that floor nothing is owed at
+    all, the factor is 1.0, and the cap this is about never comes into it.
+    That is precisely how this test used to fail -- it asked for 0.1 from a
+    fixture delivering 0.43x of nominal, got 0.043, and read `stalled`.
+    """
+    cpu_stub(stub_bin, 20)                      # duty 0.2 -> 1/duty=5
     run = watchdog("sh", "-c", STARTED + "sleep 20", WATCHDOG_TIMEOUT=30,
                    **with_stub(stub_bin, WALL_TIMEOUT=3, LOAD_FACTOR_MAX=2.0))
-    assert run.code == 124, run                           # 3s x 2 = 6s, not 30s
-    assert run.record["contention"]["load_factor_applied"] == 2.0
+    assert run.code == 124, run                           # 3s x 2 = 6s, not 15s
+    # Exact, and it stays exact under the fixture's +/-40%: `min(2.0, 1/duty)`
+    # saturates for every duty below 0.5, and this one cannot reach that.
+    c = run.record["contention"]
+    assert c["load_factor_applied"] == 2.0, c
 
 
-def test_the_measurement_can_be_switched_off(watchdog, stub_bin, tmp_path):
+def test_the_measurement_can_be_switched_off(watchdog, stub_bin):
     """LOAD_FACTOR_MAX=1.0 skips the sampling entirely, `ps` calls included --
     the setting to reach for on a machine where this misbehaves."""
-    cpu_stub(stub_bin, tmp_path, 25)
+    cpu_stub(stub_bin, 25)
     run = watchdog("sh", "-c", STARTED + "sleep 20", WATCHDOG_TIMEOUT=30,
                    **with_stub(stub_bin, WALL_TIMEOUT=3, LOAD_FACTOR_MAX=1.0))
     assert run.code == 124, run                           # killed on the nose
@@ -427,7 +454,7 @@ def test_the_measurement_can_be_switched_off(watchdog, stub_bin, tmp_path):
     assert c["verdict"] == "unknown" and c["cpu_time_s"] is None
 
 
-def test_an_unreadable_tree_changes_nothing(watchdog, stub_bin, tmp_path):
+def test_an_unreadable_tree_changes_nothing(watchdog, stub_bin):
     """No `ps`, a platform without one, or a race with the tree exiting.
     Unmeasured contention has to behave exactly as it did before any of this
     existed, or a portability gap becomes a behaviour change."""
@@ -438,29 +465,28 @@ def test_an_unreadable_tree_changes_nothing(watchdog, stub_bin, tmp_path):
     assert run.record["contention"]["verdict"] == "unknown"
 
 
-def test_the_observations_are_recorded_not_just_the_verdict(watchdog, stub_bin,
-                                                            tmp_path):
+def test_the_observations_are_recorded_not_just_the_verdict(watchdog, stub_bin):
     """A record keeping only the applied factor could never answer "was that
     timeout a hard proof or a busy laptop" once the policy above it changed.
     Duty cycle and CPU seconds stay meaningful whatever the policy becomes.
 
     The band is wide because this test is about the fields being *stored*, and
-    a skipped sample halves the stub's duty (see `cpu_stub`).  What the number
-    means exactly is settled by the pure `duty_cycle` tests, which compute it
-    from synthetic samples and can assert 0.25 and 4.0 on the nose.
+    the stub's duty carries the whole-second `etime` residue in both
+    directions (see `cpu_stub`).  What the number means exactly is settled by
+    the pure `duty_cycle` tests, which compute it from synthetic samples and
+    can assert 0.25 and 4.0 on the nose.
     """
-    cpu_stub(stub_bin, tmp_path, 50)                      # ~half a core
+    cpu_stub(stub_bin, 50)                      # ~half a core
     run = watchdog("sh", "-c", STARTED + "sleep 4", WATCHDOG_TIMEOUT=30,
                    **with_stub(stub_bin, WALL_TIMEOUT=6, LOAD_FACTOR_MAX=4.0))
     c = run.record["contention"]
-    assert 0.2 <= c["duty_cycle"] <= 0.6
+    assert 0.25 <= c["duty_cycle"] <= 0.75
     assert c["verdict"] == "starved"               # the band stays inside one
     assert c["cpu_time_s"] > 0
     assert run.record["limits"]["load_factor_max"] == 4.0
 
 
-def test_a_run_too_short_to_sample_claims_no_cpu_time(watchdog, stub_bin,
-                                                      tmp_path):
+def test_a_run_too_short_to_sample_claims_no_cpu_time(watchdog, stub_bin):
     """The pair has to be consistent, because a reader will trust the number.
 
     One sample is taken at spawn, as the baseline the first duty cycle is
@@ -470,7 +496,7 @@ def test_a_run_too_short_to_sample_claims_no_cpu_time(watchdog, stub_bin,
     the same run, one of which could not be true.  Null is the honest answer
     when nothing was measured, and it is the one `duty_cycle` already gives.
     """
-    cpu_stub(stub_bin, tmp_path, 50)
+    cpu_stub(stub_bin, 50)
     # Sampling every 30 s, so only the spawn baseline is ever taken.
     run = watchdog("sh", "-c", STARTED + "sleep 1", WATCHDOG_TIMEOUT=30,
                    **with_stub(stub_bin, WALL_TIMEOUT=10, LOAD_FACTOR_MAX=4.0,
