@@ -94,12 +94,12 @@ still regenerates.
   what it replaced: a `(* … *)` wholly inside the payload now hides what it
   encloses, where the line-wise reader saw through it.
 
-  Required as `>=0.2.0` — a floor and no ceiling, which is what that package
+  Required as `>=0.2.2` — a floor and no ceiling, which is what that package
   asks consumers for. An upper bound cannot tell "0.3 broke something" from
   "0.3 exists", since it is evaluated before anything runs, and it propagates
-  to *our* consumers, who never chose it. 0.2.0 rather than 0.1.0 because
-  0.1.x was never published. Until it reaches PyPI, install it from the
-  sibling checkout (`pip install ../isabelle-layout`) first.
+  to *our* consumers, who never chose it. 0.2.2 because that is the first
+  release published to PyPI: a floor naming versions no index will ever serve
+  reads as a weaker constraint than it is.
 
 - **The version is stated in `pyproject.toml`**, not in
   `src/isabelle_watchdog/__init__.py` via `[tool.hatch.version]`. One file

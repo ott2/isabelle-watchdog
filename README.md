@@ -240,8 +240,9 @@ which needs a real Isabelle and a prebuilt HOL heap and skips cleanly without
 them.
 
 `isabelle-layout` is a runtime dependency, so `pip install -e ".[test]"`
-brings it in. Until it reaches PyPI, install it from the sibling checkout
-first:
+brings it in from PyPI. To test against an unreleased change to it, install
+the sibling checkout over the top afterwards — that order, because installing
+this package would otherwise pull the published one back:
 
 ```sh
 pip install ../isabelle-layout

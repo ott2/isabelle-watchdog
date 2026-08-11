@@ -679,6 +679,14 @@ that skips it ships binaries disagreeing with their own changelog.
 `test_the_version_comes_from_pyproject_and_nowhere_else` fails when they
 disagree and says which command fixes it.
 
+That wart is the whole cost, and it has been weighed and accepted: a number
+anyone can see in the file that states the rest of the project beats a
+reinstall step during development. **`isabelle-layout` chose the other way**
+(`dynamic = ["version"]`), so the two siblings differ here on purpose — do
+not "align" them without re-deciding, and note that the argument does not
+transfer, since only one of them is a library whose consumers read
+`__version__`.
+
 **Why `hatchling`, now that the version is static?** Honestly, not much — the
 dynamic version was most of it. What is left is that
 `[tool.hatch.build.targets.sdist] include` puts the sdist contents in
@@ -702,6 +710,50 @@ only under a real install and would have passed otherwise:
 `readme = "README.md"` that did not exist, and now `__version__`, which has no
 metadata to read outside one.
 
+### Releasing
+
+`.github/workflows/release.yml`, kept **mechanism-identical** to
+`isabelle-layout`'s and `isabelle-query`'s — only the release title differs —
+so a fix to any of the three carries across without a diff to read.
+
+**The release notes are the version-bump commit's message.** Not a style
+preference: the workflow reads `repos/<repo>/commits/<tag>` and publishes that
+commit's message as the Release body. So that one commit is written *for
+users* — what changed since the last release — and everything about how the
+work happened belongs in the commits around it.
+
+```sh
+git commit -m "0.4.0 — <headline>" -m "## Fixed …"
+git tag -a v0.4.0 -m "isabelle-watchdog 0.4.0"
+git push origin main
+git push origin v0.4.0        # `git push` alone does not push tags
+```
+
+Four things that have each cost something, upstream or here:
+
+- **Not the tag annotation.** `gh release create --notes-from-tag` reads the
+  annotation and silently falls back to the commit message when the runner's
+  local tag is lightweight, which mis-published `isabelle-query` v0.2.5.
+  Dereferencing the tag to its commit is deterministic, so that is what the
+  workflow does — which means the annotation is read by nothing.
+- **The workflow must be in the tagged commit's tree.** For `on: push: tags`,
+  Actions resolves the workflow from the pushed ref, not from the default
+  branch. Commit it *before* the release it is meant to publish.
+- **Never `--amend` a release commit that has been pushed.** It leaves the
+  branch a sibling of the remote rather than a descendant, and the only ways
+  out are a force-push or a reconciling merge. Re-tagging is fine — the
+  workflow edits an existing Release rather than erroring — so a bad publish
+  is repaired by a *new* commit and a moved tag, never by rewriting.
+- **`pip install -e .` before tagging.** The editable-install wart above means
+  `-V` reports the pre-bump number until you do, and
+  `test_the_version_comes_from_pyproject_and_nowhere_else` is what catches it.
+
+PyPI upload is manual and separate (`python -m build`, `twine check --strict`,
+`twine upload`), after the tag, so the tag names the tree that produced the
+artefacts. `isabelle-layout`'s `docs/publishing.md` is the long-form runbook
+for the parts that are once-per-person rather than once-per-project — account,
+2FA, token scoping, the TestPyPI rehearsal.
+
 ### `-V` / `--version`
 
 All three entry points, both spellings. Absent, they did more than say
@@ -724,8 +776,8 @@ build runs. Keeping the runtime list short protects the build; it was never a
 reason to hand-roll a runner every contributor then has to learn.
 
 ```sh
-pip install -e ".[test]"
-pip install ../isabelle-layout          # runtime dep, until it reaches PyPI
+pip install -e ".[test]"                # pulls isabelle-layout from PyPI
+pip install ../isabelle-layout          # only to test an unreleased change to it
 pytest -m "not slow and not isabelle"   # pure logic — seconds
 pytest -m "not isabelle"                # + real subprocesses
 pytest                                  # + a real isabelle build

@@ -1,0 +1,51 @@
+# Publish a GitHub Release whenever a vN.N.N tag is pushed, using the
+# tagged commit's message as the release notes.
+#
+# The notes live in the version-bump commit's message (write them there, e.g.
+# `git commit -m "0.4.0 — capture the first build of a new project" -m "## Fixed ..."`).
+# CI reads that commit's message via the API and publishes it, so a tag push
+# becomes a Release with no local `gh` and no web-UI step — which matters
+# because a Release is not a git object and `git push` alone cannot create one.
+# GitHub Actions is free for public repos.
+#
+# Reading the *commit* message (repos/.../commits/<tag> derefs the tag to its
+# commit) is deterministic — unlike `gh release create --notes-from-tag`,
+# which reads the tag annotation and silently falls back to the commit message
+# when the runner's local tag is lightweight.  That mis-published
+# `isabelle-query` v0.2.5's first run.  This workflow is that one's sibling by
+# way of `isabelle-layout`, and is deliberately kept mechanism-identical to
+# both, so a fix to any of them can be carried across without a diff to read:
+# only the release *title* differs.  The step is idempotent (edit if the
+# Release exists, else create) so a re-pushed tag repairs a bad publish.
+#
+# The workflow must exist in the *tagged commit's tree*: for `on: push: tags`,
+# Actions resolves the workflow file from the pushed ref, not from the default
+# branch.  So commit this before the release commit it is meant to publish.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # required to create/edit a Release
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish the Release from the tagged commit's message
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          notes=$(gh api "repos/$REPO/commits/$TAG" --jq '.commit.message')
+          title="isabelle-watchdog ${TAG#v}"
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$REPO" --title "$title" --notes "$notes"
+          else
+            gh release create "$TAG" --repo "$REPO" --title "$title" --notes "$notes" --verify-tag
+          fi

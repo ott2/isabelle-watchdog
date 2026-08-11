@@ -35,9 +35,14 @@ classifiers = [
 # is right: an upper bound cannot tell "0.3 broke something" from "0.3
 # exists", since it is evaluated before anything runs, and it propagates to
 # *our* consumers, who never chose it.  What detects a break is running this
-# suite against it.  0.2.0 because 0.1.x was never published -- an earlier
-# floor would have named versions that will never exist.
-dependencies = ["isabelle-layout>=0.2.0"]
+# suite against it.
+#
+# 0.2.2 is the floor because it is the *first published* release -- 0.1.x and
+# 0.2.0/0.2.1 existed only in the sibling working tree.  A floor naming
+# versions no index will ever serve is not a weaker constraint, it is a
+# fictitious one: it reads as "0.2.0 is enough" while the only thing that can
+# actually satisfy it is 0.2.2.  Say what is true.
+dependencies = ["isabelle-layout>=0.2.2"]
 
 # A *test* dependency is not a runtime one: nothing under `tests/` is
 # installed, imported by the package, or present when a build runs.  Keeping
