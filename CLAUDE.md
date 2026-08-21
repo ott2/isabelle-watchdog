@@ -289,6 +289,24 @@ One JSON line per attempt. Design commitments, all load-bearing:
   verbatim. `expect:` is the field worth the trouble: a prediction recorded
   *before* the outcome is the one self-scoring signal in the corpus — hence
   `note_pre_build` and `note_age_s` record whether it really predated.
+
+  A section opens the note or a line, or follows `; ` **or `. `**. The full
+  stop was not a separator until 2026-08-21, and its absence cost predictions
+  rather than tidiness: a prose diagnosis is a sentence, a sentence ends in a
+  full stop, so `diagnosis: X. expect: ok` swallowed the prediction into the
+  diagnosis and scored the note as unpredicted. Every note that fails to
+  parse *lowers* the measured prediction rate rather than erroring, so a
+  parser that is stricter than the writing it accepts is a parser that quietly
+  edits a published statistic. A full stop needs the trailing space a
+  semicolon does not, because it is also a decimal point and a filename
+  separator — `19.5s` and `v1.2.ref:` must not split.
+
+  **A complaint has to be true of the note, not just of the parse.** The
+  linter's "no `expect:`" fired on notes that visibly contained `expect: ok`,
+  which reads as a broken linter — and the reasonable response, ignoring the
+  warnings, is expensive, because the near-miss check beside it is the only
+  thing standing between `expects:` and a section that silently does not
+  exist. A key present in the text but absent from the parse now says so.
 - **A precondition is not a failure.** `capture_blocker()` separates the two
   states where capture cannot work at all — no repository, and a repository
   with no commits — from the ones where something broke. Both were raw git

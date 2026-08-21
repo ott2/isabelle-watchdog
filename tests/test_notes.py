@@ -40,6 +40,42 @@ def test_semicolon_in_prose_is_not_a_separator():
     assert got == {"change": "swap blast for auto; it was too slow"}
 
 
+def test_a_full_stop_before_a_key_opens_the_next_section():
+    """A prose diagnosis is a sentence, and a sentence ends in a full stop.
+
+    Until 2026-08-21 only `; ` separated sections, so writing the natural
+    thing swallowed the prediction into the diagnosis and the note scored as
+    unpredicted -- while `expect: ok` sat there in plain sight and the linter
+    said there was none (github.com/ott2/isabelle-watchdog#2).
+    """
+    got = R._parse_note("diagnosis: the floor lands mid-distribution. "
+                        "change: none. expect: ok")
+    assert got == {"diagnosis": "the floor lands mid-distribution",
+                   "change": "none", "expect": "ok"}
+    assert R._predicted_outcome(got) == "ok"
+
+
+def test_a_full_stop_in_prose_is_not_a_separator():
+    """Same lookahead as the semicolon: punctuation separates only when a
+    recognised key follows it, so a multi-sentence section stays one."""
+    got = R._parse_note("diagnosis: blast diverges.  auto does not.  "
+                        "Neither closes it; change: try metis")
+    assert got["diagnosis"] == "blast diverges.  auto does not.  Neither closes it"
+    assert got["change"] == "try metis"
+
+
+@pytest.mark.parametrize("note,section", [
+    # A decimal point: a key follows, but not immediately after the dot.
+    ("diagnosis: the by took 19.5s. expect: timeout", "the by took 19.5s"),
+    # A dotted name: the key follows the dot immediately, with no space.  This
+    # is why a full stop needs the trailing space a semicolon does not -- a
+    # period is also a decimal point and a filename separator.
+    ("diagnosis: see v1.2.ref: nothing else", "see v1.2.ref: nothing else"),
+])
+def test_a_dot_that_is_not_sentence_punctuation_does_not_split(note, section):
+    assert R._parse_note(note)["diagnosis"] == section
+
+
 def test_a_section_runs_until_the_next_key():
     got = R._parse_note("diagnosis: the induction\n  is too weak\n"
                         "  over the tape index\nexpect: fail")
@@ -130,6 +166,16 @@ def test_lint_flags_a_note_with_no_sections():
 def test_lint_flags_a_missing_prediction():
     out = R.lint_note("change: swap blast for auto")
     assert any("no `expect:`" in c for c in out), out
+
+
+def test_lint_names_the_real_cause_when_a_key_is_mid_sentence():
+    """"No `expect:`" about a note containing `expect: ok` reads as a broken
+    linter, and the reasonable response to a broken linter is to stop reading
+    it -- which costs the near-miss check too.  The complaint has to be true
+    of the note in front of the operator, not just of the parse."""
+    out = R.lint_note("change: none, expect: ok")
+    assert any("mid-section" in c for c in out), out
+    assert not any("no `expect:`" in c for c in out), out
 
 
 def test_lint_flags_an_unscoreable_prediction():

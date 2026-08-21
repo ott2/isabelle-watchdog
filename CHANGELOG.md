@@ -45,6 +45,31 @@ meaning; what changed is when one of them is set.
   detector now answers is "is this command the only thing still happening",
   which is what a kill needs to know.
 
+- **A note section can follow `. ` as well as `; `**
+  ([#2](https://github.com/ott2/isabelle-watchdog/issues/2)). A prose
+  diagnosis is a sentence and a sentence ends in a full stop, so
+  `diagnosis: the floor lands mid-distribution. expect: ok` swallowed the
+  prediction into the diagnosis — and `isabelle-build --lint` then reported
+  "no `expect:`" about a note with `expect: ok` plainly in it.
+
+  This is a data fix, not a formatting one. Every note that fails to parse
+  silently *lowers* the measured prediction rate rather than erroring, so a
+  parser stricter than the writing it accepts quietly edits a published
+  statistic. A full stop needs the trailing space a semicolon does not,
+  because it is also a decimal point and a filename separator: `19.5s. expect:`
+  splits, `v1.2.ref:` does not.
+
+  The raw `note` was always stored verbatim, so nothing was ever lost from a
+  record — only from `note_fields`, and only for future builds. Existing
+  corpora are untouched; re-parsing one would now find more sections in it.
+
+- **The linter names the real cause when a key is mid-sentence.** A key that
+  appears in the note but not in the parse now says so, instead of being
+  reported as absent. "No `expect:`" about a note containing `expect: ok`
+  reads as a broken linter, and the reasonable response — ignoring the
+  warnings — costs the near-miss check next to it, which is the only thing
+  standing between `expects:` and a section that silently does not exist.
+
 ## [0.3.1] — 2026-08-11
 
 **No record-schema change.** Every reader that could open a 0.3.0 corpus can

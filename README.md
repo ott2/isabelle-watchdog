@@ -56,10 +56,12 @@ without the original git object store. An earlier prototype chained snapshots
 on `refs/attempts/*` and was unshareable for exactly that reason.
 
 **A prediction, recorded before the outcome.** Notes take four keys —
-`diagnosis:`, `change:`, `expect:`, `ref:`. `expect:` is the one worth the
-trouble: it is the only field in a build corpus that scores itself. Because
-that only holds if the note predates the build, the record stores whether it
-did (`note_pre_build`) rather than assuming.
+`diagnosis:`, `change:`, `expect:`, `ref:`. A section opens the note or a
+line, or follows `; ` or `. `, so the one-liner and the multi-line form parse
+alike. `expect:` is the one worth the trouble: it is the only field in a build
+corpus that scores itself. Because that only holds if the note predates the
+build, the record stores whether it did (`note_pre_build`) rather than
+assuming.
 
 **The corpus can prove its own integrity.** Every payload is exactly
 `git diff --no-color -M <base> <tree>` for trees the record names, so

@@ -153,13 +153,34 @@ NOTE_KEYS = ("diagnosis", "change", "expect", "ref")
 # Allow a leading markdown marker so the file reads as prose either way.
 NOTE_KEY_RE = re.compile(r"^\s*[-*#]{0,3}\s*([A-Za-z_]+)\s*:\s*(.*)$")
 # A one-liner is the common case from a command line, where newlines are
-# awkward to type and easy to mangle through a shell.  `; ` immediately before
-# a recognised key is treated as a line break, so
+# awkward to type and easy to mangle through a shell.  `; ` or `. ` immediately
+# before a recognised key is treated as a line break, so
 #   -m 'diagnosis: X; change: Y; expect: ok'
-# parses the same as the three-line form.  The lookahead keeps it precise: a
-# semicolon inside prose is only a separator when a section key follows it.
+#   -m 'diagnosis: X. change: Y. expect: ok'
+# both parse as the three-line form.  The lookahead keeps it precise: the
+# punctuation is only a separator when a section key follows it, so prose
+# keeps its own semicolons and full stops.
+#
+# The period was not a separator until 2026-08-21, and the omission cost more
+# than it looks: a full-sentence diagnosis ends in one, so
+# `diagnosis: the floor lands mid-distribution. expect: ok` swallowed the
+# prediction into the diagnosis and the note scored as unpredicted.  `expect:`
+# is the only self-scoring field in the corpus, and every note that loses it
+# silently *lowers* the measured prediction rate rather than erroring
+# (github.com/ott2/isabelle-watchdog#2).
+#
+# A period needs the trailing space that a semicolon does not, because a period
+# is also a decimal point and a filename separator: `;expect:` can only be
+# someone typing quickly, where `v1.2.ref:` or `notes.ref:` are ordinary text.
+# Requiring the space costs nothing a human would write and rules those out.
 INLINE_SPLIT_RE = re.compile(
-    r";[ \t]*(?=(?:" + "|".join(NOTE_KEYS) + r")[ \t]*:)", re.IGNORECASE)
+    r"(?:;[ \t]*|\.[ \t]+)(?=(?:" + "|".join(NOTE_KEYS) + r")[ \t]*:)",
+    re.IGNORECASE)
+# The same keys, wherever they appear.  Used only by the linter, to tell "you
+# did not write `expect:`" apart from "you wrote it mid-sentence, so it was
+# captured as prose" -- see `lint_note`.
+KEY_ANYWHERE_RE = re.compile(
+    r"\b(" + "|".join(NOTE_KEYS) + r")[ \t]*:", re.IGNORECASE)
 # Anchored at the start of `expect:`, so the convention is `expect: ok — why`.
 # Searching the whole section would read "expect: no timeout this time, ok" as
 # predicting a timeout; an unscored note is better than a miscounted one.
@@ -552,10 +573,21 @@ def lint_note(text: str) -> list[str]:
     prover directly, which costs the *diff* as well as the note — trading the
     irreplaceable half of the record for tidier prose in the half that is
     optional anyway.  So: complain at write time, record the complaints, and
-    capture whatever was written."""
+    capture whatever was written.
+
+    A complaint also has to be true of the note the operator is looking at, not
+    just of the parse.  Telling someone their note has no `expect:` while
+    `expect: ok` is visible in it reads as a broken linter, and the reasonable
+    response — ignoring the warnings — is the expensive one, because the near-
+    miss check above is the only thing standing between `expects:` and a
+    section that silently does not exist."""
     out: list[str] = []
     fields = _parse_note(text) or {}
     seen_keys = [k for k in fields if k in NOTE_KEYS]
+    # Keys the note contains but the parse did not turn into sections: written
+    # mid-sentence, and captured as prose.
+    stranded = sorted({m.group(1).lower() for m in KEY_ANYWHERE_RE.finditer(text)}
+                      - set(fields))
 
     # Near-miss section keys: `expects:` or `diagnose:` silently become prose,
     # which looks identical to a note that simply omitted the section.
@@ -567,15 +599,23 @@ def lint_note(text: str) -> list[str]:
                 out.append(f"line starts `{m.group(1)}:` — did you mean "
                            f"`{near[0]}:`?  Unrecognised keys are kept as prose.")
 
-    if not seen_keys:
+    if stranded:
+        keys = ", ".join(f"`{k}:`" for k in stranded)
+        out.append(f"{keys} {'is' if len(stranded) == 1 else 'are'} in the note "
+                   f"but mid-section, so captured as prose.  A section opens the "
+                   f"note or a line, or follows `; ` or `. ` — `, expect: ok` "
+                   f"does not.")
+    elif not seen_keys:
         out.append("no recognised section (diagnosis/change/expect/ref); "
                    "captured whole as free text, which is fine but not queryable.")
-    elif "expect" not in fields:
+
+    if "expect" in fields:
+        if _predicted_outcome(fields) is None:
+            out.append("`expect:` does not open with ok/fail/timeout, so the "
+                       "prediction cannot be scored.  Write `expect: fail — why`.")
+    elif seen_keys and "expect" not in stranded:
         out.append("no `expect:` — the prediction is the one field that can be "
                    "scored against the outcome automatically.")
-    elif _predicted_outcome(fields) is None:
-        out.append("`expect:` does not open with ok/fail/timeout, so the "
-                   "prediction cannot be scored.  Write `expect: fail — why`.")
     return out
 
 
