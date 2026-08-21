@@ -12,6 +12,7 @@ that resolved to nothing.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -240,6 +241,27 @@ def test_an_unrelated_import_error_is_not_disguised_as_the_dependency(trajectory
     assert "pip install isabelle-layout" not in p.stderr, p.stderr
 
 
+def _source_file(name: str) -> Path:
+    """A file from the source tree beside the tests, or skip.
+
+    Installed from a wheel there is no source tree, and the two release checks
+    below are about the tree a release is cut from rather than about an
+    install.
+    """
+    p = Path(__file__).resolve().parent.parent / name
+    if not p.exists():
+        pytest.skip(f"no {name} beside the tests")
+    return p
+
+
+def _declared_version() -> str:
+    """The version `pyproject.toml` states -- the single statement of it."""
+    m = re.search(r'(?m)^version\s*=\s*"([^"]+)"',
+                  _source_file("pyproject.toml").read_text())
+    assert m, "pyproject.toml states no version"
+    return m.group(1)
+
+
 def test_the_version_comes_from_pyproject_and_nowhere_else():
     """One statement of what this project *is*, in the file that states the
     rest of it.  `__version__` reads it back from the installed metadata, so
@@ -252,17 +274,41 @@ def test_the_version_comes_from_pyproject_and_nowhere_else():
     run again.  A release that skips that ships a binary disagreeing with its
     own changelog.
     """
-    import re
     from isabelle_watchdog import __version__
-    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
-    if not pyproject.exists():          # installed from a wheel, no source tree
-        pytest.skip("no pyproject.toml beside the tests")
-    declared = re.search(r'(?m)^version\s*=\s*"([^"]+)"',
-                         pyproject.read_text())
-    assert declared, "pyproject.toml states no version"
-    assert __version__ == declared.group(1), (
+    declared = _declared_version()
+    assert __version__ == declared, (
         f"installed metadata says {__version__}, pyproject says "
-        f"{declared.group(1)} -- re-run `pip install -e .`")
+        f"{declared} -- re-run `pip install -e .`")
+
+
+def test_the_changelog_names_the_version_being_released():
+    """A release publishes the version-bump commit's message, and that message
+    points at CHANGELOG.md -- so a version with no section there ships a
+    pointer to nothing.
+
+    The failure is quiet and public: `pip install -U` fetches the new code,
+    the Release renders correctly, and only a reader who follows the link
+    finds that the file stops at the previous version.  By then the tag is
+    pushed, and repairing it means a new commit and a moved tag.
+
+    Notes accumulating under `## [Unreleased]` are exactly right until the
+    bump.  What this catches is bumping the version and leaving them there --
+    which is the same slip as the stale editable install above, and lands in
+    the same five minutes.
+
+    It is also the *only* release hazard a test can see.  The rest of the
+    runbook -- the workflow must live in the tagged commit's tree, and
+    `git push` alone does not push tags -- fails by silence, on a machine no
+    test is running on.  That asymmetry is why this is a test and not a
+    Makefile: a check runs unprompted, where a target only helps someone who
+    already remembered the procedure.
+    """
+    declared = _declared_version()
+    text = _source_file("CHANGELOG.md").read_text()
+    assert f"## [{declared}]" in text, (
+        f"pyproject declares {declared}, but CHANGELOG.md has no "
+        f"`## [{declared}]` section -- rename the `## [Unreleased]` heading, "
+        f"or add one, before tagging v{declared}")
 
 
 @pytest.mark.parametrize("flag", ["-V", "--version"])

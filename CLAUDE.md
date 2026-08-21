@@ -813,6 +813,21 @@ Four things that have each cost something, upstream or here:
 - **`pip install -e .` before tagging.** The editable-install wart above means
   `-V` reports the pre-bump number until you do, and
   `test_the_version_comes_from_pyproject_and_nowhere_else` is what catches it.
+- **Rename `## [Unreleased]` in the same commit as the bump.** The notes point
+  at `CHANGELOG.md`, so a version with no section there publishes a pointer to
+  nothing — quietly, since the Release itself renders fine.
+  `test_the_changelog_names_the_version_being_released` catches it.
+
+**Two of those four are tests; the other two are prose, and that split is the
+answer to "should this be a `make release`".** A check runs unprompted; a
+target only helps someone who already remembered the procedure — who is
+exactly the person who was not going to make the mistake. So anything
+checkable moves into `tests/test_cli.py`, and what is left is genuinely
+unsequenceable: the workflow-in-the-tagged-tree rule and `git push` not
+pushing tags both fail by silence, on a machine no test is running on. A
+Makefile would also be a second statement of this runbook, and this repo has
+twice been bitten by an inventory beside the thing it inventories (the audits
+catalogue, the attribution lists) — both since replaced by derivation.
 
 PyPI upload is manual and separate (`python -m build`, `twine check --strict`,
 `twine upload`), after the tag, so the tag names the tree that produced the
