@@ -9,10 +9,27 @@ that changes what a record contains says so here explicitly, and
 `trajectory check` will tell you whether a corpus written by an older version
 still regenerates.
 
-## [Unreleased]
+## [0.4.0] — 2026-08-21
+
+Three fixes, all reported from a real formalisation running 0.3.1 against the
+AFP, and all in the same place: a rule that was right about the build someone
+meant to run and wrong about the build that actually happened.
 
 **No record-schema change.** No field was added, removed or given a new
-meaning; what changed is when one of them is set.
+meaning, and every reader that could open a 0.3.1 corpus can open this one.
+Two things about *content* are worth knowing before you upgrade, both
+affecting new records only and neither rewriting an old one:
+
+- `error_head` now names the stuck theory session-qualified on a timeout
+  (`FSM_Tests.Util`, not `Util`). `error_loci` already did, and
+  `attempts.theory_key` collapses either spelling to the same key.
+- `note_fields` will find sections in notes where 0.3.1 found one long
+  `diagnosis:`. The raw `note` was always stored verbatim, so this recovers
+  structure rather than adding it.
+
+A minor number rather than a patch: nothing breaks, but the loop detector
+decides whether builds get killed and its rule has changed, which is not
+something to discover from a version that says "bug fixes".
 
 ### Fixed
 
