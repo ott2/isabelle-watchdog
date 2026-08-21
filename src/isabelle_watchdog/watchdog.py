@@ -1035,11 +1035,15 @@ def _append_full_error(log_path: Path, db_error: str) -> None:
 
 def _timeout_head(reason: str, loop_key: tuple[str, str, str] | None,
                   loop_elapsed: str, wall_timeout: int) -> str:
-    """One-line timeout description for the attempt record."""
+    """One-line timeout description for the attempt record.
+
+    The theory is session-qualified — see *Summary formatters* below.  This
+    one goes into `error_head`, so it is read years later by someone who
+    cannot ask which session was being built."""
     if loop_key is not None:
         theory, lineno, cmd = loop_key
         return (f'{reason}: "{cmd}" line {lineno} of '
-                f'{theory.split(".")[-1]} ({loop_elapsed}s)')
+                f'{theory} ({loop_elapsed}s)')
     return f"{reason} timeout ({wall_timeout}s wall)"
 
 
@@ -1073,6 +1077,32 @@ def _record_attempt(args: list[str], outcome: str, exit_code: int,
 
 # ---------------------------------------------------------------------------
 # Summary formatters
+#
+# Theory names are printed **session-qualified**, as Isabelle gives them
+# (`FSM_Tests.Util`, not `Util`).  These used to be shortened here on the
+# reasoning that when every supervised build targets one session the qualifier
+# is noise -- true of the build the operator meant to run, and false of the
+# build Isabelle actually planned.  A stale dependency heap silently adds its
+# parent sessions, and then the qualifier is the *only* thing separating the
+# operator's own code from an AFP entry they have never opened:
+#
+#     LOOP  Util: "by" looping on line 1650 ...              <- whose Util?
+#     LOOP  FSM_Tests.Util: "by" looping on line 1650 ...    <- not mine
+#
+# Unconditional rather than "qualify when it differs from the target session",
+# which the report suggested: the watchdog supervises an argv and has no
+# reliable notion of a target -- `isabelle-watchdog <cmd>` need not be an
+# `isabelle build` at all -- so the condition would have to be plumbed in from
+# `build.py` and would still be absent for a direct invocation.  A qualifier
+# that is sometimes there is also a qualifier the reader has to know the rule
+# for, where one that is always there reads the same way every time.
+#
+# `_error_loci` reached the same conclusion for the record earlier and for a
+# sharper reason: 11 base names have lived in more than one session directory
+# in ndtht alone (logging-design.md §13.2.1).  `error_head` is a record field
+# too, so the display and the record now agree, and `attempts.theory_key`
+# already collapses either spelling to the same key
+# (github.com/ott2/isabelle-watchdog#3).
 # ---------------------------------------------------------------------------
 
 def _count_error_loci(lines: list[str]) -> int:
@@ -1110,13 +1140,14 @@ def _error_loci(lines: list[str]) -> list[tuple[str, str]]:
 
 
 def _stuck_locus(loop_key: "tuple[str, str, str] | None") -> str:
-    """`<short-theory> line <N>` for the stuck command, or "" if unknown.
+    """`<theory> line <N>` for the stuck command, or "" if unknown.
     Derived from the last `command running for ...s (line N of theory T)`
-    warning the watchdog saw before the kill."""
+    warning the watchdog saw before the kill.  Session-qualified — see
+    *Summary formatters*."""
     if loop_key is None:
         return ""
     theory, lineno, _cmd = loop_key
-    return f"{theory.split('.')[-1]} line {lineno}"
+    return f"{theory} line {lineno}"
 
 
 def _log_line(log_path: Path, lines: list[str],
@@ -1268,8 +1299,7 @@ def _print_summary_timeout(
     batt = f"  ({'; '.join(notes)})" if notes else ""
     if reason == "loop_progress" and loop_key is not None:
         theory, lineno, cmd = loop_key
-        short_theory = theory.split(".")[-1]
-        print(f'LOOP  {short_theory}: "{cmd}" looping on line {lineno} '
+        print(f'LOOP  {theory}: "{cmd}" looping on line {lineno} '
               f'({loop_count}x same line, last {loop_elapsed}s elapsed)')
     elif reason == "wall":
         # Even on a bare wall timeout, surface the looping line if
@@ -1277,9 +1307,8 @@ def _print_summary_timeout(
         # culprit obvious, no reason to make the user grep for it.
         if loop_key is not None:
             theory, lineno, cmd = loop_key
-            short_theory = theory.split(".")[-1]
             print(f"TIMEOUT  {wall_timeout}s wall clock exceeded "
-                  f'(looping on {short_theory} line {lineno} — '
+                  f'(looping on {theory} line {lineno} — '
                   f'"{cmd}" running for {loop_elapsed}s){batt}')
         else:
             print(f"TIMEOUT  {wall_timeout}s wall clock exceeded{batt}")
@@ -1291,11 +1320,10 @@ def _print_summary_timeout(
         loc = ""
         if loop_key is not None:
             theory, lineno, cmd = loop_key
-            loc = (f' (last: "{cmd}" at {theory.split(".")[-1]} '
+            loc = (f' (last: "{cmd}" at {theory} '
                    f'line {lineno}, {loop_elapsed}s)')
         if progress_theory:
-            short = progress_theory.split(".")[-1]  # drop session prefix
-            print(f"STUCK  {short} {progress_pct}%  "
+            print(f"STUCK  {progress_theory} {progress_pct}%  "
                   f"no output for {activity_timeout}s{loc}{batt}")
         else:
             print(f"STUCK  no output for {activity_timeout}s{loc}{batt}")

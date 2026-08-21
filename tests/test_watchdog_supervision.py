@@ -149,7 +149,11 @@ def test_three_warnings_on_one_line_is_a_loop_and_the_line_is_named(watchdog):
     assert rec["timeout_reason"] == "loop_progress"
     assert rec["error_loci"] == [["Probe.Probe_A", "12"]]
     assert "12" in rec["error_head"] and "by" in rec["error_head"]
-    assert "LOOP" in run.out
+    # Session-qualified, in the record and on the terminal alike: the theory
+    # that hangs is not always one the operator has opened, and the qualifier
+    # is what says so (github.com/ott2/isabelle-watchdog#3).
+    assert "Probe.Probe_A" in rec["error_head"], rec["error_head"]
+    assert 'LOOP  Probe.Probe_A: "by" looping on line 12' in run.out, run.out
 
 
 def test_warnings_on_different_lines_are_progress_not_a_loop(watchdog):
@@ -221,7 +225,7 @@ def test_a_wall_kill_still_names_a_line_it_happens_to_know(watchdog):
     rec = run.record
     assert rec["timeout_reason"] == "wall"
     assert rec["error_loci"] == [["Probe.Probe_A", "12"]]
-    assert "looping on Probe_A line 12" in run.out
+    assert "looping on Probe.Probe_A line 12" in run.out
 
 
 # ------------------------------------------------------- reading the pipe itself

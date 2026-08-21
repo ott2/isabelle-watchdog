@@ -140,9 +140,17 @@ def test_a_progress_line_for_a_different_command_does_not_match_the_loop_shape()
 # ------------------------------------------------------------------- summaries
 
 def test_a_timeout_head_names_the_line_when_one_is_known():
+    """Session-qualified, `Probe.Probe_A` and not `Probe_A`.
+
+    This string is the record's `error_head`, read long after the build by
+    someone who cannot ask which session it was.  A stale dependency heap
+    silently adds its parent sessions to the plan, so the stuck theory need
+    not be one the operator has ever opened -- and then the qualifier is the
+    only thing that says so (github.com/ott2/isabelle-watchdog#3).
+    """
     head = W._timeout_head("loop_progress", ("Probe.Probe_A", "12", "by"),
                            "19.9", 40)
-    assert head == 'loop_progress: "by" line 12 of Probe_A (19.9s)'
+    assert head == 'loop_progress: "by" line 12 of Probe.Probe_A (19.9s)'
 
 
 def test_a_bare_wall_timeout_has_no_locus_to_name():
@@ -155,7 +163,7 @@ def test_the_log_line_leads_with_the_stuck_command(tmp_path):
     """A hang's first question is 'where', and the log path is printed first
     so `make build | head -3` still captures it."""
     line = W._log_line(tmp_path / "b.log", [], ("Probe.Probe_A", "12", "by"))
-    assert line.endswith("(stuck at Probe_A line 12)")
+    assert line.endswith("(stuck at Probe.Probe_A line 12)")
 
 
 @pytest.mark.parametrize("lines,tail", [

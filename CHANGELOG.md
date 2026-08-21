@@ -70,6 +70,21 @@ meaning; what changed is when one of them is set.
   warnings — costs the near-miss check next to it, which is the only thing
   standing between `expects:` and a section that silently does not exist.
 
+- **The timeout summary keeps the session qualifier on a stuck theory**
+  ([#3](https://github.com/ott2/isabelle-watchdog/issues/3)). `LOOP
+  FSM_Tests.Util: …` rather than `LOOP Util: …`, in the `LOOP`, `TIMEOUT` and
+  `STUCK` lines and in the record's `error_head`. Shortening assumed every
+  supervised build targets one session — true of the build the operator meant
+  to run, false of the one Isabelle planned, because a stale dependency heap
+  silently adds its parent sessions. The reporter went looking for a `Util`
+  that was not in their project.
+
+  Unconditional rather than "qualify when it differs from the target session":
+  the watchdog supervises an argv and has no reliable notion of a target. This
+  changes `error_head`'s text for *new* timeout records; `error_loci` already
+  carried the qualified name, and `attempts.theory_key` collapses either
+  spelling to the same key, so nothing downstream reads differently.
+
 ## [0.3.1] — 2026-08-11
 
 **No record-schema change.** Every reader that could open a 0.3.0 corpus can

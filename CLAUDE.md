@@ -153,6 +153,22 @@ reports `100%`, so nothing from the stuck theory itself resets the count
 either. The question the detector answers is now "is this command the only
 thing still happening" rather than "has this command been slow three times".
 
+**Theory names are printed session-qualified** — `FSM_Tests.Util`, not `Util`
+— in the summaries and in the record's `error_head`. They were shortened on
+the reasoning that when every supervised build targets one session the
+qualifier is noise: true of the build the operator *meant* to run, false of
+the one Isabelle planned. A stale dependency heap silently adds its parent
+sessions, and then the qualifier is the only thing separating the operator's
+own code from an AFP entry they have never opened — `LOOP Util: "by" looping
+on line 1650` sent someone looking for a file that was not theirs.
+Unconditional rather than "qualify when it differs from the target", because
+the watchdog supervises an argv and has no reliable notion of a target; and
+because a qualifier that is sometimes there is one the reader has to know the
+rule for. `_error_loci` reached this conclusion for the record earlier and
+for a sharper reason — 11 base names have lived in more than one session
+directory in ndtht alone — so the display and the record now agree, and
+`attempts.theory_key` already collapses either spelling to one key.
+
 **Three coupled constants — do not change one alone.** The watchdog injects
 `-o build_progress_threshold=15` into the `isabelle build` argv. Isabelle's own
 default is 20 s, the *same* as `WATCHDOG_TIMEOUT`, so the line-bearing warning
