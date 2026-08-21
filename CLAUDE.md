@@ -121,6 +121,38 @@ stdout for `WATCHDOG_TIMEOUT`), **wall** (`WALL_TIMEOUT` total), and **loop**
 (line Y of theory Z)` warnings on the same `(theory, line, command)` triple).
 The loop detector is the one that names the stuck line.
 
+**"Consecutive" means among all output, not among warnings** — and getting
+that wrong killed a healthy build. Isabelle builds a session's theories in
+parallel, so a merely slow `by` emits its warnings *while the rest of the
+session progresses*; a counter that only compares a warning against the
+previous warning cannot see the thirteen other theories that started in
+between, and three warnings spread over 73 seconds read as a tactic spinning
+on one line. Any other line therefore resets the count.
+
+Two things about that rule are deliberate:
+
+- **Any line, not an enumerated set of "progress" lines.** A list of what
+  progress looks like is a guess that goes stale — the same argument as
+  `git ls-files` over a filesystem walk in *Deriving what to build*. The two
+  failures are also not symmetric: a missed loop kill costs the gap between
+  the loop budget and the wall budget, and `_summary` names the line on a
+  wall kill anyway, whereas a false loop kill destroys a partial build.
+  Isabelle discards a session's heap image when rebuilding one, so a
+  mid-rebuild kill leaves nothing to resume from — the reporter lost two AFP
+  entries.
+- **The count resets; the key does not.** `loop_key` is what lets a wall or
+  activity kill name the last line Isabelle complained about, which is the
+  one thing those two diagnoses cannot otherwise supply.
+
+This postpones the kill on a parallel build rather than surrendering it, and
+postpones it to exactly the moment its claim becomes true. Measured against a
+real looping `by` beside three theories building in parallel: the others
+finished at 5.6 s, and the warnings then ran uninterrupted every 2 s for the
+rest of a 75 s capture. A theory holding an unfinished forked proof never
+reports `100%`, so nothing from the stuck theory itself resets the count
+either. The question the detector answers is now "is this command the only
+thing still happening" rather than "has this command been slow three times".
+
 **Three coupled constants — do not change one alone.** The watchdog injects
 `-o build_progress_threshold=15` into the `isabelle build` argv. Isabelle's own
 default is 20 s, the *same* as `WATCHDOG_TIMEOUT`, so the line-bearing warning
@@ -389,7 +421,7 @@ derivation; see *Deriving what to build* below.
 | `BATTERY_FACTOR` | 2.0 | scales all three budgets on battery (*assumed*); 1.0 disables |
 | `LOAD_FACTOR_MAX` | 4.0 | cap on the *measured* contention factor; 1.0 disables the sampling |
 | `CPU_SAMPLE_INTERVAL` | 5.0 | seconds between process-tree CPU samples |
-| `LOOP_PROGRESS_THRESHOLD` | 3 | consecutive same-line warnings before loop kill |
+| `LOOP_PROGRESS_THRESHOLD` | 3 | same-line warnings, uninterrupted by any other output, before loop kill |
 | `BUILD_PROGRESS_THRESHOLD` | 15 | injected as `-o build_progress_threshold=N` |
 | `LOG_NAME` | `last-build.log` | log basename; override per stage |
 | `WATCHDOG_LOG_DIR` | resolved, see below | where records go; read by watchdog, recorder *and* readers |

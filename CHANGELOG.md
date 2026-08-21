@@ -9,6 +9,42 @@ that changes what a record contains says so here explicitly, and
 `trajectory check` will tell you whether a corpus written by an older version
 still regenerates.
 
+## [Unreleased]
+
+**No record-schema change.** No field was added, removed or given a new
+meaning; what changed is when one of them is set.
+
+### Fixed
+
+- **A parallel build that was still progressing could be killed as a loop**
+  ([#1](https://github.com/ott2/isabelle-watchdog/issues/1)). The detector's
+  rule is N consecutive `command "X" running for ...s` warnings on one
+  `(theory, line, command)` triple, but the counter only ever compared a
+  warning against the previous *warning* — so everything printed in between
+  was invisible to it. Isabelle builds a session's theories in parallel, so a
+  merely slow `by` emits its warnings while the rest of the session visibly
+  progresses, and three of those spread over 73 seconds with thirteen other
+  theories starting between them read as a tactic spinning on one line.
+
+  The reporter lost two full AFP entries to it: Isabelle discards a session's
+  heap image when rebuilding, so a mid-rebuild kill leaves nothing to resume
+  from.
+
+  Any other output now resets the count, rather than an enumerated set of
+  lines that count as progress — a list of what progress looks like is a
+  guess that goes stale, and the two failures are not symmetric. A missed
+  loop kill costs the difference between the loop budget and the wall budget,
+  and the summary still names the line, because a wall kill reports
+  `loop_key` too. A false loop kill destroys a partial build.
+
+  **The kill is postponed, not surrendered.** It fires as soon as its claim
+  becomes true: measured against a real looping `by` beside three theories
+  building in parallel, the others finished at 5.6 s and the warnings then
+  ran uninterrupted every 2 s for the rest of a 75 s capture — three of them
+  land 4 s after the first, exactly as on a single-theory build. What the
+  detector now answers is "is this command the only thing still happening",
+  which is what a kill needs to know.
+
 ## [0.3.1] — 2026-08-11
 
 **No record-schema change.** Every reader that could open a 0.3.0 corpus can

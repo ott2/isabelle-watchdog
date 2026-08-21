@@ -38,6 +38,13 @@ def warn(line: int = 12, cmd: str = "by", secs: str = "15.0") -> str:
             f'(line {line} of theory "Probe.Probe_A")\'; ')
 
 
+# A sibling theory starting: the session progressing somewhere that is not the
+# slow command.  Isabelle builds a session's theories in parallel, so this is
+# what interleaves with the warnings above on any build bigger than a probe.
+def sibling(name: str = "Probe_B") -> str:
+    return f'echo "Probe: theory Probe.{name}"; '
+
+
 # Longer than the watchdog's 1-second select() poll, so the timeout checks
 # actually get a chance to run between emissions -- see the chatty-child test
 # at the foot of this file for what happens when they do not.
@@ -154,6 +161,53 @@ def test_warnings_on_different_lines_are_progress_not_a_loop(watchdog):
                    WALL_TIMEOUT=60, LOOP_PROGRESS_THRESHOLD=3)
     assert run.code == 0, run
     assert run.record["outcome"] == "ok"
+
+
+def test_a_slow_command_beside_a_building_session_is_not_a_loop(watchdog):
+    """The counter counts consecutive *lines*, not consecutive warnings.
+
+    Isabelle builds a session's theories in parallel, so a merely slow command
+    emits its warnings while the rest of the session visibly progresses.
+    Counting only the warnings ignores everything between them and calls that
+    a loop -- which killed a healthy AFP rebuild 73 seconds in, and Isabelle
+    discards a session's heap image when rebuilding it, so the whole thing
+    restarted from zero (github.com/ott2/isabelle-watchdog#1).
+
+    Three warnings on one line, a threshold of three, and no kill: what
+    decides it is the eleven characters of theory line in between.
+    """
+    body = (warn(secs="15.2") + QUIET + sibling("Probe_B") + sibling("Probe_C")
+            + QUIET + warn(secs="17.2") + QUIET + sibling("Probe_D")
+            + QUIET + warn(secs="19.2") + QUIET)
+    run = watchdog("sh", "-c", STARTED + body, WATCHDOG_TIMEOUT=30,
+                   WALL_TIMEOUT=60, LOOP_PROGRESS_THRESHOLD=3)
+    assert run.code == 0, run
+    assert run.record["outcome"] == "ok"
+    assert "LOOP" not in run.out, run.out
+
+
+def test_a_loop_is_still_caught_once_the_rest_of_the_session_quiesces(watchdog):
+    """And the postponement is the whole cost -- the kill is not surrendered.
+
+    The worry about resetting on progress is that a big parallel build would
+    never trip the detector and would wait out the wall clock instead.  It
+    trips it as soon as the claim becomes true: the other theories finish, the
+    warnings stop being interleaved, and three of them land four seconds
+    later.  Measured against a real looping `by` beside three theories
+    building in parallel, that crossover was at 5.6s of a 75s capture.
+
+    So the detector answers "is this command the only thing left happening",
+    which is what a kill needs to know, rather than "has this command been
+    slow three times", which it does not.
+    """
+    body = ((warn() + QUIET + sibling() + QUIET) * 2      # a parallel front...
+            + (warn() + QUIET) * 3 + "sleep 20")          # ...that then closes
+    run = watchdog("sh", "-c", STARTED + body, WATCHDOG_TIMEOUT=30,
+                   WALL_TIMEOUT=60, LOOP_PROGRESS_THRESHOLD=3)
+    assert run.code == 124, run
+    rec = run.record
+    assert rec["timeout_reason"] == "loop_progress"
+    assert rec["error_loci"] == [["Probe.Probe_A", "12"]]
 
 
 def test_a_wall_kill_still_names_a_line_it_happens_to_know(watchdog):

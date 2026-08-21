@@ -92,9 +92,13 @@ Environment:
     LOOP_PROGRESS_THRESHOLD   Kill after N consecutive Isabelle
                               `command "X" running for ...s (line Y of theory Z)`
                               warnings on the same (theory, line, command) triple
-                              (default: 3).  Surfaces a tactic stuck in a search
-                              loop on a single line before the wall timeout
-                              fires, and the timeout summary names the line.
+                              with no other output between them (default: 3).
+                              Surfaces a tactic stuck in a search loop on a
+                              single line before the wall timeout fires, and the
+                              timeout summary names the line.  Any other line
+                              resets the count, so a slow command in a session
+                              whose other theories are still building is not a
+                              loop.
     BUILD_PROGRESS_THRESHOLD  Seconds a single command must run before Isabelle
                               emits its `command running for ...s (line Y)`
                               warning (default: 15).  Injected as
@@ -185,10 +189,12 @@ BUILD_PHASE_RE = re.compile(r"^(Session |Running )")
 #
 #     NDTHT: command "by" running for 25.674s (line 1488 of theory "NDTHT.AlphabetReduction")
 #
-# Consecutive matches on the same (theory, line, command) triple
-# are the definitive signature of a single tactic stuck in a
-# search loop; the elapsed-time field changes per emission but
-# the triple stays constant.
+# Matches on the same (theory, line, command) triple with nothing else
+# on the pipe between them are the signature of a single tactic stuck in
+# a search loop; the elapsed-time field changes per emission but the
+# triple stays constant.  The "nothing else between them" half is what
+# separates a loop from a merely slow command in a session whose other
+# theories are still building — see the detector in `supervise`.
 LOOP_RE = re.compile(
     r'^\S+:\s+command\s+"(\S+)"\s+running\s+for\s+([\d.]+)s\s+'
     r'\(line\s+(\d+)\s+of\s+theory\s+"([^"]+)"\)'
@@ -667,7 +673,9 @@ def main() -> int:
     last_progress_pct = ""
     # Stuck-command tracking: (theory, line, command, count, last_elapsed).
     # Incremented on each consecutive LOOP_RE match with the same
-    # (theory, line, command) triple; reset when the triple changes.
+    # (theory, line, command) triple; reset when the triple changes, and
+    # reset by *any* other output — see `consume` for why that second one is
+    # the whole of the condition rather than a refinement of it.
     loop_key: tuple[str, str, str] | None = None
     loop_count = 0
     loop_elapsed = ""
@@ -726,12 +734,40 @@ def main() -> int:
                 last_progress_pct = m.group(3)
 
             # Long-running-command (loop-on-line) detection.
-            # Isabelle's per-command warning fires every ~2s
-            # while a tactic is still searching.  N+ consecutive
-            # matches on the same (theory, line, command) triple
-            # = the tactic is in a search loop on that line; we
-            # surface the line in the timeout summary so the
-            # culprit doesn't have to be grepped out of the log.
+            # Isabelle's per-command warning fires every ~2s while a tactic is
+            # still searching.  N+ consecutive matches on the same
+            # (theory, line, command) triple, *with nothing else on the pipe
+            # between them*, mean the build has stopped doing anything except
+            # spinning on that line; we surface it in the timeout summary so
+            # the culprit doesn't have to be grepped out of the log.
+            #
+            # "Consecutive" has to mean consecutive among ALL output, not
+            # among warnings.  Isabelle builds theories in parallel, so a
+            # merely slow command interleaves with the rest of the session
+            # making visible progress:
+            #
+            #     FSM_Tests: command "by" running for 15.261s (line 1650 ...)
+            #     FSM_Tests: theory FSM_Tests.Adaptive_Test_Case
+            #     FSM_Tests: theory FSM_Tests.Helper_Algorithms
+            #     FSM_Tests: command "by" running for 17.277s (line 1650 ...)
+            #
+            # Counting only the warnings called that a loop and killed a
+            # healthy rebuild 73s in — and Isabelle discards a session's heap
+            # image when rebuilding it, so the next attempt restarts from
+            # zero (github.com/ott2/isabelle-watchdog#1).
+            #
+            # ANY other line resets, rather than an enumerated set of
+            # "progress" lines, because the two failures are not symmetric: a
+            # missed loop kill costs the gap between the loop budget and the
+            # wall budget, and `_summary` names the line on a wall kill
+            # anyway, while a false one destroys a partial build.
+            #
+            # That postpones the kill on a parallel build rather than
+            # surrendering it, and postpones it to the moment its claim
+            # becomes true.  Measured against a real looping `by` beside three
+            # theories building in parallel: the others finished at 5.6s, and
+            # the warnings then ran uninterrupted every 2s to the end of a 75s
+            # capture -- so three still land 4s after the interleaving stops.
             mloop = LOOP_RE.match(stripped)
             if mloop:
                 command, elapsed, lineno, theory = mloop.groups()
@@ -742,6 +778,11 @@ def main() -> int:
                     loop_key = key
                     loop_count = 1
                 loop_elapsed = elapsed
+            else:
+                # The count goes, the key stays: a wall or activity kill still
+                # names the last line Isabelle complained about, which is the
+                # one thing those two diagnoses otherwise cannot supply.
+                loop_count = 0
 
         # --- Read loop with select ---
         #
