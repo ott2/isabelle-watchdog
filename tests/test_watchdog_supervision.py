@@ -45,6 +45,30 @@ def sibling(name: str = "Probe_B") -> str:
     return f'echo "Probe: theory Probe.{name}"; '
 
 
+# Isabelle's session announcements, verbatim in shape.  The verb carries the
+# build graph: the heap is stored exactly when something else in the build
+# depends on this session, and that flag picks the word (build_process.scala:95).
+def building(name: str) -> str:
+    return f'echo "Building {name} ..."; '
+
+
+def running(name: str) -> str:
+    return f'echo "Running {name} ..."; '
+
+
+# The plan, printed before anything starts and only under `-v` (which
+# `build.py` always passes).  Seeing one is what lets an empty session list
+# mean "nothing was rebuilt" rather than "the output never said".
+def plan(*names: str) -> str:
+    return "".join(f'echo "Session Unsorted/{n}"; ' for n in names)
+
+
+# A warning from a theory in some other session -- the dependency case.
+def foreign_warn(session: str, theory: str, line: int = 444) -> str:
+    return (f'echo \'{session}: command "by" running for 15.0s '
+            f'(line {line} of theory "{session}.{theory}")\'; ')
+
+
 # Longer than the watchdog's 1-second select() poll, so the timeout checks
 # actually get a chance to run between emissions -- see the chatty-child test
 # at the foot of this file for what happens when they do not.
@@ -214,10 +238,20 @@ def test_a_loop_is_still_caught_once_the_rest_of_the_session_quiesces(watchdog):
     assert rec["error_loci"] == [["Probe.Probe_A", "12"]]
 
 
-def test_a_wall_kill_still_names_a_line_it_happens_to_know(watchdog):
-    """The loop threshold was not reached, but a warning did land.  There is
-    no reason to make the operator grep for a culprit the watchdog already
-    saw."""
+def test_a_wall_kill_names_the_line_without_calling_it_a_loop(watchdog):
+    """The loop threshold was not reached, but a warning did land.
+
+    Two things at once, and the second is the point.  There is no reason to
+    make the operator grep for a culprit the watchdog already saw -- so the
+    line is named.  But naming it is all the watchdog has earned here:
+    `loop_key` is a *locus* and `loop_count` is the verdict, and the verdict
+    was not reached.  Saying "looping on" anyway asserted the conclusion the
+    detector had just declined to draw, and a reader acts on it -- one went
+    hunting a runaway tactic in a dependency that was merely being
+    re-elaborated (github.com/ott2/isabelle-watchdog#4).
+
+    The word belongs to the loop kill above, and only to it.
+    """
     run = watchdog("sh", "-c", STARTED + warn() + QUIET + "sleep 20",
                    WATCHDOG_TIMEOUT=30, WALL_TIMEOUT=4,
                    LOOP_PROGRESS_THRESHOLD=99)
@@ -225,7 +259,75 @@ def test_a_wall_kill_still_names_a_line_it_happens_to_know(watchdog):
     rec = run.record
     assert rec["timeout_reason"] == "wall"
     assert rec["error_loci"] == [["Probe.Probe_A", "12"]]
-    assert "looping on Probe.Probe_A line 12" in run.out
+    assert '(last: "by" at Probe.Probe_A line 12' in run.out, run.out
+    assert "loop" not in run.out.lower(), run.out
+
+
+# --------------------------------------------- where the budget actually went
+
+def test_a_timeout_inside_a_dependency_says_so_rather_than_blaming_the_theory(
+        watchdog):
+    """The report, end to end.
+
+    A new session with an eight-theory workload timed out at 20s, and the
+    summary named line 444 of `Multitape_Alphabet_Enlargement....` -- a
+    theory in a *different* session, which Isabelle was re-elaborating from
+    source because its heap was out of date.  The operator went looking for a
+    looping proof in code they had never written
+    (github.com/ott2/isabelle-watchdog#4).
+
+    The budget was never theirs to spend, and nothing in the old summary said
+    so.  Now the first note does, and it is derived from Isabelle's own verb
+    rather than from any notion of a target the watchdog would have to be
+    handed.
+    """
+    body = (plan("Dep", "Mine") + building("Dep")
+            + foreign_warn("Dep", "Other_Peoples_Theory") + QUIET + "sleep 20")
+    run = watchdog("sh", "-c", body, WATCHDOG_TIMEOUT=30, WALL_TIMEOUT=4,
+                   LOOP_PROGRESS_THRESHOLD=99)
+    assert run.code == 124, run
+    rec = run.record
+    assert rec["timeout_reason"] == "wall"
+    assert "rebuilding dependency Dep" in run.out, run.out
+    # And the observation survives into the corpus, not just the terminal: a
+    # timeout spent on an ancestor and one spent on a proof that got harder
+    # are otherwise the same record.  Same argument as `limits`/`contention`.
+    assert [(s["name"], s["role"]) for s in rec["sessions"]] == [
+        ("Dep", "dependency")]
+
+
+def test_a_timeout_in_your_own_session_still_names_what_was_rebuilt_first(
+        watchdog):
+    """The other half of the same budget question.  Here the clock did reach
+    your session -- so the theory named is yours and the note does not say
+    otherwise -- but it arrived having already spent itself on an ancestor,
+    which is still the first thing to know."""
+    body = (plan("Dep", "Mine") + building("Dep") + QUIET + running("Mine")
+            + foreign_warn("Mine", "Probe_A", 12) + QUIET + "sleep 20")
+    run = watchdog("sh", "-c", body, WATCHDOG_TIMEOUT=30, WALL_TIMEOUT=6,
+                   LOOP_PROGRESS_THRESHOLD=99)
+    assert run.code == 124, run
+    assert "rebuilt from source first: Dep" in run.out, run.out
+    assert [(s["name"], s["role"]) for s in run.record["sessions"]] == [
+        ("Dep", "dependency"), ("Mine", "target")]
+
+
+def test_a_build_that_rebuilt_nothing_records_that_rather_than_silence(watchdog):
+    """`[]` and `null` are different claims.  Everything loaded from heaps is
+    a fact worth having -- it is the answer to 'did a rebuild eat this
+    budget?' -- and it is only knowable because the plan lines were seen."""
+    run = watchdog("sh", "-c", plan("Mine") + 'echo "Mine: theory Mine.T 100%"')
+    assert run.code == 0, run
+    assert run.record["sessions"] == []
+
+
+def test_output_that_never_named_a_session_records_null_not_empty(watchdog):
+    """The plan lines only appear under `-v`.  `build.py` always passes it; a
+    bare `isabelle-watchdog isabelle build ...` need not, and then the honest
+    record is that nothing was observed."""
+    run = watchdog("sh", "-c", 'echo "Mine: theory Mine.T 100%"')
+    assert run.code == 0, run
+    assert run.record["sessions"] is None
 
 
 # ------------------------------------------------------- reading the pipe itself

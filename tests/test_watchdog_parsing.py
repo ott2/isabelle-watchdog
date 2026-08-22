@@ -166,6 +166,91 @@ def test_the_log_line_leads_with_the_stuck_command(tmp_path):
     assert line.endswith("(stuck at Probe.Probe_A line 12)")
 
 
+def test_a_wall_kill_says_where_the_build_was_not_that_it_was_stuck(tmp_path):
+    """"Stuck" is a claim, and only two of the three kills earn it.
+
+    A loop kill and an activity kill both mean nothing else was happening.  A
+    wall kill means only that the clock ran out -- the command may have been
+    working perfectly, in a dependency Isabelle was re-elaborating.  Saying
+    `stuck at` there is a verdict on a theory that was fine, and it is the
+    phrase the report quoted (github.com/ott2/isabelle-watchdog#4).
+    """
+    key = ("Probe.Probe_A", "12", "by")
+    assert W._log_line(tmp_path / "b.log", [], key, "wall").endswith(
+        "(last at Probe.Probe_A line 12)")
+    for reason in ("loop_progress", "activity"):
+        assert W._log_line(tmp_path / "b.log", [], key, reason).endswith(
+            "(stuck at Probe.Probe_A line 12)")
+
+
+# ------------------------------------------------- where the budget actually went
+
+def test_isabelles_own_verb_says_which_sessions_are_dependencies():
+    """`Building` vs `Running` is not a turn of phrase: Isabelle stores a
+    session's heap exactly when something else in the build depends on it
+    (build_process.scala:95), and prints the verb from that flag.  So the
+    dependency/target split is Isabelle's answer, read off the pipe, rather
+    than ours re-derived from an argv the watchdog may not even have."""
+    m = W.SESSION_BUILD_RE.match("Building HOL-Library ...")
+    assert m.groups() == ("Building", "HOL-Library")
+    m = W.SESSION_BUILD_RE.match("Running FSM_Tests ...")
+    assert m.groups() == ("Running", "FSM_Tests")
+    # `build_log_verbose`/NUMA add a parenthetical before the `...`
+    m = W.SESSION_BUILD_RE.match("Building MTTM (started 0:00:03 on node 1) ...")
+    assert m.groups() == ("Building", "MTTM")
+
+
+@pytest.mark.parametrize("line", [
+    "Running out of ideas",                       # no trailing `...`
+    "Probe: theory Probe.Building 100%",          # not at the start
+    "Session AFP/MTTM",                           # the plan, not a start
+])
+def test_a_line_that_merely_starts_with_the_word_is_not_a_session_start(line):
+    assert W.SESSION_BUILD_RE.match(line) is None
+
+
+def test_the_session_comes_from_the_qualifier_and_is_never_guessed():
+    """#3 made the qualifier unconditional for display; this is what it buys
+    beyond display.  An unqualified name cannot answer 'which session', so
+    the honest answer is nothing at all -- a guessed session in a diagnosis
+    is worse than an absent one."""
+    assert W._stuck_session(("FSM_Tests.Util", "1650", "by")) == "FSM_Tests"
+    assert W._stuck_session(None, "FSM_Tests.Util") == "FSM_Tests"
+    assert W._stuck_session(None, "Util") == ""
+    assert W._stuck_session(None, "") == ""
+
+
+def test_a_timeout_inside_a_dependency_says_so_first():
+    """The report's case: a 20s budget spent re-elaborating an ancestor, and
+    a summary naming line 444 of a theory the operator does not own.  What
+    they could not reconstruct is that a second session was involved at all,
+    so that is what the note says (github.com/ott2/isabelle-watchdog#4)."""
+    built = [("Multitape_Alphabet_Enlargement", "dependency", 0.4),
+             ("Nondeterministic_Time_Hierarchy", "target", 55.1)]
+    assert W._budget_note(built, "Multitape_Alphabet_Enlargement") == (
+        "the budget went on rebuilding dependency "
+        "Multitape_Alphabet_Enlargement, not on the session you asked for")
+
+
+def test_a_timeout_in_your_own_session_still_names_what_came_first():
+    """Not the report's case, but the same budget: the clock reached your
+    session having already spent itself elsewhere, and the summary should
+    not leave you to work that out from the log."""
+    built = [("MTTM", "dependency", 0.4), ("Mine", "target", 30.0)]
+    assert W._budget_note(built, "Mine") == "rebuilt from source first: MTTM"
+
+
+@pytest.mark.parametrize("built,stuck", [
+    ([], "Mine"),                              # nothing observed -- say nothing
+    ([("Mine", "target", 0.2)], "Mine"),       # one session, and it is yours
+    ([("Mine", "target", 0.2)], ""),           # no qualifier to reason from
+])
+def test_nothing_is_added_when_there_is_nothing_to_add(built, stuck):
+    """A note that fires on an ordinary single-session timeout is noise, and
+    noise beside a kill is what stops the useful notes being read."""
+    assert W._budget_note(built, stuck) == ""
+
+
 @pytest.mark.parametrize("lines,tail", [
     ([], ""),
     ([AT_COMMAND], " (1 error locus)"),

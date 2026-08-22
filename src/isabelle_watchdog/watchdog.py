@@ -181,7 +181,36 @@ AT_COMMAND_RE = re.compile(
     r'^\*\*\*\s+At command\s+"[^"]*"\s+\(line\s+(\d+)\s+of\s+"([^"]+)"\)'
 )
 THEORY_PROGRESS_RE = re.compile(r"^(\S+):\s+theory\s+(\S+?)(?:\s+(\d+)%)?")
-BUILD_PHASE_RE = re.compile(r"^(Session |Running )")
+
+# Isabelle announces every session it elaborates from source, and the verb it
+# chooses is a fact about the build graph rather than a turn of phrase:
+#
+#     Building HOL-Library ...     <- heap stored: something depends on it
+#     Running FSM_Tests ...        <- heap not stored: a leaf of the plan
+#
+# because `store_heap(name) = is_pure(name) || exists(_.ancestors.contains(name))`
+# (Isabelle2025-2 src/Pure/Build/build_process.scala:95, printed at :1218).
+# `Building` is therefore *Isabelle's own* statement that the session is a
+# dependency of something else in this build — the question issue #4 asks,
+# answered from the pipe rather than from a target the watchdog would have to
+# be told.  `_session_names` below parses the argv for session names, but only
+# to enrich an error message, where being wrong costs nothing; a diagnosis
+# printed beside a kill is held to a higher bar than that.
+#
+# The trailing `...` is required because it is what separates these from any
+# other line starting with the word: the name may be followed by a
+# `(started 0:00:03 on node 1)` parenthetical under `build_log_verbose`/NUMA.
+SESSION_BUILD_RE = re.compile(r"^(Building|Running)\s+(\S+)\b.*\.\.\.\s*$")
+# `Session <chapter>/<name>` is the build *plan* — every session involved,
+# heap-loaded ones included — and it is printed before any of them starts.
+# Seeing one is what lets an empty session list mean "nothing was rebuilt"
+# rather than "the output never said"; see `sessions_built`.
+SESSION_PLAN_RE = re.compile(r"^Session\s+\S+/\S+")
+# `Building ` belongs here for the same reason `Running ` does: it is Isabelle
+# saying a session has started.  Its absence only ever granted an unearned
+# `startup_timeout + 20`, and only on output too terse to carry the `Session `
+# lines, which is why nothing noticed.
+BUILD_PHASE_RE = re.compile(r"^(Session |Building |Running )")
 
 # Isabelle's long-running-command warning, emitted periodically while
 # a single command (typically `by ...` or `apply ...`) is still
@@ -679,6 +708,16 @@ def main() -> int:
     loop_key: tuple[str, str, str] | None = None
     loop_count = 0
     loop_elapsed = ""
+    # Sessions Isabelle elaborated from source, in start order, as
+    # (name, role, seconds after spawn).  A wall budget is set with one
+    # session in mind, and Isabelle silently re-elaborates every out-of-date
+    # ancestor before reaching it -- so a timeout can be spent entirely on
+    # other people's proofs, and nothing else in the record would say so.
+    # `plan_seen` separates "nothing was rebuilt" from "the output never
+    # said": the plan lines only appear under `-v`, which `build.py` always
+    # passes and a bare `isabelle-watchdog` invocation may not.
+    sessions_built: list[tuple[str, str, float]] = []
+    plan_seen = False
 
     # Contention state.  `load_factor` multiplies all three budgets, exactly as
     # BATTERY_FACTOR does -- but measured from this build rather than assumed
@@ -711,7 +750,7 @@ def main() -> int:
         def consume(raw: bytes) -> None:
             """Everything one line of the child's output can tell us."""
             nonlocal build_started, last_progress_theory, last_progress_pct
-            nonlocal loop_key, loop_count, loop_elapsed
+            nonlocal loop_key, loop_count, loop_elapsed, plan_seen
             try:
                 text = raw.decode("utf-8", errors="replace")
             except Exception:
@@ -726,6 +765,19 @@ def main() -> int:
             # Phase detection
             if BUILD_PHASE_RE.match(stripped):
                 build_started = True
+            if SESSION_PLAN_RE.match(stripped):
+                plan_seen = True
+
+            # Which sessions are being elaborated from source, and which of
+            # them Isabelle calls dependencies.  Once each: the announcement
+            # is printed at the moment a session starts, so its position in
+            # this list is also the order the budget was spent in.
+            msess = SESSION_BUILD_RE.match(stripped)
+            if msess and not any(s[0] == msess.group(2) for s in sessions_built):
+                sessions_built.append((
+                    msess.group(2),
+                    "dependency" if msess.group(1) == "Building" else "target",
+                    round(time.monotonic() - wall_start, 1)))
 
             # Track latest in-progress theory for STUCK message
             m = THEORY_PROGRESS_RE.match(stripped)
@@ -938,16 +990,30 @@ def main() -> int:
             "verdict": contention_verdict,
             "load_factor_applied": round(load_factor, 2),
         }
+        # Which sessions this build actually elaborated, and which of them
+        # Isabelle called dependencies.  Same argument as `limits` and
+        # `contention` above, for the third confound in the same family: a
+        # timeout spent re-elaborating an out-of-date ancestor and one spent
+        # on a proof that got harder are otherwise identical records, and
+        # `audits/timeouts.py` — whose whole question is "is this timeout
+        # load or genuine proof failure?" — has no way to derive the
+        # difference.  `[]` means nothing was rebuilt, `null` means the
+        # output never said (see `plan_seen`), and the two are not the same
+        # claim.
+        sessions_rec = ([{"name": n, "role": r, "started_s": t}
+                         for n, r, t in sessions_built]
+                        if (sessions_built or plan_seen) else None)
         _record_attempt(args, outcome, exit_code, timeout_reason,
                         elapsed_s, error_head, power, applied_factor,
-                        error_loci, limits, contention_rec)
+                        error_loci, limits, contention_rec, sessions_rec)
 
     if outcome == "timeout":
         _print_summary_timeout(timeout_reason, lines, wall_timeout,
                                activity_timeout,
                                last_progress_theory, last_progress_pct,
                                loop_key, loop_count, loop_elapsed,
-                               log_path, battery, contention_verdict, duty)
+                               log_path, battery, contention_verdict, duty,
+                               sessions_built)
     elif outcome == "ok":
         _print_summary_ok(lines, log_path)
     else:
@@ -1053,7 +1119,8 @@ def _record_attempt(args: list[str], outcome: str, exit_code: int,
                     battery_factor: float = 1.0,
                     error_loci: "list[list[str]] | None" = None,
                     limits: "dict | None" = None,
-                    contention_rec: "dict | None" = None) -> None:
+                    contention_rec: "dict | None" = None,
+                    sessions: "list[dict] | None" = None) -> None:
     """Hand the attempt to the recorder under the shared best-effort guard,
     which here additionally covers the `import` itself (a guard inside
     `record` cannot catch its own import failure), so a missing or broken
@@ -1070,7 +1137,7 @@ def _record_attempt(args: list[str], outcome: str, exit_code: int,
             error_head=error_head, power=power, battery_factor=battery_factor,
             log_name=os.environ.get("LOG_NAME", "last-build.log"),
             error_loci=error_loci or [], limits=limits,
-            contention=contention_rec,
+            contention=contention_rec, sessions=sessions,
         )
     guard.run_guarded("build-record", go, lost=guard.ATTEMPT_LOST)
 
@@ -1150,18 +1217,70 @@ def _stuck_locus(loop_key: "tuple[str, str, str] | None") -> str:
     return f"{theory} line {lineno}"
 
 
+def _stuck_session(loop_key: "tuple[str, str, str] | None",
+                   progress_theory: str = "") -> str:
+    """The session the build was last inside, taken from the session-qualified
+    theory name Isabelle prints (`FSM_Tests.Util` → `FSM_Tests`).
+
+    The qualifier is the whole of the derivation, which is why #3 mattered
+    for more than display: an unqualified name cannot answer this at all.
+    "" when no theory was seen, or when the name carries no qualifier —
+    there is nothing to guess from, and guessing a session here would put a
+    wrong one in a diagnosis."""
+    theory = loop_key[0] if loop_key else progress_theory
+    return theory.split(".", 1)[0] if "." in theory else ""
+
+
+def _budget_note(sessions_built: "list[tuple[str, str, float]]",
+                 stuck_session: str) -> str:
+    """One clause for the timeout summary saying where the budget actually
+    went, or "" when there is nothing to add.
+
+    An operator sets a wall budget with one session in mind.  Isabelle
+    re-elaborates every out-of-date ancestor from source first, so the clock
+    can run out having never reached that session — and the summary would
+    then name a theory the operator does not own and has no edit in.  The
+    report was 55s of dependency compilation inside a 20s budget, read as a
+    proof stuck at line 444 of somebody else's file
+    (github.com/ott2/isabelle-watchdog#4).
+
+    Roles are Isabelle's, not ours — see SESSION_BUILD_RE.  Under `-b` every
+    session stores its heap and so reads as a dependency; the naming branch
+    is unaffected (it asks about the session we stopped in, which is then
+    correctly a dependency of the `-b` request), and the counting branch
+    would overstate, which is why it names them rather than only counting."""
+    if not sessions_built:
+        return ""
+    roles = {name: role for name, role, _ in sessions_built}
+    if roles.get(stuck_session) == "dependency":
+        return (f"the budget went on rebuilding dependency {stuck_session}, "
+                f"not on the session you asked for")
+    deps = [n for n, role, _ in sessions_built if role == "dependency"]
+    if deps:
+        return (f"rebuilt from source first: {', '.join(deps)}")
+    return ""
+
+
 def _log_line(log_path: Path, lines: list[str],
-              loop_key: "tuple[str, str, str] | None" = None) -> str:
+              loop_key: "tuple[str, str, str] | None" = None,
+              reason: str = "") -> str:
     """The `log: <path>` summary line.  When the build was killed with a
-    known stuck command, name it (`stuck at <theory> line <N>`) — this is
-    the jump target a reader wants first on a hang.  Otherwise annotate
-    with the distinct error-locus count when the parallel checker
-    surfaced more than the one error the FAIL/timeout block displays.
-    Singular/plural so the line reads naturally; no annotation when there
-    is nothing to point at."""
+    known stuck command, name it — this is the jump target a reader wants
+    first on a hang.  Otherwise annotate with the distinct error-locus count
+    when the parallel checker surfaced more than the one error the
+    FAIL/timeout block displays.  Singular/plural so the line reads
+    naturally; no annotation when there is nothing to point at.
+
+    **"stuck" is a claim, and only two of the three kills earn it.** A loop
+    kill and an activity kill both mean nothing else was happening.  A wall
+    kill does not: the command may have been merely slow, or in a dependency
+    Isabelle was re-elaborating, and `stuck at <theory> line <N>` then reads
+    as a verdict on a theory that was working fine (#4).  Say where the
+    build was, and leave the diagnosis to the line below."""
     stuck = _stuck_locus(loop_key)
     if stuck:
-        return f"log: {log_path} (stuck at {stuck})"
+        word = "last at" if reason == "wall" else "stuck at"
+        return f"log: {log_path} ({word} {stuck})"
     n = _count_error_loci(lines)
     if n == 1:
         return f"log: {log_path} (1 error locus)"
@@ -1274,6 +1393,7 @@ def _print_summary_timeout(
     battery: "bool | None" = None,
     contention_verdict: str = "unknown",
     duty: "float | None" = None,
+    sessions_built: "list[tuple[str, str, float]] | None" = None,
 ) -> None:
     # log: first so `head -N` captures it even if the diagnostic
     # line ends up wrapped.  Name the stuck command's line when we have
@@ -1281,7 +1401,7 @@ def _print_summary_timeout(
     # carry already-elaborated error loci (the checker failed some
     # obligations before the slow one tripped the budget), so annotate the
     # count.
-    print(_log_line(log_path, lines, loop_key))
+    print(_log_line(log_path, lines, loop_key, reason))
     # The budgets were already scaled for both of these (see main); they are
     # still worth saying on a timeout, because they change what the operator
     # should do about it.  `stalled` is the one that earns its line: it turns
@@ -1289,6 +1409,13 @@ def _print_summary_timeout(
     # which is a diagnosis rather than a report -- and it is the case where
     # nothing was scaled, so nothing else would hint at it.
     notes = []
+    # First, because it is the one that can make the rest of the line
+    # irrelevant: a budget spent re-elaborating somebody else's session is
+    # not a statement about the theory named above it.
+    budget = _budget_note(sessions_built or [],
+                          _stuck_session(loop_key, progress_theory))
+    if budget:
+        notes.append(budget)
     if battery:
         notes.append("on battery — likely slowness, not a hang")
     if contention_verdict == "starved" and duty:
@@ -1298,18 +1425,30 @@ def _print_summary_timeout(
         notes.append("used no CPU — a hang, not a busy machine")
     batt = f"  ({'; '.join(notes)})" if notes else ""
     if reason == "loop_progress" and loop_key is not None:
+        # This is the one kill that earns the word: `loop_count` reached the
+        # threshold with nothing else on the pipe between the warnings.  The
+        # notes still apply — a tactic looping in a dependency's theory is
+        # just as much not your proof.
         theory, lineno, cmd = loop_key
         print(f'LOOP  {theory}: "{cmd}" looping on line {lineno} '
-              f'({loop_count}x same line, last {loop_elapsed}s elapsed)')
+              f'({loop_count}x same line, last {loop_elapsed}s elapsed){batt}')
     elif reason == "wall":
-        # Even on a bare wall timeout, surface the looping line if
-        # we have one — Isabelle's per-command warnings make the
-        # culprit obvious, no reason to make the user grep for it.
+        # Surface the last line Isabelle complained about — its per-command
+        # warnings make the culprit obvious and there is no reason to make
+        # anyone grep for it — but do NOT call it a loop.  `loop_key` is a
+        # *locus*; `loop_count` is the verdict, and here it did not reach the
+        # threshold.  The key survives any other output precisely because it
+        # is not a loop claim (see `consume`), so "looping on" asserted the
+        # conclusion the detector had just declined to draw: on a dependency
+        # rebuild it sent the reporter hunting a runaway tactic in a theory
+        # that was merely being re-elaborated (#4).  The activity branch below
+        # has always worded this correctly; the two are the same claim, and
+        # now read the same way.
         if loop_key is not None:
             theory, lineno, cmd = loop_key
             print(f"TIMEOUT  {wall_timeout}s wall clock exceeded "
-                  f'(looping on {theory} line {lineno} — '
-                  f'"{cmd}" running for {loop_elapsed}s){batt}')
+                  f'(last: "{cmd}" at {theory} line {lineno}, '
+                  f'{loop_elapsed}s){batt}')
         else:
             print(f"TIMEOUT  {wall_timeout}s wall clock exceeded{batt}")
     elif reason == "activity":

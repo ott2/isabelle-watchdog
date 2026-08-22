@@ -169,6 +169,53 @@ for a sharper reason — 11 base names have lived in more than one session
 directory in ndtht alone — so the display and the record now agree, and
 `attempts.theory_key` already collapses either spelling to one key.
 
+It turned out to be load-bearing beyond display: `_stuck_session` derives the
+session *from* the qualifier, so the dependency diagnosis below exists only
+because the name carries one. A shortened name cannot answer "which session",
+which is why that function returns `""` rather than guessing.
+
+**Only two of the three kills may say "stuck", and only one may say
+"looping".** The watchdog keeps `loop_key` — the last `command running for Ns`
+warning — so a wall or activity kill can still name a line. That is a *locus*;
+the verdict is `loop_count`, which any other output resets. The wall summary
+printed the locus with the verdict's word (`looping on <theory> line <N>`),
+asserting the conclusion the detector had just declined to draw, and a reader
+went hunting a runaway tactic in a theory that was merely being re-elaborated.
+The activity branch had always worded this correctly (`last: "by" at …`); the
+two are the same claim and now read the same way. `_log_line` moves with it —
+`stuck at` for a loop or activity kill, where nothing else was happening,
+`last at` for a wall kill, where the clock simply ran out. A verdict is
+cheaper to print than to retract.
+
+**Where the budget went is Isabelle's answer, not ours.** Isabelle
+re-elaborates every out-of-date ancestor from source before reaching the
+session you asked for, so a wall budget can be spent entirely elsewhere — 55 s
+of dependency compilation inside a 20 s budget, reported as a stuck line in a
+theory the operator did not own. The fix needed to know which sessions are
+dependencies, and the tempting route is comparing the stuck theory's session
+against a target. **There is no target to compare against**, for the reason
+stated above, and `_session_names` — which does parse the argv — is not a
+counter-example: it feeds a best-effort `build_log -H Error` lookup where being
+wrong costs nothing, and a diagnosis printed beside a kill is held to a higher
+bar. The signal is on the pipe instead:
+
+```
+Building HOL-Library ...     heap stored  -> something in this build depends on it
+Running  FSM_Tests ...       heap not     -> a leaf of the plan
+```
+
+because `store_heap(name) = is_pure(name) || exists(_.ancestors.contains(name))`
+(Isabelle2025-2 `src/Pure/Build/build_process.scala:95`, printed at `:1218`).
+`Building` *is* Isabelle declaring the session a dependency. Same shape as
+*attribution is derived, not declared*: the tool that knows the answer already
+says it, and the job is to stop discarding it — `THEORY_PROGRESS_RE` had been
+capturing the session prefix and throwing it away since the beginning.
+
+The `Session <chapter>/<name>` plan lines matter separately: they only appear
+under `-v`, which `build.py` always passes, so seeing one is what lets an empty
+session list mean "nothing was rebuilt" rather than "the output never said".
+`[]` and `null` are different claims.
+
 **Three coupled constants — do not change one alone.** The watchdog injects
 `-o build_progress_threshold=15` into the `isabelle build` argv. Isabelle's own
 default is 20 s, the *same* as `WATCHDOG_TIMEOUT`, so the line-bearing warning
@@ -300,6 +347,19 @@ One JSON line per attempt. Design commitments, all load-bearing:
   beside a correctly-null `duty_cycle` — two fields about one run, one of them
   false. `cpu_total` is now set only from an in-loop sample, so the baseline
   cannot reach a record at all.
+- **`sessions` records which sessions were elaborated, and whose they were.**
+  `{name, role, started_s}` in start order, `role` from Isabelle's own
+  `Building`/`Running` verb (above). The third member of the family: a
+  timeout spent re-elaborating an out-of-date ancestor and one spent on a
+  proof that got harder were identical records, and `audits/timeouts.py` —
+  whose entire question is "is this timeout load or genuine proof failure?" —
+  enumerates battery and concurrency as confounds and could not derive this
+  one at all. It is not only a timeout field: on a green build the same
+  rebuild shows up as elapsed time, with nothing to attribute it to. `[]`
+  means nothing was rebuilt, `null` means the output never said. No reader
+  consumes it yet, exactly as no reader consumes `contention`; both are
+  stored because the analysis that needs them cannot go back and collect
+  them.
 - **Notes carry the reasoning the diff cannot.** Keys `diagnosis:` / `change:`
   / `expect:` / `ref:`, parsed into `note_fields` while `note` keeps text
   verbatim. `expect:` is the field worth the trouble: a prediction recorded

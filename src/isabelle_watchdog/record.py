@@ -659,14 +659,15 @@ def record(*, argv: list[str], outcome: str, exit_code: int,
            battery_factor: float = 1.0,
            error_loci: "list[list[str]] | None" = None,
            limits: "dict | None" = None,
-           contention: "dict | None" = None) -> None:
+           contention: "dict | None" = None,
+           sessions: "list[dict] | None" = None) -> None:
     """Capture one build attempt.  Never raises into the caller (the
     shared `run_guarded` swallows and warns on any failure)."""
     def go() -> None:
         try:
             _record(argv, outcome, exit_code, timeout_reason,
                     elapsed_s, error_head, log_name, power, battery_factor,
-                    error_loci or [], limits, contention)
+                    error_loci or [], limits, contention, sessions)
         except CaptureUnavailable as why:
             # Inside the guard, not before it: the reporting path is
             # instrumentation too, and must not be the thing that breaks a
@@ -678,7 +679,7 @@ def record(*, argv: list[str], outcome: str, exit_code: int,
 def _record(argv, outcome, exit_code, timeout_reason,
             elapsed_s, error_head, log_name,
             power="unknown", battery_factor=1.0, error_loci=None,
-            limits=None, contention=None) -> None:
+            limits=None, contention=None, sessions=None) -> None:
     # First, and before anything is created: a project that cannot be
     # captured should not acquire an `instance-id` for a corpus it will
     # never have.
@@ -778,7 +779,17 @@ def _record(argv, outcome, exit_code, timeout_reason,
         # exists to prevent one layer up.  None on a machine where it could
         # not be read, which is not the same as zero.
         "contention": contention,
-        "git_head": head,                    # commit built against (episode baseline / mid-flight-commit marker)
+        # Which sessions Isabelle elaborated from source, in start order, as
+        # `{name, role, started_s}` — `role` being Isabelle's own word for
+        # it (`Building` = a dependency whose heap is stored, `Running` = a
+        # leaf of the plan).  The third confound in the same family as the
+        # two above: a build that timed out re-elaborating an out-of-date
+        # ancestor and one that timed out on a proof that got harder are
+        # otherwise identical records, and the timeout audit's whole
+        # question is telling those two apart.  `[]` means nothing was
+        # rebuilt; `null` means the output was not verbose enough to say.
+        "sessions": sessions,
+        "git_head": head,                  # commit built against (episode baseline / mid-flight-commit marker)
         "head_dirty": tree != head_tree,     # False = rebuild of an unchanged tree
         "tree": tree,                        # source snapshot id (integrity / no-op anchor)
         "diff": diff,                        # incremental SOURCE change vs the previous attempt

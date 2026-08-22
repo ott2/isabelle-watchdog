@@ -9,6 +9,77 @@ that changes what a record contains says so here explicitly, and
 `trajectory check` will tell you whether a corpus written by an older version
 still regenerates.
 
+## [Unreleased]
+
+### Fixed
+
+**A wall-clock timeout claimed a loop the detector had not found** (#4)
+
+The watchdog keeps the last `command "X" running for Ns (line Y of theory Z)`
+warning it saw, so that a wall or activity kill can still name a line. That is
+a *locus*, and the loop verdict is a separate thing — the count of consecutive
+such warnings, which any other output resets. The wall-timeout summary printed
+the locus with the verdict's word anyway:
+
+```
+TIMEOUT  20s wall clock exceeded (looping on Multitape_Alphabet_Enlargement.AlphabetEnlargement_OutputWF line 444 — "by" running for 15.0s)
+```
+
+Nothing there was looping. The message now matches the activity kill's
+wording, which has always been careful about this:
+
+```
+TIMEOUT  20s wall clock exceeded (last: "by" at Multitape_Alphabet_Enlargement.AlphabetEnlargement_OutputWF line 444, 15.0s)
+```
+
+The `log:` line above it moves the same way, `stuck at` → `last at`, on a wall
+kill only. A loop kill and an activity kill both mean nothing else was
+happening and keep `stuck at`; a wall kill means only that the clock ran out.
+`LOOP` still says looping, because it is the one kill that measured it.
+
+### Added
+
+**The summary says when the budget went on a dependency** (#4)
+
+Isabelle re-elaborates every out-of-date ancestor from source before reaching
+the session you asked for, so a wall budget can be spent entirely on other
+people's proofs — and the old summary would then name a line in a theory you
+have never opened. The report was 55 s of dependency compilation inside a 20 s
+budget:
+
+```
+TIMEOUT  20s wall clock exceeded (last: "by" at Multitape_Alphabet_Enlargement.AlphabetEnlargement_OutputWF line 444, 15.0s)
+    (the budget went on rebuilding dependency Multitape_Alphabet_Enlargement, not on the session you asked for)
+```
+
+and, when the clock did reach your session, `rebuilt from source first: …`.
+
+Nothing is guessed and nothing had to be plumbed in. Isabelle announces every
+session it elaborates, and the verb is a fact about the build graph rather
+than a turn of phrase: `Building X ...` when X's heap is stored, which happens
+exactly when something else in the build depends on it, and `Running X ...`
+when it does not. So the dependency/target split is Isabelle's own answer,
+read off the pipe. It is absent, rather than guessed, when the output was not
+verbose enough to say — `isabelle-build` always passes `-v`.
+
+### Record schema
+
+**One field added: `sessions`.** A list of `{name, role, started_s}` in start
+order, `role` being `"dependency"` or `"target"` per the above.
+
+This is the third confound in the same family as `limits` and `contention`: a
+build that timed out re-elaborating an out-of-date ancestor and one that timed
+out on a proof that got harder were, until now, identical records — and
+`trajectory audit timeouts`, whose entire question is telling those two apart,
+had no way to derive the difference. It also records what was rebuilt on a
+*successful* build, which is where the same slowdown shows up as elapsed time
+rather than as a kill.
+
+`[]` and `null` are different claims: `[]` means nothing was rebuilt from
+source, `null` means the output never said. Readers ignore unknown keys, so an
+older reader opens a newer corpus unchanged, and `trajectory check` is
+unaffected — the field is not part of a payload.
+
 ## [0.4.0] — 2026-08-21
 
 Three fixes, all reported from a real formalisation running 0.3.1 against the
