@@ -49,6 +49,20 @@ the session you did ask for as one you did not.
 Under `-b` the role is now `null` and that note falls silent. Which sessions
 were elaborated, and when, is recorded as before.
 
+**`audits/significance` named a consuming project's sessions** (#5)
+
+Its summary line — shown in `trajectory audit` and in `trajectory audit
+significance -h` — read *"how much does the pre-ntr/ntr 1-shot gap survive?"*.
+`ntr` is a session in one project that uses this package, not a concept in it,
+and it was the only one of the six audits not asking a general question about
+a measurement. It now reads *"is a 1-shot gap between two session groups real,
+or resampling noise?"*.
+
+The report body had the same defect in two `print`s, where it was worse: the
+leave-one-day-out table labelled its numbers `ntr` regardless of which group
+`--b` had actually selected. Those now use the selected group's name, as the
+rest of the report already did.
+
 **`-R` and `-N` were parsed as taking a value**
 
 Both are boolean, so `isabelle build -R -d t MySession` had its `-d` consumed

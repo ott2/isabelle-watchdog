@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""trajectory audit significance — how much does the pre-ntr/ntr 1-shot gap survive?
+"""trajectory audit significance — is a 1-shot gap between two session groups real, or resampling noise?
 
 The gap is large (.633 vs .354 on the pooled corpus) over hundreds of
 trajectories, so a textbook two-proportion test returns an absurdly small p.
@@ -211,15 +211,20 @@ def main() -> int:
             print(f"    {sess:8} {rate(rs):.3f}  n={len(rs):4}  "
                   f"({len({d for _, d, _ in rs})} days)")
 
-    # With so few ntr days, one atypical day could carry the result.  Drop
-    # each in turn: if the gap holds without any single day, it is not a
-    # story about one bad afternoon.
-    ntr_days = sorted({d for _, d, _ in ntr})
-    print(f"\n  ntr is {len(ntr_days)} days; gap with each dropped:")
-    for day in ntr_days:
+    # With so few days in the second group, one atypical day could carry the
+    # result.  Drop each in turn: if the gap holds without any single day, it
+    # is not a story about one bad afternoon.
+    #
+    # `name_b`, not a literal.  The group is whatever `--b` selected or the
+    # default chose, and printing one project's session name for it is the
+    # defect #5 reported in the docstring, surviving in the report body --
+    # where it is worse, because it labels a *number* rather than a heading.
+    b_days = sorted({d for _, d, _ in ntr})
+    print(f"\n  {name_b} is {len(b_days)} days; gap with each dropped:")
+    for day in b_days:
         kept = [r for r in ntr if r[1] != day]
         n_day = len(ntr) - len(kept)
-        print(f"    without {day} ({n_day:2} traj)  ntr {rate(kept):.3f}  "
+        print(f"    without {day} ({n_day:2} traj)  {name_b} {rate(kept):.3f}  "
               f"gap {rate(pre) - rate(kept):+.3f}")
     return 0
 
