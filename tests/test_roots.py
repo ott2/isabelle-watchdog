@@ -109,3 +109,34 @@ def test_a_nameless_session_stanza_is_not_a_name():
 def test_a_fragment_with_no_declaration_yields_nothing():
     assert roots.sessions_in_fragment(["  theories", "    X", "chapter Foo"]) == []
     assert roots.sessions_in_fragment([]) == []
+
+
+# --------------------------------------------------- what a session sits on
+
+def test_a_parent_is_read_from_the_declaration(tmp_path):
+    """`parents_in` answers "what does this ROOT declare *on top of*", which
+    is the edge Isabelle's `store_heap` rule runs over."""
+    root = tmp_path / "ROOT"
+    root.write_text("session Base = HOL +\n\nsession Upper = Base +\n")
+    assert roots.parents_in(root) == {"Base": "HOL", "Upper": "Base"}
+
+
+def test_a_quoted_parent_keeps_its_punctuation(tmp_path):
+    """Same defect as `sessions_in`'s `HOL-Analysis` case, on the other side
+    of the `=`: a parent read as `HOL` names a different real session."""
+    root = tmp_path / "ROOT"
+    root.write_text('session Probe = "HOL-Analysis" +\n')
+    assert roots.parents_in(root) == {"Probe": "HOL-Analysis"}
+
+
+def test_a_session_with_no_parent_is_left_out_rather_than_mapped_to_none(
+        tmp_path):
+    """Every caller asks "who descends from X".  An entry that can never
+    answer that is noise in the lookup, not information."""
+    root = tmp_path / "ROOT"
+    root.write_text("session Orphan\n")
+    assert roots.parents_in(root) == {}
+
+
+def test_an_unreadable_root_yields_no_parents(tmp_path):
+    assert roots.parents_in(tmp_path / "absent" / "ROOT") == {}

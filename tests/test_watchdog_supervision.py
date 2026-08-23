@@ -330,6 +330,52 @@ def test_output_that_never_named_a_session_records_null_not_empty(watchdog):
     assert run.record["sessions"] is None
 
 
+# The trailing `isabelle build -b` is not run -- `sh -c SCRIPT` puts anything
+# after SCRIPT in $0, $1, ... -- but it is the argv the watchdog inspects,
+# which is where `-b` is read from.
+_AS_A_B_BUILD = ("isabelle", "build", "-b")
+
+
+def test_forcing_heaps_records_no_role_rather_than_the_wrong_one(watchdog):
+    """`-b` sets `store_heap` for every session (build.scala:427 ->
+    build_process.scala:1165), so Isabelle says `Building` throughout and its
+    verb -- the only thing the role is derived from -- stops discriminating.
+
+    The session the operator asked for was then filed `dependency`, which is
+    the misdiagnosis #4 was about, stated in the words of its own fix.  `null`
+    is what is actually known."""
+    body = plan("Dep", "Mine") + building("Dep") + building("Mine")
+    run = watchdog("sh", "-c", body, *_AS_A_B_BUILD)
+    assert run.code == 0, run
+    assert [(s["name"], s["role"]) for s in run.record["sessions"]] == [
+        ("Dep", None), ("Mine", None)]
+
+
+def test_forcing_heaps_still_records_which_sessions_and_when(watchdog):
+    """Only the role is unknowable under `-b`.  Which sessions were elaborated
+    and in what order is on the pipe either way, and it is the half a timeout
+    audit needs most."""
+    body = plan("Dep", "Mine") + building("Dep") + building("Mine")
+    run = watchdog("sh", "-c", body, *_AS_A_B_BUILD)
+    assert [s["name"] for s in run.record["sessions"]] == ["Dep", "Mine"]
+    assert all(s["started_s"] is not None for s in run.record["sessions"])
+
+
+def test_forcing_heaps_stops_the_summary_blaming_a_dependency(watchdog):
+    """The other half, and the one a reader sees.  With every session reading
+    `Building`, the note would have told an operator timing out in their own
+    session that the budget went on a dependency -- naming the session they
+    asked for as one they did not."""
+    body = (plan("Dep", "Mine") + building("Dep") + QUIET + building("Mine")
+            + foreign_warn("Mine", "Probe_A", 12) + QUIET + "sleep 20")
+    run = watchdog("sh", "-c", body, *_AS_A_B_BUILD,
+                   WATCHDOG_TIMEOUT=30, WALL_TIMEOUT=6,
+                   LOOP_PROGRESS_THRESHOLD=99)
+    assert run.code == 124, run
+    assert "dependency" not in run.out, run.out
+    assert "rebuilt from source first" not in run.out, run.out
+
+
 # ------------------------------------------------------- reading the pipe itself
 
 def test_a_burst_of_output_before_a_hang_is_read_in_full(watchdog):

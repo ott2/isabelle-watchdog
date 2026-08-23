@@ -569,3 +569,70 @@ def test_lint_does_not_require_a_session(build_module, repo):
     configuration."""
     build = build_module()
     assert main_with(build, ["--lint", "-m", "expect: ok"], repo) == 0
+
+
+# ------------------------------------------------- the heap this build leaves
+
+def test_a_session_something_descends_from_is_worth_warning_about(repo):
+    """Isabelle stores a heap only for a session something *in the same run*
+    descends from (build_process.scala:95).  These builds name one session,
+    so it is the leaf of its own plan and stores nothing -- and the next build
+    of a descendant re-elaborates it from source (store.scala:559).
+
+    Invisible until it happens, and when it happens it reads as a timeout in
+    somebody else's theory: #4's misdiagnosis reached by a second route, which
+    better *reporting* cannot prevent."""
+    (repo.root / "upper").mkdir()
+    (repo.root / "upper/ROOT").write_text("session Upper = Probe +\n")
+    note = build_mod.heap_note(repo.root, "Probe", [])
+    assert "stores no heap for Probe" in note
+    assert "Upper descends from it" in note
+    assert "-- -b" in note
+
+
+def test_a_leaf_nothing_descends_from_says_nothing(repo):
+    """The common case.  A note that fires on every build is one nobody
+    reads by the time it matters."""
+    assert build_mod.heap_note(repo.root, "Probe", []) == ""
+
+
+def test_passing_the_flag_silences_it(repo):
+    """The note has to be answerable, or it is a nag.  Once `-b` is there the
+    premise is simply false -- not suppressed, false."""
+    (repo.root / "upper").mkdir()
+    (repo.root / "upper/ROOT").write_text("session Upper = Probe +\n")
+    assert build_mod.heap_note(repo.root, "Probe", ["-b"]) == ""
+    assert build_mod.heap_note(repo.root, "Probe", ["-bv"]) == ""
+
+
+def test_building_the_descendant_too_needs_no_flag(repo):
+    """`store_heap` quantifies over this run's graph, so an ancestor built
+    alongside its descendant stores a heap without being asked.  Reading the
+    ROOTs alone -- without the extra positionals -- would warn about a cost
+    that is not being paid."""
+    (repo.root / "upper").mkdir()
+    (repo.root / "upper/ROOT").write_text("session Upper = Probe +\n")
+    assert build_mod.heap_note(repo.root, "Probe", ["Upper"]) == ""
+
+
+def test_every_descendant_is_named_rather_than_counted(repo):
+    """Which sessions pay is what makes the note actionable -- `-b` is worth
+    it only if you build them.  A count would be shorter and useless."""
+    (repo.root / "a").mkdir()
+    (repo.root / "b").mkdir()
+    (repo.root / "a/ROOT").write_text("session Alpha = Probe +\n")
+    (repo.root / "b/ROOT").write_text("session Beta = Probe +\n")
+    note = build_mod.heap_note(repo.root, "Probe", [])
+    assert "Alpha, Beta descend from it" in note
+
+
+def test_a_grandchild_is_not_this_builds_problem(repo):
+    """`store_heap` is about the direct parent edge: building Probe leaves
+    Upper cold, and Upper's own build is where Top gets its answer.  Naming
+    Top here would attach a cost to the wrong build."""
+    (repo.root / "upper").mkdir()
+    (repo.root / "top").mkdir()
+    (repo.root / "upper/ROOT").write_text("session Upper = Probe +\n")
+    (repo.root / "top/ROOT").write_text("session Top = Upper +\n")
+    note = build_mod.heap_note(repo.root, "Probe", [])
+    assert "Upper descends" in note and "Top" not in note

@@ -112,6 +112,13 @@ def test_a_clean_build_has_no_head():
     (["isabelle", "build", "S"], ["S"]),
     (["isabelle", "build", "-j", "4"], []),
     (["isabelle", "console"], []),                # no `build` at all
+    # `-R` and `-N` are boolean.  The hand-written table this replaced filed
+    # them as value-taking, so `-R` swallowed whatever came next and the real
+    # session name was never reached.
+    (["isabelle", "build", "-R", "-d", "t", "S"], ["S"]),
+    (["isabelle", "build", "-N", "S"], ["S"]),
+    # A value option may carry its value attached (getopts.scala:60).
+    (["isabelle", "build", "-dt", "S"], ["S"]),
 ])
 def test_session_names_skip_flags_and_their_values(argv, want):
     """These names drive `isabelle build_log -H Error`, which is the
@@ -119,6 +126,31 @@ def test_session_names_skip_flags_and_their_values(argv, want):
     Mistaking `4` for a session name would query a session that does not
     exist and silently fall back to the elided text."""
     assert W._session_names(argv) == want
+
+
+# ------------------------------------------------------- were heaps forced?
+
+@pytest.mark.parametrize("argv,want", [
+    (["isabelle", "build", "-d", "t", "-v", "S"], False),
+    (["isabelle", "build", "-d", "t", "-v", "-b", "S"], True),
+    # getopts.scala:56 -- a boolean option bundles, so `-b` need not be its
+    # own token.  `"-b" in argv` misses both of these.
+    (["isabelle", "build", "-bv", "S"], True),
+    (["isabelle", "build", "-vb", "S"], True),
+    # ...and getopts.scala:60 -- a value option's value may be attached, so a
+    # `b` inside a token is not a flag.  `-dbase` is `-d base`.
+    (["isabelle", "build", "-dbase", "S"], False),
+    (["isabelle", "build", "-o", "build_progress_threshold=15", "S"], False),
+    # Option processing stops at the first non-option token
+    # (getopts.scala's fallthrough), so this `-b` sets nothing.
+    (["isabelle", "build", "S", "-b"], False),
+    (["isabelle", "build", "--", "-b"], False),
+])
+def test_whether_isabelle_will_store_every_heap(argv, want):
+    """`-b` decides whether the `sessions` field's roles mean anything, so
+    unlike the session names above -- which only enrich an error message --
+    getting this wrong writes a false claim into a record."""
+    assert W.stores_all_heaps(argv) is want
 
 
 # ------------------------------------------------------------- the loop warning
@@ -249,6 +281,17 @@ def test_nothing_is_added_when_there_is_nothing_to_add(built, stuck):
     """A note that fires on an ordinary single-session timeout is noise, and
     noise beside a kill is what stops the useful notes being read."""
     assert W._budget_note(built, stuck) == ""
+
+
+def test_with_heaps_forced_the_note_declines_to_guess():
+    """Under `-b` every session stores a heap, so Isabelle says `Building`
+    throughout and the verb stops discriminating.  The roles are then `None`,
+    and the note must fall silent rather than read the session you asked for
+    as a dependency -- which is #4's own misdiagnosis, in the wording of its
+    fix."""
+    built = [("MTTM", None, 0.4), ("Mine", None, 30.0)]
+    assert W._budget_note(built, "Mine") == ""
+    assert W._budget_note(built, "MTTM") == ""
 
 
 @pytest.mark.parametrize("lines,tail", [

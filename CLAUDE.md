@@ -216,6 +216,36 @@ under `-v`, which `build.py` always passes, so seeing one is what lets an empty
 session list mean "nothing was rebuilt" rather than "the output never said".
 `[]` and `null` are different claims.
 
+**`-b` is the one thing that can un-say it, so the role goes `null`.** The
+verb is read straight off `store_heap`, and `-b` overrides the very rule it
+is derived from:
+
+```scala
+val store_heap = build_context.store_heap || state.sessions.store_heap(name)
+```
+
+(`build_process.scala:1165`; `build_context.store_heap` is `-b`, from
+`build.scala:427` via `:273`). With the left disjunct true, everything reads
+`Building` and the verb stops discriminating — so the session the operator
+*asked for* was recorded `dependency`, and `_budget_note` told them the budget
+had gone on a dependency, naming the session they did ask for as one they did
+not. That is issue #4's own misdiagnosis, arriving in the wording of its fix.
+
+`roles_meaningful` is therefore computed once from the argv, and under `-b`
+every role is `null` and the note falls silent. **Null is what is known**: a
+role that goes absent costs a reader nothing they could otherwise have had,
+where a confident wrong one is the `build_record.PROJECT_DIR` failure at the
+top of this file. Only the role collapses — which sessions were elaborated,
+and when, is on the pipe either way.
+
+Reading `-b` off the argv needs Isabelle's actual option grammar, not a
+substring test: `getopts.scala` **bundles** boolean options (`-bv` is `-b -v`),
+lets value options carry an **attached** value (`-dbase` is `-d base`, and
+contains a `b`), and **stops at the first positional**, so a `-b` after the
+session name sets nothing. `watchdog.build_options` mirrors all three, and
+`_session_names` now shares it — the table it replaced listed `-R` and `-N`
+(both boolean) as value-taking, so `-R` swallowed the token after it.
+
 **Three coupled constants — do not change one alone.** The watchdog injects
 `-o build_progress_threshold=15` into the `isabelle build` argv. Isabelle's own
 default is 20 s, the *same* as `WATCHDOG_TIMEOUT`, so the line-bearing warning
@@ -356,7 +386,9 @@ One JSON line per attempt. Design commitments, all load-bearing:
   enumerates battery and concurrency as confounds and could not derive this
   one at all. It is not only a timeout field: on a green build the same
   rebuild shows up as elapsed time, with nothing to attribute it to. `[]`
-  means nothing was rebuilt, `null` means the output never said. No reader
+  means nothing was rebuilt, `null` means the output never said, and a null
+  `role` is the same distinction one level down — the session was elaborated,
+  but under `-b` Isabelle's verb cannot say whose it was (above). No reader
   consumes it yet, exactly as no reader consumes `contention`; both are
   stored because the analysis that needs them cannot go back and collect
   them.
@@ -502,6 +534,37 @@ Capture happens in the *watchdog*, so any path through it is recorded. Running
 picked up by the next recorded build (diffs are cumulative), but that attempt's
 outcome, timing and error loci are gone.
 
+**`heap_note` — the cold heap this build is about to leave.** Isabelle stores
+a session's heap only when something *in the same run* descends from it
+(`store_heap`, above). These builds name one session, so it is the leaf of its
+own plan and stores nothing; the next build of a descendant then finds
+`output_shasum.is_empty`, declares the ancestor out of date
+(`store.scala:559`) and re-elaborates it from source. A project with a chain
+of sessions pays that on every hop, and it is invisible until it happens —
+at which point it presents as a timeout in a theory the operator does not
+own, which is **issue #4's symptom reached by a second route**. No amount of
+better reporting prevents it; only `-b` does.
+
+So it is said before the build, in the class `build.py` already puts "no
+session to build" in: configuration, stated once the answer is known, with
+the fix in the message. Three things make it a note rather than a nag:
+
+- **Both halves are derived.** Which sessions descend from this one comes
+  from the ROOT graph (`roots.parents_in`), not a list; whether heaps are
+  forced comes from the argv.
+- **It is answerable, and answering it makes the premise false** rather than
+  suppressing the warning — `-- -b` (the passthrough spelling, since that is
+  what works through this wrapper) removes the condition being reported.
+- **Descendants are named, not counted.** Whether `-b` is worth its cost
+  depends on whether you build *those* sessions, so a count would be shorter
+  and useless.
+
+Only the *direct* parent edge is reported: building X leaves its children
+cold, and each child's own build is where its children get their answer.
+Naming a grandchild here would attach a cost to the wrong build.
+`--where` reports it too, since that is the command asked before the first
+build — when adding `-b` to a wrapper costs nothing.
+
 ## Environment contract
 
 The public API. `--session` has no constant default on purpose — it was
@@ -615,14 +678,18 @@ the corpus, which is worse.
 The two projects are exactly the two cases. **43sp** has one ROOT declaring
 `SPSlowdown`, so `$BUILD_SESSION` was carrying information the repository
 already stated — which is what made its `bin/build` shim deletable. **ndtht**
-has ten ROOTs declaring thirteen sessions and builds several of them, so it
-cannot be derived and keeps `$BUILD_SESSION` per invocation; the error lists
-all thirteen with their ROOTs.
+has many ROOTs, declares more sessions than ROOTs, and builds several of them,
+so it cannot be derived and keeps `$BUILD_SESSION` per invocation; the error
+lists every one of them with its ROOT. (Unsized for the reason given under
+*Verifying a change*: that project is under active development, and a count
+here would be a standing claim about someone else's tree.)
 
 **The ROOT parser is `isabelle-layout`'s** — the one runtime dependency, and
 the only place this package imports anything external. `roots.py` is a
-twenty-line adapter over `parse_root_sessions`, holding no regex and no notion
-of what a session name may contain.
+thin adapter over `parse_root_sessions`, holding no regex and no notion
+of what a session name may contain — `sessions_in` for what a ROOT declares,
+`parents_in` for what it declares *on top of*, and `sessions_in_fragment` for
+the diff-hunk case below.
 
 It is also where a missing `isabelle-layout` is restated as
 `roots.MISSING_LAYOUT` — **at the import**, so both callers inherit one
@@ -1001,8 +1068,16 @@ production behaviour, not something the tests add.
 Both corpora survive and are the regression suite. There is no mocking to do —
 run every subcommand against both, before and after, and diff:
 
-- `~/projects/ndtht-trajectories/stac-wip/builds.jsonl` (695 records)
-- `~/projects/trajectories/43sp/builds.jsonl` (40 records)
+- `~/projects/ndtht-trajectories/stac-wip/builds.jsonl`
+- `~/projects/trajectories/43sp/builds.jsonl`
+
+Deliberately unsized. Both are live datasets that grow whenever their project
+builds, so a count here is a number that is wrong more often than it is right
+— and the check is "does the output differ from before the change", which no
+count contributes to. Historical figures elsewhere in this file (how many
+blind payloads predate the capture fix, how many fail→ok flips the untracked
+gap explained) are the opposite case: they are evidence for a decision already
+made, fixed at the moment it was made, and stay true.
 
 For the *write* path, that is now what the `trajectory` fixture does — `git
 init` a scratch repo, edit theories, capture, then `check` and `replay` against
@@ -1040,11 +1115,12 @@ backup and sharing story from the tools.
   elaborated and which of them it called dependencies; `audits/timeouts.py`
   is where it belongs, since dependency re-elaboration is the third confound
   in the list that audit already enumerates (battery, concurrency). It is not
-  wired in because **no corpus contains the field yet** — both real corpora
-  predate it — so a check would report "no data" on every input, which is the
-  kind of always-silent test that reads as passing. Wire it up once a corpus
-  has records with it, and not before. Same standing as `contention`, which
-  no reader consumes either.
+  wired in because **the corpora are almost entirely older than the field**:
+  a check would report "no data" on nearly every input, which is the kind of
+  always-silent test that reads as passing. The bar is a corpus with enough
+  *timeouts* carrying `sessions` to distinguish the confound from the signal,
+  not merely a corpus in which the key appears. Same standing as
+  `contention`, which no reader consumes either.
 - **`Finished X (...)` is deliberately unparsed.** Isabelle prints
   `Finished Dep_A (0:00:05 elapsed time, 0:00:04 cpu time, factor 0.75)`,
   which is richer than the `started_s` the recorder keeps — and useless for

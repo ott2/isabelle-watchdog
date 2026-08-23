@@ -716,8 +716,18 @@ def main() -> int:
     # `plan_seen` separates "nothing was rebuilt" from "the output never
     # said": the plan lines only appear under `-v`, which `build.py` always
     # passes and a bare `isabelle-watchdog` invocation may not.
-    sessions_built: list[tuple[str, str, float]] = []
+    sessions_built: list[tuple[str, str | None, float]] = []
     plan_seen = False
+    # `-b` makes every session store a heap, so Isabelle's verb is `Building`
+    # throughout and stops discriminating -- `store_heap =
+    # build_context.store_heap || state.sessions.store_heap(name)`
+    # (build_process.scala:1165), where the left disjunct overrides the very
+    # rule the role is read from.  The role is then *unknown*, and recording
+    # it as "dependency" filed the session the operator asked for as one they
+    # did not: issue #4's misdiagnosis, restated in the words of its own fix.
+    # A null role costs a reader nothing it could otherwise have had; a
+    # confident wrong one is the failure this file opens by describing.
+    roles_meaningful = not stores_all_heaps(args)
 
     # Contention state.  `load_factor` multiplies all three budgets, exactly as
     # BATTERY_FACTOR does -- but measured from this build rather than assumed
@@ -776,7 +786,8 @@ def main() -> int:
             if msess and not any(s[0] == msess.group(2) for s in sessions_built):
                 sessions_built.append((
                     msess.group(2),
-                    "dependency" if msess.group(1) == "Building" else "target",
+                    ("dependency" if msess.group(1) == "Building" else "target")
+                    if roles_meaningful else None,
                     round(time.monotonic() - wall_start, 1)))
 
             # Track latest in-progress theory for STUCK message
@@ -999,7 +1010,9 @@ def main() -> int:
         # load or genuine proof failure?" — has no way to derive the
         # difference.  `[]` means nothing was rebuilt, `null` means the
         # output never said (see `plan_seen`), and the two are not the same
-        # claim.
+        # claim.  A `null` *role* is the third distinction of that shape:
+        # the session was elaborated, but under `-b` Isabelle's verb cannot
+        # say whose it was (see `roles_meaningful`).
         sessions_rec = ([{"name": n, "role": r, "started_s": t}
                          for n, r, t in sessions_built]
                         if (sessions_built or plan_seen) else None)
@@ -1039,29 +1052,80 @@ def _first_error(lines: list[str]) -> str:
     return " | ".join(heads)
 
 
-# isabelle-build flags that consume the following token as their value;
-# everything else after `build` that is not a flag is a session name.
-_BUILD_VALUE_FLAGS = {"-d", "-o", "-j", "-D", "-x", "-X", "-B", "-R",
-                      "-A", "-P", "-N", "-Z", "-n_jobs"}
+# `isabelle build`'s own option spelling, transcribed from Isabelle2025-2
+# src/Pure/Build/build.scala (the getopts table) and split by arity, because
+# the two arities behave differently in every position.  One table, because
+# this file asks two questions of the same command line -- which sessions were
+# named, and whether `-b` was passed -- and two tables of one grammar is the
+# defect this package already paid for once in its ROOT parsers.
+#
+# The list it replaces was hand-written and wrong in both directions: it filed
+# `-R` and `-N` (both boolean) as value-taking, so `-R` swallowed whatever
+# followed it, and it omitted `-g` and `-H` while carrying `-Z` and `-n_jobs`,
+# which `isabelle build` has never accepted.
+BUILD_VALUE_OPTS = "ABDHPXdgjox"
+BUILD_FLAG_OPTS = "NRSabceflnv"
+
+
+def build_options(args: list[str]) -> "tuple[set[str], list[str]]":
+    """`(flags given, sessions named)` for an `isabelle build ...` argv.
+
+    Mirrors `src/Pure/System/getopts.scala` rather than approximating it,
+    because three of its rules bite here and none is guessable:
+
+      - a boolean option **bundles** -- `-bv` is `-b -v` -- so "is this token
+        exactly `-b`" misses it;
+      - a value option may carry its value **attached** -- `-dt` is `-d t` --
+        so "does this token contain a b" false-positives on `-dbase`;
+      - option processing **stops at the first non-option token**, so a `-b`
+        after the session name sets nothing.
+
+    Fidelity matters more than it used to.  Session names only ever enriched
+    an error message, where being wrong costs nothing; the flags decide what
+    goes in a *record*, and CLAUDE.md's standing rule is that a payload is
+    held to a higher bar than a message.
+    """
+    try:
+        i = args.index("build") + 1
+    except ValueError:
+        return set(), []
+    flags: set[str] = set()
+    while i < len(args):
+        tok = args[i]
+        if tok == "--":                      # everything after is positional
+            return flags, args[i + 1:]
+        if len(tok) < 2 or not tok.startswith("-"):
+            return flags, args[i:]           # first positional ends options
+        j = 1
+        while j < len(tok):
+            opt = tok[j]
+            if opt in BUILD_FLAG_OPTS:
+                flags.add(opt)
+                j += 1
+                continue
+            if opt in BUILD_VALUE_OPTS and j + 1 == len(tok):
+                i += 1                       # bare `-d`: value is next token
+            # Either the value was attached (`-dt`) or the option is one
+            # Isabelle will reject outright.  Nothing more can be read from
+            # this token in either case, and an unknown option fails the
+            # build loudly on its own rather than needing a guess here.
+            break
+        i += 1
+    return flags, []
 
 
 def _session_names(args: list[str]) -> list[str]:
     """Positional session names in an `isabelle build ...` command line."""
-    try:
-        i = args.index("build") + 1
-    except ValueError:
-        return []
-    out: list[str] = []
-    while i < len(args):
-        a = args[i]
-        if a in _BUILD_VALUE_FLAGS:
-            i += 2
-        elif a.startswith("-"):
-            i += 1
-        else:
-            out.append(a)
-            i += 1
-    return out
+    return build_options(args)[1]
+
+
+def stores_all_heaps(args: list[str]) -> bool:
+    """Does this command line pass `-b`, making every session store a heap?
+
+    Public because `build.py` asks it of the arguments it is about to pass
+    through, and the grammar above should exist once.
+    """
+    return "b" in build_options(args)[0]
 
 
 def _fetch_db_error(args: list[str]) -> str:
@@ -1231,7 +1295,7 @@ def _stuck_session(loop_key: "tuple[str, str, str] | None",
     return theory.split(".", 1)[0] if "." in theory else ""
 
 
-def _budget_note(sessions_built: "list[tuple[str, str, float]]",
+def _budget_note(sessions_built: "list[tuple[str, str | None, float]]",
                  stuck_session: str) -> str:
     """One clause for the timeout summary saying where the budget actually
     went, or "" when there is nothing to add.
@@ -1244,11 +1308,11 @@ def _budget_note(sessions_built: "list[tuple[str, str, float]]",
     proof stuck at line 444 of somebody else's file
     (github.com/ott2/isabelle-watchdog#4).
 
-    Roles are Isabelle's, not ours — see SESSION_BUILD_RE.  Under `-b` every
-    session stores its heap and so reads as a dependency; the naming branch
-    is unaffected (it asks about the session we stopped in, which is then
-    correctly a dependency of the `-b` request), and the counting branch
-    would overstate, which is why it names them rather than only counting."""
+    Roles are Isabelle's, not ours — see SESSION_BUILD_RE.  Under `-b` they
+    are `None`, because Isabelle's verb stops discriminating (see
+    `roles_meaningful`), and every branch below then falls through to "" —
+    which is the right answer rather than a lucky one: with heaps forced,
+    nothing on the pipe says which session the budget was *owed* to."""
     if not sessions_built:
         return ""
     roles = {name: role for name, role, _ in sessions_built}
@@ -1393,7 +1457,7 @@ def _print_summary_timeout(
     battery: "bool | None" = None,
     contention_verdict: str = "unknown",
     duty: "float | None" = None,
-    sessions_built: "list[tuple[str, str, float]] | None" = None,
+    sessions_built: "list[tuple[str, str | None, float]] | None" = None,
 ) -> None:
     # log: first so `head -N` captures it even if the diagnostic
     # line ends up wrapped.  Name the stuck command's line when we have

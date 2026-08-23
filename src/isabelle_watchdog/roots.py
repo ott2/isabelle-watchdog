@@ -6,7 +6,10 @@ because one of the two callers here does not have a ROOT *file* to hand, and
 `isabelle_layout.parse_root_sessions` takes a path.
 
   - `build.py` has a real ROOT and asks which sessions it declares, to derive
-    what to build. `sessions_in` is a one-line adapter for it.
+    what to build. `sessions_in` is a one-line adapter for it, and
+    `parents_in` answers the follow-up question — which sessions descend from
+    the one being built, and so will pay to re-elaborate it if this run
+    stores no heap.
   - `attempts.py` has **fragments of a captured diff** — the added and context
     lines of a hunk in a ROOT — and asks which session names they mention, to
     map a name to the directory it was declared in. `sessions_in_fragment`
@@ -97,6 +100,28 @@ def sessions_in(root_file: Path) -> list[str]:
         return _named(parse_root_sessions(Path(root_file)))
     except OSError:
         return []
+
+
+def parents_in(root_file: Path) -> dict[str, str]:
+    """Declared session -> the session it extends, where it names one.
+
+    `sessions_in` answers "what does this ROOT declare"; this answers "what
+    does it declare *on top of*".  The parent edge is the one Isabelle's
+    `store_heap` rule runs over — a session stores a heap only if something
+    in the same run descends from it — so it is what says whether building
+    one session leaves the next one's ancestor warm or cold.
+
+    A session with no parent (a root of the graph, `session X = HOL` aside)
+    contributes nothing to that question and is left out, rather than mapped
+    to `None`: every caller here is asking "who descends from X", and an
+    entry that can never answer it is noise in a lookup.
+    """
+    try:
+        sessions = parse_root_sessions(Path(root_file))
+    except OSError:
+        return {}
+    return {s.name: s.parent for s in sessions
+            if s.name != _ANON and s.parent and s.parent != _ANON}
 
 
 def sessions_in_fragment(lines: list[str]) -> list[str]:

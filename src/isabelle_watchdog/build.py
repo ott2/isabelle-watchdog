@@ -54,6 +54,12 @@ from . import __version__
 from . import corpus
 from . import guard
 from . import roots
+# For the `isabelle build` option grammar only -- `build_options`, a pure
+# function over an argv.  The *supervision* still goes through `python -m`
+# below, for the reason stated there; importing the module does not start
+# anything, and the alternative is a second copy of a grammar this package
+# has already been bitten by keeping twice.
+from . import watchdog
 
 
 
@@ -88,7 +94,12 @@ DEFAULT_SESSION_DIR = os.environ.get("BUILD_SESSION_DIR")
 # What stays here is *which* ROOTs to read, which is a question about this
 # project rather than about ROOT syntax -- `root_files` asks git, deliberately
 # (below), where `isabelle_layout.discover_roots` walks the filesystem.
+#
+# Aliased at module level because `resolve_session` binds a local named
+# `roots` for the ROOT *files* it found, which would otherwise shadow the
+# module halfway down this file.
 sessions_in = roots.sessions_in
+parents_in = roots.parents_in
 
 
 def root_files(project: Path) -> list[Path]:
@@ -194,6 +205,48 @@ def _no_session_message(project: Path, declared: list) -> str:
             f"{corpus.MARKER_NAME}.\n{listed}")
 
 
+def heap_note(project: Path, session: str, extra: list[str]) -> str:
+    """One line when this build will leave a heap cold that something in the
+    same project descends from, or "" when it will not.
+
+    Isabelle stores a session's heap only when something *in the same run*
+    descends from it: `store_heap(name) = is_pure(name) ||
+    exists(_.ancestors.contains(name))` (Isabelle2025-2
+    src/Pure/Build/build_process.scala:95).  These builds name one session, so
+    that session is the leaf of its own plan and stores nothing — and the next
+    build of a descendant then finds `output_shasum.is_empty`, declares the
+    ancestor out of date (`store.scala:559`) and re-elaborates it from source.
+
+    That is invisible until it happens, and when it happens it looks like a
+    timeout in somebody else's theory — the misdiagnosis #4 was about, arriving
+    by a second route that no amount of better *reporting* prevents.  So it is
+    said here, before the build, in the class `build.py` already puts "no
+    session to build" in: configuration, stated once the answer is known and
+    with the fix in the message.
+
+    Both halves are derived, neither declared.  `store_heap` is read off the
+    ROOT graph rather than guessed, and `-b` silences it because then the
+    premise is simply false.  Positional arguments in `extra` count as part
+    of the plan: building a descendant alongside its ancestor stores the
+    ancestor's heap, so there is nothing to warn about.
+    """
+    flags, also_built = watchdog.build_options(["build", *extra])
+    if "b" in flags:
+        return ""
+    children = sorted({
+        child
+        for r in root_files(project)
+        for child, parent in parents_in(project / r).items()
+        if parent == session and child != session})
+    if not children or set(also_built) & set(children):
+        return ""
+    listed = ", ".join(children)
+    verb = "descends" if len(children) == 1 else "descend"
+    return (f"this build stores no heap for {session}; {listed} {verb} from "
+            f"it and will re-elaborate it from source.\n"
+            f"  Pass `-- -b` to store one, if you build those too.")
+
+
 def read_note(args) -> str | None:
     """The note from -m or --note-file, or None to fall back to the pending
     file (which build_record reads itself)."""
@@ -260,7 +313,8 @@ environment:
 
 
 def report_where(project: Path, session: str | None = None,
-                 session_dir: str | None = None) -> int:
+                 session_dir: str | None = None,
+                 extra: list[str] | None = None) -> int:
     """Answer "what would this build do, and why".
 
     A tool that resolves two questions by four rules each should be able to
@@ -326,6 +380,14 @@ def report_where(project: Path, session: str | None = None,
         return 2
     print(f"session: {name}")
     print(f"     in: {where}")
+    # "What would adopting this do to my repo" includes what it will leave
+    # cold.  Reported here as well as at build time because this is the
+    # command asked *before* the first build, which is when adding `-b` to a
+    # wrapper costs nothing.
+    heap = heap_note(project, name, extra or [])
+    if heap:
+        # Re-indented to this report's continuation column, as `but:` is.
+        print("   heap: " + heap.replace("\n  ", "\n         "))
     return 0
 
 
@@ -373,7 +435,7 @@ def main() -> int:
 
     project = project_dir()
     if args.where:
-        return report_where(project, args.session, args.dir)
+        return report_where(project, args.session, args.dir, args.rest)
 
     # Lint asks about a note, not about a build, so it must not require a
     # session -- and must not pay for the ROOT scan that resolving one costs.
@@ -441,6 +503,12 @@ def main() -> int:
     # to __file__.  The subprocess boundary itself stays -- the watchdog
     # installs signal handlers and reaps a process tree, which is not
     # something to run inside a caller's interpreter.
+    # Before the spawn, so it reads as advice about the build rather than a
+    # verdict on it, and so it is still said when the build then fails.
+    heap = heap_note(project, session, args.rest)
+    if heap:
+        print(f"note: {heap}", file=sys.stderr)
+
     cmd = [sys.executable, "-m", "isabelle_watchdog.watchdog", "isabelle", "build",
            "-d", session_dir, "-v", *args.rest, session]
     return subprocess.run(cmd, cwd=project, env=env).returncode

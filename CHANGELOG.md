@@ -9,6 +9,60 @@ that changes what a record contains says so here explicitly, and
 `trajectory check` will tell you whether a corpus written by an older version
 still regenerates.
 
+## [Unreleased]
+
+### Added
+
+**A build now says when it is about to leave a heap cold**
+
+Isabelle stores a session's heap only if something *in the same run* descends
+from it. `isabelle-build` names one session, so that session is the leaf of
+its own plan and stores nothing — and the next build of a descendant finds no
+heap, declares the ancestor out of date and re-elaborates it from source. On a
+project with a chain of sessions that is paid on every hop, and it presents as
+a timeout in a theory you do not own, which is exactly the symptom #4 was
+about.
+
+```
+note: this build stores no heap for Multitape_TM_Substrate; Multitape_Alphabet_Enlargement,
+      Multitape_Alphabet_Reduction descend from it and will re-elaborate it from source.
+  Pass `-- -b` to store one, if you build those too.
+```
+
+Derived from the project's ROOT graph, printed before the build and by
+`isabelle-build --where`, and silent once `-b` is passed or once a descendant
+is being built alongside its ancestor — in both cases because the premise has
+become false, not because the warning was suppressed.
+
+### Fixed
+
+**`-b` made the `sessions` field name your own session as a dependency**
+
+`role` is read from Isabelle's `Building` / `Running` verb, which is its own
+statement of `store_heap`. `-b` sets `store_heap` globally
+(`build_process.scala:1165`), so every session reads `Building` and the verb
+stops discriminating. The session you asked for was then recorded
+`"role": "dependency"`, and a timeout inside it was reported as *"the budget
+went on rebuilding dependency X, not on the session you asked for"* — naming
+the session you did ask for as one you did not.
+
+Under `-b` the role is now `null` and that note falls silent. Which sessions
+were elaborated, and when, is recorded as before.
+
+**`-R` and `-N` were parsed as taking a value**
+
+Both are boolean, so `isabelle build -R -d t MySession` had its `-d` consumed
+as `-R`'s argument and the session name was never found — which silently cost
+the full error text from `isabelle build_log -H Error` on a failing build. The
+option table is now transcribed from `build.scala` and applied with Isabelle's
+own grammar, including bundled flags (`-bv`) and attached values (`-dbase`).
+
+### Record schema
+
+`sessions[].role` may now be `null`, meaning the session was elaborated but
+Isabelle's output could not say whose it was (`-b`). `"dependency"` and
+`"target"` are unchanged, and a record written by 0.5.0 needs no migration.
+
 ## [0.5.0] — 2026-08-23
 
 ### Fixed
