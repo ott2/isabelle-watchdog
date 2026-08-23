@@ -1027,6 +1027,32 @@ backup and sharing story from the tools.
 
 ## Known follow-up work
 
+- **No CI test matrix.** `.github/workflows/` holds `release.yml` and nothing
+  else, so the suite has never been executed by anything but a developer's
+  machine — currently Python 3.14 only. `requires-python = ">=3.10"` is
+  therefore a claim checked by reading, not by running, and the three-layer
+  suite is exactly the thing that would catch a 3.10 incompatibility if it
+  ever ran there. `isabelle-layout`'s runbook names this as the first
+  post-release task, and the same argument applies here: a floor no index
+  will test is the fictitious-constraint problem from `pyproject.toml`'s own
+  dependency comment, one level up.
+- **Nothing reads `sessions` yet.** The field records which sessions Isabelle
+  elaborated and which of them it called dependencies; `audits/timeouts.py`
+  is where it belongs, since dependency re-elaboration is the third confound
+  in the list that audit already enumerates (battery, concurrency). It is not
+  wired in because **no corpus contains the field yet** — both real corpora
+  predate it — so a check would report "no data" on every input, which is the
+  kind of always-silent test that reads as passing. Wire it up once a corpus
+  has records with it, and not before. Same standing as `contention`, which
+  no reader consumes either.
+- **`Finished X (...)` is deliberately unparsed.** Isabelle prints
+  `Finished Dep_A (0:00:05 elapsed time, 0:00:04 cpu time, factor 0.75)`,
+  which is richer than the `started_s` the recorder keeps — and useless for
+  the case the field exists for, because a timeout kills mid-session and the
+  session that ate the budget never prints it. `started_s` is what survives a
+  kill. Recorded here so the option is not rediscovered and re-litigated;
+  it becomes worth having only if a question about *finished* builds needs
+  per-session durations, which none currently does.
 - `legacy_convert.py` was a one-shot migration off the git-chain
   prototype; kept as a record of how the initial dataset was produced, not on
   any live path.
