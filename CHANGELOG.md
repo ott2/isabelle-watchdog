@@ -9,7 +9,15 @@ that changes what a record contains says so here explicitly, and
 `trajectory check` will tell you whether a corpus written by an older version
 still regenerates.
 
-## [Unreleased]
+## [0.6.0] — 2026-08-27
+
+A minor bump rather than a patch, on the record-schema rule above: `duty_cycle`
+and `verdict` now mean something materially different, so `contention` written
+before and after this release is not directly comparable. Nothing about the
+*shape* of a record changed, and no reader consumes `contention` yet, so no
+corpus needs repairing — but a future one must not pool the two eras without
+knowing which is which. `isabelle-watchdog -V` on the writing machine is the
+only thing that distinguishes them.
 
 ### Fixed
 
