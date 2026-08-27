@@ -9,6 +9,85 @@ that changes what a record contains says so here explicitly, and
 `trajectory check` will tell you whether a corpus written by an older version
 still regenerates.
 
+## [Unreleased]
+
+### Fixed
+
+**A build using a whole core was reported as `stalled` — "used no CPU"**
+
+`ps` reports the processes that exist *now*, so summing the process tree gave
+a CPU total that **fell** whenever a child exited — and Isabelle finishing a
+session's `poly` worker is exactly that, several times a build. The duty cycle
+differentiates that total, so a departure arrived as a negative delta, was
+clamped to zero by `max(0.0, …)`, and was published as `stalled`: the most
+confident verdict the policy has, on builds that had used 35.9 CPU-seconds in
+40.6 s of wall clock. The tool contradicted itself inside one record:
+
+```json
+"contention": {"cpu_time_s": 35.88, "duty_cycle": 0.0, "verdict": "stalled"}
+```
+
+The sampler now accounts per pid (`ps -o pid=,time=`) and keeps every process
+the tree has held, so a worker that exits keeps the seconds it spent. That is
+the correct accounting rather than a workaround — those seconds were really
+used, by this build — and it makes `cpu_time_s` mean the cumulative total its
+own comment had always claimed.
+
+Two smaller changes follow from it. `duty_cycle` returns `null` on a falling
+total instead of zero: a broken measurement must not arrive as a verdict, and
+`unknown` grants no extension either, so the conservative behaviour survives
+without the false diagnosis. And pid reuse is guarded so it can only
+over-count, which reads as `running` and grants nothing.
+
+The report's own suggestion — suppress `stalled` when cumulative CPU is a high
+fraction of elapsed time — was deliberately not taken. It treats the symptom
+and blinds the one case the window measurement exists for: a build that ran
+flat out and *then* hung has a healthy cumulative and a dead window. The
+window is right; the arithmetic under it was not.
+
+**A `stalled` timeout claimed more than the measurement supports**
+
+`used no CPU — a hang, not a busy machine` made three claims where the tool
+can support one: it measures a *window*, "a hang" is an inference, and "not a
+busy machine" rules out an alternative it never tested. Beside the record
+above it read as a broken tool, and it directed the reader away from
+`last-build.log`, which had the answer. Now:
+
+```
+TIMEOUT  40s wall clock exceeded  (no CPU in the last 15s, 27.73s of CPU in 40s wall — possibly a hang)
+```
+
+The summary also now quotes the same dict the record keeps, rather than
+re-deriving its own gloss from the same variables, so the message and the
+record cannot disagree again.
+
+### Added
+
+**A timeout says when the budget went before any session started**
+
+Isabelle spends its first seconds starting a JVM, loading the session graph
+and verifying ancestor shasums, announcing nothing until a session actually
+begins. A build that reached its target 19.9 s into a 40 s budget was measured
+against half the budget its operator set, and nothing said so — the existing
+"rebuilt from source first" note is about *whose* session ate the clock, and
+is correctly silent when the answer is nobody's.
+
+```
+TIMEOUT  40s wall clock exceeded  (19.9s of the 40s budget went before
+         Nondeterministic_Time_Hierarchy started — Isabelle startup, not proof time)
+```
+
+Reported above a quarter of the budget, and deliberately a report rather than
+a correction: starting the wall clock at the first session would leave the
+startup phase unsupervised, which is where a hang is least visible. No new
+record field — `sessions[0].started_s` already carries it. Roles are not
+consulted, so this survives `-b`.
+
+Thanks to the reporter of
+[#6](https://github.com/ott2/isabelle-watchdog/issues/6), whose two records
+carried `cpu_time_s` and `duty_cycle` side by side; the contradiction was
+visible only because both observations are stored.
+
 ## [0.5.1] — 2026-08-24
 
 ### Added

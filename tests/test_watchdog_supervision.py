@@ -20,9 +20,14 @@ behaviour, not something the tests add.
 from __future__ import annotations
 
 import os
+import signal
+import subprocess
 import sys
+import time
 
 import pytest
+
+from isabelle_watchdog import watchdog as W
 
 pytestmark = pytest.mark.slow
 
@@ -540,18 +545,25 @@ def cpu_stub(stub_bin, cs_per_second: int):
     0.9); and assert an exact `load_factor_applied` only where `min(cap,
     1/duty)` saturates, since an unsaturated factor inherits the +/-40% and
     can only be given a band.
+
+    It emits `pid time`, matching `ps -o pid=,time=`: the sampler accounts per
+    process now, so that a worker exiting cannot take its CPU back out of the
+    total (#6).  One pid -- the child itself -- which is all a fixture holding
+    a single duty cycle still has to present.
     """
     stub_bin("ps", f"""
 PS=/bin/ps
 [ -x "$PS" ] || PS=/usr/bin/ps
 for a in "$@"; do pids=$a; done          # the pid list is the last argument
-set -- $($PS -o etime= -p "${{pids%%,*}}")   # splitting strips ps's padding
-et=${{1#*-}}                                 # drop a DD- prefix if one appears
+pid=${{pids%%,*}}
+set -- $($PS -o etime= -p "$pid")        # splitting strips ps's padding
+et=${{1#*-}}                              # drop a DD- prefix if one appears
 secs=0
 IFS=:
 for f in $et; do f=${{f#0}}; secs=$((secs * 60 + ${{f:-0}})); done
 cs=$((secs * {cs_per_second}))
-printf '  %d:%02d.%02d\\n' $((cs / 6000)) $((cs / 100 % 60)) $((cs % 100))
+printf '%s   %d:%02d.%02d\\n' "$pid" \\
+    $((cs / 6000)) $((cs / 100 % 60)) $((cs % 100))
 """)
 
 
@@ -627,7 +639,12 @@ def test_a_stalled_tree_earns_no_extension(watchdog, stub_bin):
     # And it says so: "timed out" is a report, "timed out without using the
     # CPU" is a diagnosis -- and this is the one verdict where nothing was
     # scaled, so no other part of the output would hint at it.
-    assert "used no CPU" in run.out, run
+    #
+    # Scoped to the window it was measured over, and carrying the cumulative
+    # figure beside it, because the unscoped version claimed more than the
+    # measurement supports and was caught contradicting the record (#6).
+    assert "no CPU in the last" in run.out, run
+    assert "possibly a hang" in run.out, run
 
 
 def test_the_cap_bounds_what_starvation_can_buy(watchdog, stub_bin):
@@ -712,6 +729,84 @@ def test_a_run_too_short_to_sample_claims_no_cpu_time(watchdog, stub_bin):
     assert c["duty_cycle"] is None
     assert c["cpu_time_s"] is None, "the spawn baseline reached the record"
     assert c["verdict"] == "unknown"
+
+
+def test_a_worker_that_exits_cannot_take_its_cpu_back():
+    """The defect behind #6, against a real tree and a real `ps`.
+
+    `ps` reports the processes alive *now*, so summing the tree gives a total
+    that falls when a child exits -- and Isabelle finishing a session's `poly`
+    worker is exactly that, several times a build.  The duty cycle
+    differentiates that total, so the fall arrived as a negative delta, was
+    clamped to zero, and was published as `stalled`: "used no CPU" beside a
+    recorded 35.88 CPU-seconds.
+
+    No stub here, deliberately.  The bug lives in what the real `ps` does
+    across a real process exiting, which is the one thing a fake `ps` holding a
+    duty cycle still cannot reproduce -- and did not.
+
+    The worker is killed at a moment this test chooses rather than left to
+    exit on its own, and that is not tidiness.  Written the other way -- two
+    spinners, one short, sampled on a timer -- whether the departure is even
+    visible is a race between the worker's lifetime and `pgrep`'s cost: each
+    sample pays several execs at 150-300 ms here, which stretched the interval
+    to ~2.5 s, and over 2.5 s the *surviving* burner earned more than the
+    departing one took away.  The live sum rose across a real departure and the
+    run proved nothing.  Same lesson as `cpu_stub`: a fixture must not let the
+    machine's exec latency decide what it measures.
+
+    The `live` assertion is load-bearing for that reason.  Without it this
+    passes on a run that never exercised its own subject, and a test that can
+    be silently satisfied reads as passing forever.  So: prove the live sum
+    fell, *then* claim the accounted total did not.
+    """
+    # `sys.executable` rather than `python3`: this must not depend on what a
+    # PATH lookup finds.  A pure-shell spinner would fork a clock per
+    # iteration and spend its life in the exec rather than on the CPU.
+    burn = (f'{sys.executable} -c "import time' '\n'
+            't = time.monotonic()' '\n'
+            'while time.monotonic() - t < 30: pass"')
+    proc = subprocess.Popen(
+        ["/bin/sh", "-c", f"burn() {{ {burn}; }}; burn & burn & wait"])
+    seen: dict[int, float] = {}
+    doomed: list[int] = []
+    try:
+        time.sleep(3.0)                     # let both accrue real CPU
+        t0 = time.monotonic()
+        before = W.tree_cpu_by_pid(proc.pid)
+        assert before is not None
+        c0 = W.accumulate_tree_cpu(seen, before)
+
+        # The workers, not the `sh` holding them: the parent is asleep in
+        # `wait` and has used essentially nothing.
+        workers = sorted(p for p, cpu in before.items() if cpu > 0.5)
+        assert len(workers) == 2, before
+        doomed = workers[:1]
+        os.kill(doomed[0], signal.SIGKILL)
+        time.sleep(0.5)                     # short, so the survivor earns little
+
+        t1 = time.monotonic()
+        after = W.tree_cpu_by_pid(proc.pid)
+        assert after is not None
+        c1 = W.accumulate_tree_cpu(seen, after)
+    finally:
+        for p in W.get_descendants(proc.pid):
+            try:
+                os.kill(p, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        proc.kill()
+        proc.wait()
+
+    # The defect, reproduced: summing the live tree loses the dead worker's
+    # seconds, so the quantity the duty cycle differentiates went backwards.
+    assert sum(after.values()) < sum(before.values()), (before, after)
+    # The fix: those seconds were really spent, so they stay counted.
+    assert c1 >= c0, (c0, c1)
+    # And what the policy sees is a build doing a core's worth of work, which
+    # is what the survivor was doing throughout -- not `stalled`.
+    duty = W.duty_cycle([(t0, c0), (t1, c1)], min_span=0.1)
+    assert duty is not None and W.contention(duty, 4.0)[0] != "stalled", duty
 
 
 # --------------------------------------------------- capture never costs a build

@@ -294,6 +294,71 @@ def test_with_heaps_forced_the_note_declines_to_guess():
     assert W._budget_note(built, "MTTM") == ""
 
 
+# ------------------------------------------- where the budget went before that
+#
+# `_budget_note` answers "whose session ate the clock".  `_startup_note` covers
+# the case it cannot speak to at all: the clock went before any session began.
+
+def test_a_budget_half_spent_before_the_first_session_says_so():
+    """The reported case: the target session started 19.9s into a 40s budget,
+    so the proof was measured against half the budget its operator set, and
+    nothing in the summary said so (#6)."""
+    built = [("Nondeterministic_Time_Hierarchy", "target", 19.9)]
+    assert W._startup_note(built, 40) == (
+        "19.9s of the 40s budget went before Nondeterministic_Time_Hierarchy "
+        "started — Isabelle startup, not proof time")
+
+
+def test_it_survives_heaps_being_forced():
+    """`_budget_note` has to fall silent under `-b`, because Isabelle's verb
+    stops carrying a role.  This note reads a *timestamp*, which `-b` does not
+    touch -- so the one case where the other note cannot speak is exactly the
+    one where this must."""
+    assert W._startup_note([("Mine", None, 22.0)], 40).startswith("22s of the")
+
+
+@pytest.mark.parametrize("built,wall", [
+    ([("Mine", "target", 3.0)], 40),      # 7.5% -- the budget is what you set
+    ([("Mine", "target", 9.9)], 40),      # just under the quarter share
+    ([], 40),                             # no session announced at all
+    ([("Mine", "target", 30.0)], 0),      # no budget to take a share of
+])
+def test_an_ordinary_startup_is_not_worth_a_clause(built, wall):
+    """Noise beside a kill is what stops the useful notes being read.  Below a
+    quarter, the budget the proof got is essentially the one configured, and
+    the operator's next move is unchanged by hearing the number."""
+    assert W._startup_note(built, wall) == ""
+
+
+# ---------------------------------------------- what the machine gave, in words
+
+def test_a_stall_is_scoped_to_the_window_and_carries_what_contradicts_it():
+    """The old wording made three claims and could support one: "used no CPU"
+    (measured over a window, not the run), "a hang" (an inference), "not a busy
+    machine" (an alternative never tested).  Printed beside a recorded
+    `cpu_time_s` of 27.73 in a 40.5s run, it read as a broken tool -- and sent
+    the reporter away from the log, which had the answer (#6)."""
+    rec = {"verdict": "stalled", "duty_cycle": 0.0, "cpu_time_s": 27.73}
+    assert W._contention_note(rec, 40.5, 15.0) == (
+        "no CPU in the last 15s, 27.73s of CPU in 40s wall — possibly a hang")
+
+
+def test_a_stall_with_nothing_measured_omits_the_figure_rather_than_inventing():
+    """`cpu_time_s` is null on a run too short to sample twice.  A note that
+    filled that with 0 would state, as an observation, the very thing the
+    reader is being asked to check."""
+    rec = {"verdict": "stalled", "duty_cycle": 0.0, "cpu_time_s": None}
+    assert W._contention_note(rec, 40.5, 15.0) == (
+        "no CPU in the last 15s — possibly a hang")
+
+
+@pytest.mark.parametrize("verdict", ["running", "unknown"])
+def test_a_build_that_got_its_cpu_needs_no_clause(verdict):
+    rec = {"verdict": verdict, "duty_cycle": 1.2, "cpu_time_s": 40.0}
+    assert W._contention_note(rec, 40.0, 15.0) == ""
+    assert W._contention_note(None, 40.0, 15.0) == ""
+
+
 @pytest.mark.parametrize("lines,tail", [
     ([], ""),
     ([AT_COMMAND], " (1 error locus)"),
@@ -415,6 +480,61 @@ def test_a_duty_cycle_is_measured_over_the_window_it_is_given():
     ran_then_hung = [(0.0, 0.0), (30.0, 30.0), (40.0, 30.0)]
     assert W.duty_cycle(ran_then_hung) == 0.75                # whole run: fine
     assert W.duty_cycle(ran_then_hung[1:]) == 0.0             # recent: stopped
+
+
+# ------------------------------------------------ the total has to be monotonic
+#
+# The duty cycle differentiates the tree's CPU total, so everything above rests
+# on that total never falling.  `ps` reports the tree that exists *now*, which
+# is not the same quantity -- see #6, where the difference was published as a
+# `stalled` verdict on a build that had used 35.88 CPU-seconds.
+
+def test_a_process_that_exits_keeps_the_cpu_it_used():
+    """The correct accounting, not a workaround: those seconds were really
+    spent, by this build.  A `poly` worker finishing a session is the ordinary
+    instance, several times a build."""
+    seen: dict[int, float] = {}
+    assert W.accumulate_tree_cpu(seen, {10: 2.0, 11: 3.0}) == 5.0
+    assert W.accumulate_tree_cpu(seen, {10: 4.0, 11: 3.0}) == 7.0
+    assert W.accumulate_tree_cpu(seen, {10: 6.0}) == 9.0        # 11 exited
+    assert W.accumulate_tree_cpu(seen, {10: 8.0, 12: 1.0}) == 12.0   # a new one
+
+
+def test_a_reused_pid_cannot_make_the_total_fall():
+    """Vanishingly unlikely across a 40s window, and it would reintroduce
+    exactly the negative step this exists to remove.  Over-counting is the safe
+    direction: it reads as `running` and grants no extension, where
+    under-counting is the false `stalled`."""
+    seen = {10: 9.0}
+    assert W.accumulate_tree_cpu(seen, {10: 0.1}) == 9.0
+
+
+def test_a_falling_total_is_unmeasurable_rather_than_idle():
+    """Belt to the accumulator's braces.  `max(0.0, ...)` used to sit here, and
+    a clamp is exactly the wrong shape: it turns a broken measurement into the
+    most confident verdict the policy has.  None reads as `unknown`, which
+    grants no extension either -- the conservative behaviour survives, the
+    false diagnosis does not."""
+    assert W.duty_cycle([(0.0, 30.0), (10.0, 20.0)]) is None
+    assert W.contention(None, cap=4.0) == ("unknown", 1.0)
+    # An *equal* total is a real flat window, and still measures zero.
+    assert W.duty_cycle([(0.0, 30.0), (10.0, 30.0)]) == 0.0
+
+
+@pytest.mark.parametrize("out, expected", [
+    ("  1234   0:01.22\n  1235   0:02.00\n", {1234: 1.22, 1235: 2.0}),  # macOS
+    ("1234 00:00:01\n", {1234: 1.0}),                                   # Linux
+    ("", None),                                    # nothing alive to read
+    ("garbage\n", None),                           # no pid column at all
+    ("  1234   0:01.22\ngarbage\n", {1234: 1.22}),  # one bad row is skipped
+])
+def test_the_sampler_reads_a_pid_column(monkeypatch, out, expected):
+    """`ps -o pid=,time=` rather than `-o time=`: the sum needs to know which
+    process each reading belongs to, or a departure is indistinguishable from
+    the whole tree suddenly using less."""
+    monkeypatch.setattr(W, "get_descendants", lambda pid: [])
+    monkeypatch.setattr(W.subprocess, "check_output", lambda *a, **k: out)
+    assert W.tree_cpu_by_pid(1234) == expected
 
 
 @pytest.mark.parametrize("duty, verdict, factor", [

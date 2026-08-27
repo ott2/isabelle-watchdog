@@ -327,8 +327,8 @@ def _parse_ps_time(field: str) -> "float | None":
     return days * 86400 + secs
 
 
-def tree_cpu_seconds(pid: int) -> "float | None":
-    """CPU seconds used by the process tree, or None if it cannot be read.
+def tree_cpu_by_pid(pid: int) -> "dict[int, float] | None":
+    """CPU seconds per *live* process in the tree, or None if unreadable.
 
     One `ps` over the whole tree -- 2-5 ms, sampled every few seconds, so a
     fraction of a percent of a build.  `/proc` would be faster on Linux and is
@@ -338,23 +338,60 @@ def tree_cpu_seconds(pid: int) -> "float | None":
     None on any failure (no `ps`, Windows, a race with the tree exiting), and
     the caller then applies no adjustment -- unmeasured contention behaves
     exactly as it did before this existed.
+
+    **Per pid, not a total**, because the total this used to return was not
+    monotonic and the whole measurement differentiates it -- see
+    `accumulate_tree_cpu`.
     """
     pids = [pid] + get_descendants(pid)
     try:
         out = subprocess.check_output(
-            ["ps", "-o", "time=", "-p", ",".join(str(p) for p in pids)],
+            ["ps", "-o", "pid=,time=", "-p", ",".join(str(p) for p in pids)],
             stderr=subprocess.DEVNULL, text=True, timeout=5,
         )
     except (subprocess.SubprocessError, FileNotFoundError, OSError):
         return None
-    total = 0.0
-    seen = False
+    live: dict[int, float] = {}
     for line in out.splitlines():
-        secs = _parse_ps_time(line)
+        head, _, rest = line.strip().partition(" ")
+        if not head.isdigit():
+            continue
+        secs = _parse_ps_time(rest)
         if secs is not None:
-            total += secs
-            seen = True
-    return total if seen else None
+            live[int(head)] = secs
+    return live or None
+
+
+def accumulate_tree_cpu(seen: "dict[int, float]",
+                        sample: "dict[int, float]") -> float:
+    """Fold a per-pid sample into `seen`; return the tree's CPU total.
+
+    **The total has to be monotonic, and summing the live tree is not.**  `ps`
+    reports the processes that exist *now*, so when one exits its accumulated
+    CPU leaves the sum -- and Isabelle finishing a session's `poly` worker is
+    exactly that event, several times per build.  The duty cycle differentiates
+    this quantity, so a departure presents as a negative delta; clamped at zero
+    it presented as `stalled`, the most confident verdict the policy has, on
+    builds that had used 35.9 s of CPU in 40.6 s of wall clock
+    (github.com/ott2/isabelle-watchdog#6).  A measurement artefact was being
+    laundered into a diagnosis, and the record and the message then disagreed
+    with each other in the same JSON object.
+
+    Remembering a departed process is not a workaround for the artefact, it is
+    the correct accounting: the CPU it used was really used, by this build.
+    What the caller then holds is the build's cumulative CPU, which is what
+    `cpu_time_s` always claimed to be.
+
+    `>` rather than plain assignment covers pid reuse, which over a 40 s window
+    is vanishingly unlikely and would otherwise reintroduce the same negative
+    step.  It over-counts until the new process passes the old one's total, and
+    that direction is the safe one: over-counting reads as `running` and grants
+    no extension, where under-counting is the false `stalled` above.
+    """
+    for p, secs in sample.items():
+        if secs > seen.get(p, 0.0):
+            seen[p] = secs
+    return sum(seen.values())
 
 
 def duty_cycle(samples: "list[tuple[float, float]]",
@@ -366,14 +403,21 @@ def duty_cycle(samples: "list[tuple[float, float]]",
     seconds of CPU", but the activity budget asks "is it working *now*" -- and
     a build that ran flat out for a minute and then hung has a healthy
     whole-run duty cycle and a dead one.  The caller prunes the window.
+
+    A *falling* total is None rather than zero.  `accumulate_tree_cpu` makes
+    that unreachable, and this is the belt to its braces: the reading would be
+    a broken measurement, and the one thing it must not do is arrive as a
+    verdict.  None reads as `unknown`, which grants no extension either -- so
+    the conservative behaviour is kept without the false diagnosis beside it.
+    An *equal* total is a genuine flat window and still measures 0.0.
     """
     if len(samples) < 2:
         return None
     (t0, c0), (t1, c1) = samples[0], samples[-1]
     span = t1 - t0
-    if span < min_span:
+    if span < min_span or c1 < c0:
         return None
-    return max(0.0, (c1 - c0) / span)
+    return (c1 - c0) / span
 
 
 def contention(duty: "float | None", cap: float) -> "tuple[str, float]":
@@ -735,6 +779,11 @@ def main() -> int:
     # Samples are (monotonic, tree cpu seconds); the first is taken at spawn so
     # the first duty cycle is available a window later.
     cpu_samples: list[tuple[float, float]] = []
+    # Every pid this tree has ever held, with the most CPU it was seen to have
+    # used.  The sum is the build's cumulative CPU and it only ever rises; a
+    # `poly` worker that finishes keeps the seconds it spent (see
+    # `accumulate_tree_cpu`).
+    cpu_seen: dict[int, float] = {}
     load_factor = 1.0
     duty: float | None = None
     # The run's CPU seconds, and deliberately NOT `cpu_samples[-1]`: the
@@ -748,9 +797,9 @@ def main() -> int:
     cpu_total: float | None = None
     contention_verdict = "unknown"
     if load_factor_max > 1.0:
-        c0 = tree_cpu_seconds(proc.pid)
-        if c0 is not None:
-            cpu_samples.append((wall_start, c0))
+        s0 = tree_cpu_by_pid(proc.pid)
+        if s0 is not None:
+            cpu_samples.append((wall_start, accumulate_tree_cpu(cpu_seen, s0)))
     next_cpu_sample = wall_start + cpu_sample_interval
 
     # Write log header
@@ -888,12 +937,15 @@ def main() -> int:
             # One `ps` per interval, so a fraction of a percent.
             if load_factor_max > 1.0 and now >= next_cpu_sample:
                 next_cpu_sample = now + cpu_sample_interval
-                cpu_now = tree_cpu_seconds(proc.pid)
-                if cpu_now is not None:
+                sample = tree_cpu_by_pid(proc.pid)
+                if sample is not None:
+                    cpu_now = accumulate_tree_cpu(cpu_seen, sample)
                     cpu_samples.append((now, cpu_now))
                     # Cumulative for the tree since it spawned, so the latest
                     # reading is the run's total regardless of what the window
-                    # below prunes.
+                    # below prunes.  That sentence was false until #6 -- the
+                    # sum was over the *live* tree, so it fell whenever a
+                    # session's worker exited.
                     cpu_total = cpu_now
                     cpu_samples = [s for s in cpu_samples
                                    if now - s[0] <= cpu_window] or cpu_samples[-1:]
@@ -980,6 +1032,25 @@ def main() -> int:
         error_loci = ([[thy, ln] for thy, ln in _error_loci(err_lines)]
                       if exit_code else [])
 
+    # What the machine gave this build: the observations, not a verdict
+    # derived from them.  A record that kept only `load_factor_applied` could
+    # never answer "was that timeout a hard proof or a busy laptop" once the
+    # policy changed; duty cycle and CPU seconds stay meaningful whatever this
+    # file decides to do with them next.
+    #
+    # Built whether or not anything is recorded, because the timeout summary
+    # reads from it too.  That summary used to take `contention_verdict` and
+    # `duty` as separate arguments and print its own gloss on them, which is
+    # how the message came to say "used no CPU" beside a `cpu_time_s` of 35.88
+    # in the same run (#6).  One dict, quoted by both, cannot disagree with
+    # itself.
+    contention_rec = {
+        "cpu_time_s": (round(cpu_total, 2) if cpu_total is not None else None),
+        "duty_cycle": (round(duty, 3) if duty is not None else None),
+        "verdict": contention_verdict,
+        "load_factor_applied": round(load_factor, 2),
+    }
+
     # Trajectory capture (record.py): a builds.jsonl record carrying this
     # attempt's incremental source diff.  Guarded so it never affects the
     # build's exit code.
@@ -989,18 +1060,6 @@ def main() -> int:
     # the pending note at *import* time, and a project that declined capture
     # should not be paying for -- or failing on -- any of that.
     if recording:
-        # The observations, not a verdict derived from them.  A record that
-        # kept only `load_factor_applied` could never answer "was that
-        # timeout a hard proof or a busy laptop" once the policy changed;
-        # duty cycle and CPU seconds stay meaningful whatever this file
-        # decides to do with them next.
-        contention_rec = {
-            "cpu_time_s": (round(cpu_total, 2) if cpu_total is not None
-                           else None),
-            "duty_cycle": (round(duty, 3) if duty is not None else None),
-            "verdict": contention_verdict,
-            "load_factor_applied": round(load_factor, 2),
-        }
         # Which sessions this build actually elaborated, and which of them
         # Isabelle called dependencies.  Same argument as `limits` and
         # `contention` above, for the third confound in the same family: a
@@ -1025,8 +1084,8 @@ def main() -> int:
                                activity_timeout,
                                last_progress_theory, last_progress_pct,
                                loop_key, loop_count, loop_elapsed,
-                               log_path, battery, contention_verdict, duty,
-                               sessions_built)
+                               log_path, battery, contention_rec, elapsed_s,
+                               cpu_window, sessions_built)
     elif outcome == "ok":
         _print_summary_ok(lines, log_path)
     else:
@@ -1325,6 +1384,77 @@ def _budget_note(sessions_built: "list[tuple[str, str | None, float]]",
     return ""
 
 
+# Share of the wall budget that has to go before the first session starts
+# before `_startup_note` says so.  Below a quarter the budget the proof got is
+# essentially the one that was configured; at or above it, it is materially
+# not, and that changes what the operator should do -- warm the heaps, or
+# raise the budget -- rather than sending them to read a theory.  Not tuned
+# against a machine: it is a fraction of the operator's own number, so it means
+# the same thing whatever that number is.
+STARTUP_SHARE = 0.25
+
+
+def _startup_note(sessions_built: "list[tuple[str, str | None, float]]",
+                  wall_timeout: int) -> str:
+    """One clause when most of the budget went before any session began.
+
+    `_budget_note` above answers "whose sessions ate the clock", and cannot
+    speak at all when the answer is "nobody's": Isabelle spends its first
+    seconds starting a JVM, loading the session graph and verifying ancestor
+    shasums, and announces nothing until a session actually starts.  A build
+    that reached its target 19.9 s into a 40 s budget was measured against
+    half the budget its operator set, with nothing in the summary saying so
+    (github.com/ott2/isabelle-watchdog#6).
+
+    Deliberately a *report* and not a correction.  Starting the wall clock at
+    the first session instead was the other half of that suggestion, and it
+    would leave the startup phase unsupervised -- which is where a hang is
+    least visible, since there is no output to miss either.  It also needs a
+    notion of "the target session", and the watchdog supervises an argv and has
+    none; `_budget_note`'s own docstring turns down the same shortcut.
+
+    Roles are not consulted, so this survives `-b`, where Isabelle's verb stops
+    discriminating and `_budget_note` correctly falls silent.
+    """
+    if not sessions_built or wall_timeout <= 0:
+        return ""
+    name, _role, started = sessions_built[0]
+    if started < wall_timeout * STARTUP_SHARE:
+        return ""
+    return (f"{started:g}s of the {wall_timeout}s budget went before {name} "
+            f"started — Isabelle startup, not proof time")
+
+
+def _contention_note(rec: "dict | None", elapsed_s: float,
+                     window: float) -> str:
+    """One clause about what the machine gave this build, or "".
+
+    Quotes `rec` -- the same dict the attempt record keeps -- rather than
+    re-deriving anything, so the message and the record cannot disagree.
+
+    **A window measurement must be reported as one.**  `stalled` used to read
+    "used no CPU — a hang, not a busy machine": three claims, of which the tool
+    can support one.  It measures the *recent window*, so "used no CPU" over a
+    whole run is not its finding; "a hang" is an inference; and "not a busy
+    machine" rules out an alternative it never tested.  Beside a `cpu_time_s`
+    of 27.73 in a 40.5 s run, the reader's correct conclusion was that the tool
+    was wrong -- and the wording sent them away from the log, which had the
+    answer (#6).  So: scope the observation to its window, carry the cumulative
+    figure that would contradict it, and hedge the inference.
+    """
+    rec = rec or {}
+    verdict = rec.get("verdict", "unknown")
+    duty, cpu = rec.get("duty_cycle"), rec.get("cpu_time_s")
+    used = (f", {cpu:g}s of CPU in {elapsed_s:.0f}s wall"
+            if cpu is not None else "")
+    if verdict == "starved" and duty:
+        return (f"machine contended — this build got {duty:.2f} of a core, "
+                f"and its budgets were scaled to match")
+    if verdict == "stalled":
+        return (f"no CPU in the last {window:.0f}s{used} — possibly a hang")
+    return ""
+
+
 def _log_line(log_path: Path, lines: list[str],
               loop_key: "tuple[str, str, str] | None" = None,
               reason: str = "") -> str:
@@ -1455,8 +1585,9 @@ def _print_summary_timeout(
     loop_elapsed: str,
     log_path: Path,
     battery: "bool | None" = None,
-    contention_verdict: str = "unknown",
-    duty: "float | None" = None,
+    contention_rec: "dict | None" = None,
+    elapsed_s: float = 0.0,
+    cpu_window: float = 0.0,
     sessions_built: "list[tuple[str, str | None, float]] | None" = None,
 ) -> None:
     # log: first so `head -N` captures it even if the diagnostic
@@ -1480,13 +1611,16 @@ def _print_summary_timeout(
                           _stuck_session(loop_key, progress_theory))
     if budget:
         notes.append(budget)
+    # Second, and independent of the first: "whose session ate the clock" has
+    # no answer when the clock went before any session began.
+    startup = _startup_note(sessions_built or [], wall_timeout)
+    if startup:
+        notes.append(startup)
     if battery:
         notes.append("on battery — likely slowness, not a hang")
-    if contention_verdict == "starved" and duty:
-        notes.append(f"machine contended — this build got {duty:.2f} of a "
-                     f"core, and its budgets were scaled to match")
-    elif contention_verdict == "stalled":
-        notes.append("used no CPU — a hang, not a busy machine")
+    con = _contention_note(contention_rec, elapsed_s, cpu_window)
+    if con:
+        notes.append(con)
     batt = f"  ({'; '.join(notes)})" if notes else ""
     if reason == "loop_progress" and loop_key is not None:
         # This is the one kill that earns the word: `loop_count` reached the

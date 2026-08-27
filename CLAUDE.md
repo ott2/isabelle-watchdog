@@ -238,6 +238,25 @@ where a confident wrong one is the `build_record.PROJECT_DIR` failure at the
 top of this file. Only the role collapses — which sessions were elaborated,
 and when, is on the pipe either way.
 
+**And when the answer is "nobody's", `_startup_note` says that instead.**
+Isabelle spends its first seconds starting a JVM, loading the session graph and
+verifying ancestor shasums, announcing nothing until a session actually starts
+— so a build that reached its target 19.9 s into a 40 s budget was measured
+against half the budget its operator set, with `_budget_note` correctly silent
+because no dependency was rebuilt. The clause fires above `STARTUP_SHARE` of
+the budget: below a quarter the budget the proof got is essentially the one
+configured, and the operator's next move does not change on hearing the number.
+A fraction of the operator's own number, so it is not fitted to a machine.
+
+**A report, not a correction.** Starting the wall clock at the first session
+was the other half of the suggestion, and it leaves the startup phase
+unsupervised — which is where a hang is *least* visible, there being no output
+to miss either. It also needs a notion of "the target session", which the
+watchdog does not have, for the third time in this file. Nothing new is
+recorded either: `sessions[0].started_s` already carries it, and derived beats
+declared. Roles are not consulted, so the one case `_budget_note` cannot speak
+to under `-b` is exactly the one this covers.
+
 Reading `-b` off the argv needs Isabelle's actual option grammar, not a
 substring test: `getopts.scala` **bundles** boolean options (`-bv` is `-b -v`),
 lets value options carry an **attached** value (`-dbase` is `-d base`, and
@@ -294,6 +313,60 @@ wall time; a strict boundary labels every healthy single-threaded build
 `starved`. A parallel build starved to one core reads as `running` and gets
 nothing — deliberate under-compensation, since erring toward killing keeps the
 budget meaningful.
+
+**The duty cycle differentiates a total, so the total has to be monotonic —
+and summing `ps` does not give one.** `ps` reports the processes that exist
+*now*, so when one exits its accumulated CPU leaves the sum, and Isabelle
+finishing a session's `poly` worker is exactly that, several times a build.
+The fall arrives as a negative delta; `max(0.0, …)` clamped it, and the clamp
+published it as `stalled` — the most confident verdict the policy has — on
+builds that had used 35.9 CPU-seconds in 40.6 s of wall clock. The record and
+the message then contradicted each other *inside one JSON object*, which is
+what made the report legible: `cpu_time_s: 35.88` beside `duty_cycle: 0.0`.
+
+`accumulate_tree_cpu` keeps every pid the tree has held with the most CPU it
+was seen to use. That is not a workaround for the artefact but the correct
+accounting — a worker's seconds were really spent, by this build — and it
+makes `cpu_time_s` finally mean what its comment had always claimed. Two
+smaller consequences, both the standing rules applied:
+
+- **A clamp is the wrong shape for a broken measurement.** `duty_cycle` now
+  returns `None` on a falling total, which reads as `unknown`: no extension
+  either way, so the conservative behaviour survives without the false
+  diagnosis beside it. Same argument as a `null` role under `-b`.
+- **Over-counting is the safe direction.** Pid reuse is guarded with `>`
+  rather than assignment. It over-counts until the new process passes the old
+  one's total, which reads as `running` and grants nothing; under-counting is
+  the false `stalled` above.
+
+**Gating `stalled` on cumulative CPU was the reported suggestion, and it is
+the wrong repair.** "Don't say stalled if `cpu_time_s / elapsed_s` is high"
+treats the symptom and destroys the case the window exists for: a build that
+ran flat out for a minute and *then* hung has a healthy cumulative and a dead
+window, which is precisely the hang the whole-run figure cannot see —
+`duty_cycle`'s own docstring is about that. The measurement was broken, not the
+window. So the window stays, the accounting is fixed, and the cumulative goes
+in the *message* instead, where it lets a reader check the verdict rather than
+silently overriding it.
+
+The middle test layer could not have caught this and did not: `cpu_stub` holds
+a duty cycle still, which is the one thing that cannot reproduce a *departure*.
+The regression test uses a real tree and the real `ps`, and asserts the live
+sum fell before claiming the accounted total did not — otherwise a run whose
+timing missed the departure passes vacuously.
+
+**A window measurement has to be reported as one.** `stalled` used to print
+`used no CPU — a hang, not a busy machine`: three claims where the tool can
+support one. It measures the *recent window*, so "used no CPU" over a run is
+not its finding; "a hang" is an inference; "not a busy machine" rules out an
+alternative never tested. The wording now scopes the observation to its window
+and carries the cumulative figure that would contradict it — `no CPU in the
+last 15s, 27.73s of CPU in 40s wall — possibly a hang` — so a reader can see
+the disagreement rather than having to distrust the tool wholesale. The old
+line sent one away from `last-build.log`, which had the answer. Same shape as
+`looping` vs `last at`: a verdict is cheaper to print than to retract.
+`_contention_note` also *quotes the record's own dict* rather than re-deriving
+from the same variables, which is why the two can no longer disagree.
 
 **Load average was tried and rejected.** It is free to read (0.45 µs) and
 useless here: a 60 s damped average has a longer time constant than the whole
