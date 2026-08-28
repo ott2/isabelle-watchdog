@@ -9,6 +9,45 @@ that changes what a record contains says so here explicitly, and
 `trajectory check` will tell you whether a corpus written by an older version
 still regenerates.
 
+## [0.6.2] — 2026-08-28
+
+### Fixed
+
+**0.6.1 leaked a looping Poly/ML instead of killing it**
+
+0.6.1 replaced `kill_tree`'s machine-wide `pkill -TERM -f poly` with a kill of
+the child's process group. Removing the pattern match was right; doing the
+group *instead of* the descendant walk was not. Isabelle's launcher calls
+`setsid()` on every bash process it starts — `contrib/bash_process-*/
+bash_process.c`, whose opening comment is *"Bash process with separate process
+group id"* — so its Poly/ML is never in our process group at all. A killed
+build left an ML still burning a core five minutes later.
+
+Parentage is what binds it, through the JVM, and the walk follows that. So all
+three nets now run, because no one of them is a superset of another:
+
+| escape route | descendant walk | process group | cwd sweep |
+|---|---|---|---|
+| `setsid`, parent alive — *what Isabelle does* | **finds** | misses | misses |
+| orphaned into our group | misses | **finds** | misses |
+| `setsid` *and* orphaned — an ML outliving its JVM | misses | misses | **finds** |
+
+The walk also has to **enumerate before anything is signalled**, since it
+follows parent links and the first kill starts breaking them.
+
+**Nothing is left to leak under automation.** The third net is the scoped
+replacement for `pkill`: it asks where an orphan is *working* rather than what
+it is *called*, so it claims ours and never a neighbour's. Two filters keep it
+honest — the orphan set sampled at spawn (an idle desktop has hundreds, so
+"parentless" is no filter at all), and the directory the operator launched
+from, which is what Isabelle's ML runs inside. On Linux it reads
+`/proc/<pid>/cwd` and spawns nothing; elsewhere it is a single `lsof`.
+
+Verified against a real `isabelle build` this time, not only a synthetic
+child: the integration layer's looping-`by` test now leaves nothing behind,
+and three unrelated builds running concurrently on the same machine finished
+untouched.
+
 ## [0.6.1] — 2026-08-28
 
 A patch bump, and the contrast with 0.6.0 is the point: the record schema only
