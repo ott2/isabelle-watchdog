@@ -83,6 +83,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from . import __version__
 from . import corpus
 from .guard import ATTEMPT_LOST, run_guarded
 
@@ -732,6 +733,40 @@ def _record(argv, outcome, exit_code, timeout_reason,
     rec = {
         "build_id": build_id,
         "instance_id": instance,             # this working copy
+        # What wrote this record.  Third key, because it qualifies how to read
+        # every one below it: a corpus is read years after it was written, and
+        # the meaning of a field can change under a release even when its
+        # shape does not.  0.6.0 is the worked example — `contention.duty_cycle`
+        # and `.verdict` mean something materially different before and after
+        # it, and until this field existed the only thing distinguishing the
+        # two eras was `isabelle-watchdog -V` on the machine that wrote them,
+        # which is not in the corpus and does not survive pooling records from
+        # several machines (github.com/ott2/isabelle-watchdog#7).
+        #
+        # **The package version, not a schema number.**  A separate
+        # `schema_version` would be an inventory beside the thing it
+        # inventories, hand-bumped and free to drift — the failure this
+        # project has already paid for twice, in the audits catalogue and the
+        # attribution lists, both since replaced by derivation.  This one
+        # cannot drift: it is read from the installed metadata, which is
+        # generated from the single `version` in pyproject.toml.  It
+        # over-discriminates, in that a release changing nothing about records
+        # still bumps it, and that costs a reader nothing — `>= "0.6.0"`
+        # answers correctly either way, and the changelog says which releases
+        # actually mattered.
+        #
+        # It cannot be back-filled, which is the whole argument for adding it
+        # before the next era rather than after: absence means "written before
+        # 0.6.1" and nothing finer.  `0+unknown` means the writer was an
+        # uninstalled source tree, which is its own useful fact.  One wart
+        # inherited from `-V`: an editable install serves the metadata it was
+        # made with, so a developer who bumps the version and does not re-run
+        # `pip install -e .` writes the old number — see CLAUDE.md's
+        # *Packaging*.  That is a claim in a payload rather than a message,
+        # which this project holds to a higher bar, and the honest mitigation
+        # is that it can only happen on a developer's own machine, which
+        # `docs/working-on-the-tooling.md` already points at a scratch corpus.
+        "writer_version": __version__,
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "branch": branch,
         "hostname": hostname,

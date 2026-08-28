@@ -403,6 +403,43 @@ One JSON line per attempt. Design commitments, all load-bearing:
   instead carries its incremental diff inline, anchored to the public
   `git_head`, so a corpus is portable with no git object store needed to read
   it. A throwaway tree object is written only to *compute* the diff.
+- **`writer_version` says how to read the rest.** Third key in every record,
+  because a field's *meaning* can change under a release even when its shape
+  does not — 0.6.0's `contention` is the worked example, and until this
+  existed the only thing separating the two eras was `isabelle-watchdog -V` on
+  the writing machine, which is not in the corpus and does not survive pooling
+  several machines. **The package version, not a schema number**: a
+  hand-bumped `schema_version` is an inventory beside the thing it
+  inventories, which this project has replaced with derivation twice (the
+  audits catalogue, the attribution lists). It over-discriminates — a release
+  changing nothing about records still bumps it — and that costs a reader
+  nothing, since `>= "0.6.0"` answers correctly either way.
+
+  It **cannot be back-filled**, which is the whole argument for adding it
+  before the next era rather than after: absence means "written before 0.6.1"
+  and nothing finer. `0+unknown` means an uninstalled source tree, which is
+  its own fact. The `-V` wart transfers — an editable install serves the
+  metadata it was made with, so a bump without a re-run of `pip install -e .`
+  writes the old number, and here that is a claim in a *payload*. It can only
+  happen on a developer's own machine, which `docs/working-on-the-tooling.md`
+  already points at a scratch corpus.
+
+  Compare it with **`corpus.writer_at_least(rec, "0.6.0")`**, not `>=` on the
+  strings. `"0.10.0" >= "0.6.0"` is False — "1" sorts before "6" — so the
+  obvious filter works until the minor number reaches two digits and then
+  silently starts dropping the *newest* records, which is the half an era
+  question is usually about. It reports fewer records rather than raising,
+  which is what makes it expensive. Absent, null and `0+unknown` all read as
+  *cannot confirm* and are excluded, on the same rule as a null duty cycle
+  reading `unknown` rather than `stalled`. Only the numeric release segment is
+  compared; a full PEP 440 ordering would exist to sort `0.1.0.dev0`, which
+  predates the field and so cannot appear in it.
+
+  It does **not** retire `UNTRACKED_CAPTURE_FIX`. That date separates two
+  causes of `empty-blind`, and the capture fix landed 2026-07-27 — before
+  `0.1.0.dev0`, so no released version distinguishes it and no future record
+  can be on the wrong side of it. A version-based branch there would be a
+  second rule for a question the date already answers.
 - **Allowlist capture, tracked or not.** `git add -u` then `git add -A`, both
   over `SOURCE_PATHSPECS` (`*.thy`, `*ROOT`, `*ROOTS`; override with
   `BUILD_SOURCE_PATHSPECS`). Capture was tracked-only until 2026-07-27, which
@@ -1073,6 +1110,28 @@ silently opting a slow test back in:
   elsewhere.
 - **`isabelle`** — needs a real Isabelle *and* a prebuilt HOL heap.
 
+**Shortening the budgets will not make the suite fast, and it has been
+measured.** The question comes up because `-m "not isabelle"` takes ~15 min on
+the development machine, and the intuition — those tests wait for timeouts —
+is wrong. `test_a_stalled_tree_earns_no_extension` sets `WALL_TIMEOUT=3` and
+pays `kill_tree`'s 2 s grace, so 5 s of it is deliberate; it measures 20 s.
+Even `-m "not slow and not isabelle"` runs 60 s at **10% CPU**. The other
+nine-tenths is `fork`/`exec`: 271 ms for `git --version`, 237 ms for `/bin/sh
+-c true`, 130 ms for `pgrep` — thirty-odd times a machine without that agent.
+
+The dominant term is the *recorder*, not the supervisor, and that is the part
+worth knowing: one captured attempt measures **14.0 s** against **1.85 s**
+under `--no-record`, so ~12 s of git per capture from 24 invocations. That is
+production cost, not a test artefact — a 30 s Isabelle build on this machine
+spends a third of itself in the recorder shelling out. Reducing those 24 calls
+would speed up the *work* more than it speeds up the suite, which is the only
+reason it is written down here; nobody has asked for it.
+
+What would actually help the suite is `pytest-xdist` over the git-bound files,
+since 90% I/O wait parallelises almost perfectly. `test_watchdog_supervision.py`
+must stay serial: it measures duty cycles and budgets, and concurrent load
+perturbs exactly the quantity under test — the `cpu_stub` lesson again.
+
 Three layers, deliberately, because each catches what the others cannot:
 
 | layer | what it can decide |
@@ -1131,10 +1190,25 @@ Fixtures worth knowing about, all in `tests/conftest.py`:
   and put a fake `pmset` on `PATH` (the only way to reach the battery branch —
   no environment variable does).
 
-Note that any test exercising a timeout runs `kill_tree`, which ends with
-`pkill -TERM -f poly` as a safety net for orphaned Poly/ML. That will signal an
-unrelated interactive Isabelle session on the same machine. It is the tool's
-production behaviour, not something the tests add.
+**Do not run the slow suite while a real Isabelle build is in progress on the
+same machine.** Any test exercising a timeout runs `kill_tree`, which ends
+with `pkill -TERM -f poly` as a safety net for orphaned Poly/ML — and `-f
+poly` matches every process on the machine whose command line contains that
+string. It is the tool's production behaviour, not something the tests add,
+but a full `-m slow` run fires it fifteen times over a quarter of an hour.
+
+This is not hypothetical any more. A profiling run on 2026-08-28 held the
+machine from 00:07 to 00:23 and killed three ndtht builds: exit 143
+(128+SIGTERM) at 00:15:35 and 00:17:29, and a 127 with `Session startup
+failed: standard_output terminated` at 00:19:27. They are the only three
+externally-signalled records in that corpus's history, all three inside one
+window. Both 143s carry `error_head: null` and a `contention.verdict` of
+`running` at over a full core — builds that were working, shot from outside,
+recorded as `fail`. The expensive part was not the three records: the
+operator's notes show the next two attempts diagnosing the interference as an
+ndtht fault (*"ML process died 5s into Machine_Relabelling, no watchdog
+timeout"*). Checking `pgrep -fl poly` first is necessary and not sufficient —
+a build that starts mid-run is exactly what happened.
 
 ### Verifying a change
 
@@ -1175,6 +1249,20 @@ backup and sharing story from the tools.
 
 ## Known follow-up work
 
+- **`kill_tree`'s blast radius is the whole machine, and it should be one
+  process group.** `pkill -TERM -f poly` is a safety net for *orphaned*
+  Poly/ML, and orphaning changes a process's **parent**, not its **process
+  group** — so the net is reachable without a machine-wide pattern match.
+  Spawn with `start_new_session=True`, which makes the child its own group
+  leader, and `os.killpg(proc.pid, SIGTERM)` then reaps escapees and nothing
+  else; `pkill` goes entirely. The one real cost is that a new session
+  detaches the child from the controlling terminal, so Ctrl-C stops reaching
+  it and the parent must forward SIGINT — and *both* entry paths need it, the
+  console script (which never runs the `__main__` guard that installs
+  `SIG_IGN` today) and `python -m`, which `build.py` uses. That is a change to
+  production kill semantics in a tool whose contract is never to break a
+  build, which is why it is written down rather than done. It has already cost
+  three ndtht builds; see *Tests*.
 - **No CI test matrix.** `.github/workflows/` holds `release.yml` and nothing
   else, so the suite has never been executed by anything but a developer's
   machine — currently Python 3.14 only. `requires-python = ">=3.10"` is

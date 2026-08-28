@@ -423,6 +423,41 @@ def test_blank_lines_do_not_become_records(tmp_path):
     assert [r["outcome"] for r in corpus.load(p)] == ["ok", "fail"]
 
 
+# ------------------------------------------------------------------ the writer
+
+def test_the_version_filter_survives_a_double_digit_minor():
+    """The reason this helper exists rather than `>=` on the strings.
+    `"0.10.0" >= "0.6.0"` is False, so the obvious filter works until the
+    minor number reaches two digits and then silently drops the *newest*
+    records -- which is the half an era question is usually about.  It reports
+    fewer records rather than raising, which is what makes it expensive."""
+    assert not ("0.10.0" >= "0.6.0")             # the trap, stated
+
+    assert corpus.writer_at_least({"writer_version": "0.10.0"}, "0.6.0")
+    assert corpus.writer_at_least({"writer_version": "1.0.0"}, "0.6.0")
+    assert not corpus.writer_at_least({"writer_version": "0.5.1"}, "0.6.0")
+
+
+def test_a_release_equals_itself_however_it_is_spelled():
+    """`0.6` and `0.6.0` are the same release, so neither may sort under the
+    other by length alone."""
+    assert corpus.writer_at_least({"writer_version": "0.6"}, "0.6.0")
+    assert corpus.writer_at_least({"writer_version": "0.6.0"}, "0.6")
+
+
+@pytest.mark.parametrize("rec", [
+    {},                                    # written before the field existed
+    {"writer_version": None},
+    {"writer_version": "0+unknown"},       # an uninstalled source tree
+])
+def test_a_record_that_cannot_say_is_excluded_rather_than_assumed(rec):
+    """All three mean *cannot confirm*, and the conservative direction is to
+    exclude: a reader asking which records carry post-0.6.0 semantics must not
+    be told yes by one that does not know.  Same rule as a null duty cycle
+    reading `unknown` rather than `stalled`."""
+    assert not corpus.writer_at_least(rec, "0.6.0")
+
+
 # ------------------------------------------------------------------ episodes
 
 def eps(outcomes, heads=None):

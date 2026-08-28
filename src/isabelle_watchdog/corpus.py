@@ -384,6 +384,50 @@ def load(path: Path) -> list[dict]:
         return [json.loads(line) for line in fh if line.strip()]
 
 
+# ------------------------------------------------------------------ the writer
+
+def _release(version: str) -> "tuple[int, ...] | None":
+    """The leading numeric segment of a version, or None if there isn't one.
+
+    Only the release segment, deliberately.  A full PEP 440 ordering would be
+    the fourth-largest thing in this file and would exist to sort
+    `0.1.0.dev0`, which predates `writer_version` and so cannot appear in the
+    field this serves.
+    """
+    parts: list[int] = []
+    for piece in version.split("."):
+        if not piece.isdigit():
+            break
+        parts.append(int(piece))
+    return tuple(parts) or None
+
+
+def writer_at_least(rec: dict, version: str) -> bool:
+    """Was this record written by `version` or later?
+
+    **Because `>=` on the strings is wrong, and wrong late.**
+    `"0.10.0" >= "0.6.0"` is False -- "1" sorts before "6" -- so the obvious
+    filter works for exactly as long as the minor number stays single-digit
+    and then silently starts excluding the newest records, which is the half
+    of the corpus a reader asking an era question most wants. That is a
+    filter that reports fewer records rather than an error, which is the
+    shape of defect this project keeps finding the expensive way.
+
+    False for a record with no `writer_version` (written before the field) and
+    for `0+unknown` (an uninstalled source tree, which cannot say). Both mean
+    *cannot confirm*, and the conservative direction is to exclude: a reader
+    asking "which records carry post-0.6.0 semantics" must not be told yes by
+    one that does not know. Same rule as a null duty cycle reading `unknown`
+    rather than `stalled`.
+    """
+    got, want = _release(rec.get("writer_version") or ""), _release(version)
+    if got is None or want is None:
+        return False
+    # Pad so (0, 6) and (0, 6, 0) compare equal rather than by length.
+    n = max(len(got), len(want))
+    return got + (0,) * (n - len(got)) >= want + (0,) * (n - len(want))
+
+
 # ------------------------------------------------------------------- episodes
 
 def episodes(recs: list[dict]) -> list[list[dict]]:

@@ -205,6 +205,44 @@ def test_every_record_carries_the_same_instance_id(trajectory):
     assert len({r["instance_id"] for r in trajectory.records}) == 1
 
 
+def test_every_record_says_which_version_wrote_it(trajectory):
+    """A corpus is read years after it was written, and a field's *meaning*
+    can change under a release even when its shape does not -- 0.6.0's
+    `contention` is the worked example.  Before this, the only thing telling
+    the eras apart was `isabelle-watchdog -V` on the writing machine, which is
+    not in the corpus and does not survive pooling several machines'
+    (github.com/ott2/isabelle-watchdog#7).
+
+    Compared against the installed metadata rather than a literal: a literal
+    here would be a second statement of the version, which is the one thing
+    `test_the_version_comes_from_pyproject_and_nowhere_else` exists to
+    prevent.
+    """
+    from isabelle_watchdog import __version__
+    assert {r["writer_version"] for r in trajectory.records} == {__version__}
+
+
+def test_the_version_is_a_release_not_an_uninstalled_tree(trajectory):
+    """`0+unknown` is the honest answer for a source tree that was never
+    installed, and it must not be what a *test* sees: the suite runs against
+    an install (CLAUDE.md), so seeing it here means the fixture captured from
+    somewhere the package is not, and every other assertion about the record
+    is then about the wrong code."""
+    assert trajectory.records[0]["writer_version"] != "0+unknown"
+
+
+def test_a_reader_shows_the_writer_without_being_taught_about_it(trajectory,
+                                                                capsys):
+    """`show` prints `rec.items()`, not a declared field list, so provenance
+    added to the record reaches a reader with no reader change.  Worth pinning:
+    the alternative -- a list of keys to display -- is the inventory-beside-the-
+    thing failure this project has twice replaced with derivation."""
+    from isabelle_watchdog import attempts
+    attempts.cmd_show(trajectory.records, trajectory.records[0]["build_id"],
+                      full=False)
+    assert "writer_version" in capsys.readouterr().out
+
+
 def test_records_are_one_json_object_per_line(trajectory):
     """The format is append-only and readable by `tail`; a payload containing
     a newline would break both."""

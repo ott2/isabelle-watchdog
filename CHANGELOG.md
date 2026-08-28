@@ -9,6 +9,56 @@ that changes what a record contains says so here explicitly, and
 `trajectory check` will tell you whether a corpus written by an older version
 still regenerates.
 
+## [Unreleased]
+
+### Added
+
+**Records say which version wrote them**
+
+A new third key, `writer_version`, from the installed package metadata:
+
+```json
+{"build_id": "20260827-234352-063", "instance_id": "fe086617a56ab674",
+ "writer_version": "0.6.0", "timestamp": "2026-08-27T23:43:52", …}
+```
+
+0.6.0 is the reason it is needed. Its `contention.duty_cycle` and `.verdict`
+mean something materially different from the same fields written before it,
+while the *shape* of a record did not change — and that release's own notes
+had to say "`isabelle-watchdog -V` on the writing machine is the only thing
+that distinguishes them". That is not in the corpus, and it does not survive
+pooling records from several machines.
+
+**The package version, not a schema number.** A hand-bumped `schema_version`
+is an inventory beside the thing it inventories, free to drift; this one is
+read from the single `version` in `pyproject.toml` and cannot. It
+over-discriminates — a release that changes nothing about records still bumps
+it — which costs a reader nothing, since `>= "0.6.0"` answers correctly either
+way and the changelog says which releases actually mattered.
+
+No migration, and none is possible: absence means "written before this
+release" and nothing finer, which is precisely why the field is worth adding
+before the next era rather than after. `0+unknown` means the writer was an
+uninstalled source tree. Readers need no change to display it — `trajectory
+show` prints the record's own keys rather than a declared list.
+
+**Compare it with `corpus.writer_at_least(rec, "0.6.0")`, not `>=` on the
+strings.** `"0.10.0" >= "0.6.0"` is False, because "1" sorts before "6" — so
+the obvious filter works until the minor number reaches two digits and then
+silently starts dropping the *newest* records, which is the half an era
+question is usually about. It reports fewer records rather than raising, which
+is what makes it expensive. Absent, null and `0+unknown` all read as *cannot
+confirm* and are excluded, so a reader is never told "yes" by a record that
+does not know.
+
+It does **not** retire `trajectory check`'s 2026-07-27 date. That separates
+two causes of `empty-blind`, and the capture fix it names landed before
+`0.1.0.dev0`, so no released version distinguishes it and no future record can
+fall on the wrong side of it.
+
+Thanks to the reporter of
+[#7](https://github.com/ott2/isabelle-watchdog/issues/7).
+
 ## [0.6.0] — 2026-08-27
 
 A minor bump rather than a patch, on the record-schema rule above: `duty_cycle`
