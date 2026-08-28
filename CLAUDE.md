@@ -399,21 +399,55 @@ that signalled every process on the machine whose command line contained
 and this project's own test suite killed three builds of another mid-proof;
 see *Tests* for what that cost.
 
-The net was reachable without the pattern all along. **Orphaning changes a
-process's parent, not its process group**, so the escapees `get_descendants`
-cannot see — it walks `pgrep -P`, which is parentage — are still in the group
-the child leads. The child is spawned `start_new_session=True`, and one
-`os.killpg` then reaps this build's tree, orphans included, and nothing else.
+**Two nets, and neither is a superset of the other.** 0.6.1 shipped the group
+kill *instead of* the descendant walk and leaked a looping Poly/ML that was
+still burning a core five minutes after its build was killed. Isabelle's
+launcher calls `setsid()` on every bash process it starts —
+`contrib/bash_process-*/bash_process.c`, whose opening comment is *"Bash
+process with separate process group id"* — so its ML is never in our group at
+all. What binds it is **parentage**, through the JVM:
 
-Two things that had to come with it:
+| escape route | walk (`pgrep -P`) | group (`killpg`) | cwd sweep |
+|---|---|---|---|
+| `setsid`, parent alive — *what Isabelle does* | **finds** | misses | misses |
+| orphaned, same group | misses | **finds** | misses |
+| `setsid` *and* orphaned — an ML outliving its JVM | misses | misses | **finds** |
+
+Measured on one probe, not reasoned about: those are three real verdicts from
+`get_descendants`, `getpgid` and `orphans_under` against a process built to
+have that shape.
+
+So `kill_tree` runs all three, and **enumerates before signalling anything**:
+`get_descendants` follows parent links and the first kill starts breaking
+them. `start_new_session=True` at the spawn is what makes the group net
+possible and precisely scoped.
+
+**The third net asks where a process is working, not what it is called.** That
+is the whole difference from `pkill -f poly`: a name is true of every Isabelle
+build on the machine, a working directory is true of ours and false of
+theirs — and it is what identified the leaked process in the first place.
+`orphans_under` takes two filters because neither is a filter alone:
+
+- **the orphan set sampled at spawn**, subtracted, so only processes
+  parentless *since this build began* are candidates. An idle desktop has a
+  couple of hundred orphans (XPC services, agents), so without this an
+  operator running from `$HOME` would sweep their whole home directory — the
+  same blast radius as the pattern, reached from the other side;
+- **the root the operator was standing in**, since Isabelle runs its ML with
+  the session's theory directory as cwd.
+
+It runs last, in the position `pkill` held, and for the same reason: this kill
+is what creates most of the orphans it is looking for. `/proc/<pid>/cwd` on
+Linux costs no subprocess; elsewhere it is one `lsof` over the whole candidate
+list, never one per pid.
+
+Two things that had to come with the new session:
 
 - **`signal_group` establishes that the pid leads its group, and refuses
   otherwise.** `os.killpg` on a non-leader signals whatever group it is in,
   which for an ordinarily-spawned child is *ours* — the watchdog and the shell
   that ran it. Being wrong here is not a failed kill but a catastrophic one,
-  so `kill_tree` checks and falls back to the per-pid walk: the old behaviour
-  minus the pattern match, which is precise and orphan-blind rather than
-  precise, orphan-blind *and* machine-wide.
+  so the precondition is checked rather than assumed.
 - **Ctrl-C has to be forwarded now.** A new session has no controlling
   terminal, so the keystroke signals the foreground group — this process's,
   not the child's. `main` installs a handler that passes SIGINT to the child's

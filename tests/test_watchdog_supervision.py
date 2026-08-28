@@ -24,6 +24,7 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -757,6 +758,93 @@ def test_an_unrelated_process_named_poly_is_left_alone(watchdog):
     finally:
         decoy.kill()
         decoy.wait()
+
+
+def test_a_child_in_its_own_session_is_still_reaped(watchdog):
+    """What 0.6.1 leaked, and what Isabelle actually does.
+
+    `contrib/bash_process-*/bash_process.c` opens *"Bash process with separate
+    process group id"* and calls `setsid()` on every bash process Isabelle
+    starts -- so its Poly/ML is never in our process group at all.  Killing the
+    group *instead of* walking the descendants therefore reaped the wrapper and
+    left a looping ML burning a core five minutes after the build was killed.
+
+    Parentage is what still binds it, through the JVM, so the walk finds what
+    the group cannot.  The two nets are not ordered by strength; this test and
+    `test_an_orphan_is_still_reaped` are the two halves.
+    """
+    marker = "setsid-probe-marker"
+    escape = (f'{sys.executable} -c "import os, time' '\n'
+              'os.setsid()' '\n'
+              f'time.sleep(37)  # {marker}" & ')
+    run = watchdog("sh", "-c", STARTED + escape + "sleep 20",
+                   WALL_TIMEOUT=3, WATCHDOG_TIMEOUT=30)
+    assert run.code == 124, run
+    time.sleep(1.0)
+    left = subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True)
+    assert not left.stdout.strip(), f"a setsid'd child survived: {left.stdout!r}"
+
+
+def test_an_orphan_in_its_own_session_is_swept_by_working_directory(watchdog,
+                                                                    tmp_path):
+    """The case *neither* net reaches, and the one that leaks under
+    automation: Isabelle's ML outliving a JVM that died first, so it is both
+    outside our process group (`setsid`) and outside our tree (no parent).
+
+    `pkill -TERM -f poly` covered this by asking what a process is *called*,
+    which is true of every Isabelle build on the machine.  `orphans_under`
+    asks where it is *working*, which is true of ours and false of theirs.
+
+    The probe calls `setsid` and lets its parent exit, which is exactly that
+    shape, and runs with cwd inside the tree the watchdog was launched from.
+    """
+    marker = "sweep-probe-marker"
+    escape = (f'{sys.executable} -c "import os, time' '\n'
+              'os.setsid()' '\n'
+              f'time.sleep(37)  # {marker}" & ')
+    # The inner `sh` exits at once, orphaning the setsid'd probe.
+    run = watchdog("sh", "-c", STARTED + f'sh -c \'{escape}\'; sleep 20',
+                   WALL_TIMEOUT=3, WATCHDOG_TIMEOUT=30)
+    assert run.code == 124, run
+    time.sleep(1.5)
+    left = subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True)
+    stragglers = left.stdout.split()
+    for p in stragglers:                     # never leave one behind on failure
+        subprocess.run(["kill", "-9", p], capture_output=True)
+    assert not stragglers, f"an orphan outside our group survived: {stragglers}"
+
+
+def test_the_sweep_ignores_orphans_that_predate_the_build():
+    """The filter that keeps this from becoming `pkill` by another route.
+
+    A machine has hundreds of orphans -- 273 on an idle desktop here, mostly
+    XPC services -- so "orphaned" is not a filter at all.  An operator running
+    from `$HOME` would sweep every one of them under their home directory
+    without the spawn-time baseline, which is the same blast radius as the
+    pattern this replaces, reached from the other direction.
+    """
+    before = W.orphaned_pids()
+    # Everything currently parentless is excluded, so nothing can be swept.
+    assert W.orphans_under(Path("/"), before) == []
+    # And the sweep never reaches for this process or the one that ran it.
+    assert os.getpid() not in W.orphans_under(Path("/"), set())
+    assert os.getppid() not in W.orphans_under(Path("/"), set())
+
+
+def test_a_working_directory_outside_the_root_is_not_ours(tmp_path):
+    """Where the operator is standing is the whole discriminator: another
+    project's build is orphaned in exactly the same way and must survive."""
+    elsewhere = tmp_path / "someone-else"
+    elsewhere.mkdir()
+    probe = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)"],
+                             cwd=elsewhere, start_new_session=True)
+    try:
+        # Claimed by a root that does not contain it, even with no baseline.
+        assert probe.pid not in W.orphans_under(tmp_path / "ours", set())
+        assert probe.poll() is None
+    finally:
+        probe.kill()
+        probe.wait()
 
 
 def test_an_orphan_is_still_reaped(watchdog):

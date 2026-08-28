@@ -454,6 +454,119 @@ def contention(duty: "float | None", cap: float) -> "tuple[str, float]":
     return "starved", min(cap, 1.0 / duty)
 
 
+def orphaned_pids() -> "set[int]":
+    """Pids this user owns whose parent has gone -- reparented to init.
+
+    One `ps`.  There are a couple of hundred of these on an idle desktop
+    (XPC services, agents), which is the measurement that decides the shape of
+    `orphans_under`: "orphaned" alone is nowhere near a filter.
+    """
+    try:
+        out = subprocess.check_output(
+            ["ps", "-eo", "pid=,ppid=,uid="],
+            stderr=subprocess.DEVNULL, text=True, timeout=10,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return set()
+    me = os.getuid()
+    found: set[int] = set()
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) != 3:
+            continue
+        try:
+            pid, ppid, uid = (int(x) for x in parts)
+        except ValueError:
+            continue
+        if ppid == 1 and uid == me:
+            found.add(pid)
+    return found
+
+
+def process_cwds(pids: "list[int]") -> "dict[int, str]":
+    """Working directory per pid, where it can be read.
+
+    `/proc/<pid>/cwd` on Linux is a readlink and costs no subprocess at all;
+    everywhere else it takes one `lsof` over the whole list, because per-pid
+    calls would be a hundred execs on a machine where each costs 100 ms.
+    """
+    if not pids:
+        return {}
+    if sys.platform.startswith("linux"):
+        found: dict[int, str] = {}
+        for p in pids:
+            try:
+                found[p] = os.readlink(f"/proc/{p}/cwd")
+            except OSError:
+                pass
+        return found
+    try:
+        out = subprocess.check_output(
+            ["lsof", "-a", "-d", "cwd", "-Fn", "-p",
+             ",".join(str(p) for p in pids)],
+            stderr=subprocess.DEVNULL, text=True, timeout=30,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return {}
+    # `-F` is lsof's machine-readable mode: one field per line, tagged by its
+    # first character, `p` opening each process's block.
+    found = {}
+    cur: "int | None" = None
+    for line in out.splitlines():
+        tag, rest = line[:1], line[1:]
+        if tag == "p":
+            cur = int(rest) if rest.isdigit() else None
+        elif tag == "n" and cur is not None:
+            found.setdefault(cur, rest)
+    return found
+
+
+def orphans_under(root: Path, ignore: "set[int]") -> "list[int]":
+    """Processes of ours that lost their parent *during this build* and are
+    working inside `root`.
+
+    This is the scoped replacement for `pkill -TERM -f poly`, and it exists
+    because the two nets in `kill_tree` cannot reach a process that has both
+    left our group and lost its parent -- which is exactly Isabelle's ML
+    outliving a JVM that died first, the case that leaks when a build is
+    automated and nobody is watching the process table.
+
+    **Working directory rather than command line.**  A pattern match asks "is
+    this program called poly", which is true of every Isabelle build on the
+    machine; a cwd asks "is this working inside the tree we were pointed at",
+    which is true of ours and false of theirs.  It is also what identified the
+    process that exposed the leak in the first place.
+
+    Two filters, because neither is enough alone:
+
+      - **`ignore`** is the orphan set sampled at spawn, so a process that was
+        already parentless before this build started is never a candidate.
+        Without it, an operator who ran from `$HOME` would sweep every orphan
+        under their home directory -- a blast radius no better than the
+        pattern this replaces, arrived at from the other direction.
+      - **`root`** is where the operator was standing.  Isabelle runs its ML
+        with the session's theory directory as cwd, which is inside it.
+
+    Anything unreadable is skipped rather than guessed at: an orphan whose cwd
+    cannot be resolved is one we cannot claim.
+    """
+    fresh = sorted(orphaned_pids() - ignore - {os.getpid(), os.getppid()})
+    if not fresh:
+        return []
+    try:
+        root = root.resolve()
+    except OSError:
+        return []
+    out: list[int] = []
+    for pid, cwd in process_cwds(fresh).items():
+        try:
+            if Path(cwd).resolve().is_relative_to(root):
+                out.append(pid)
+        except (OSError, ValueError):
+            continue
+    return out
+
+
 def leads_own_group(pid: int) -> bool:
     """Is `pid` its own process-group leader — i.e. was it spawned with
     `start_new_session=True`, so that signalling its group signals only it and
@@ -482,12 +595,14 @@ def signal_group(pid: int, sig: int) -> bool:
     return True
 
 
-def kill_tree(pid: int) -> None:
-    """SIGTERM, wait, SIGKILL -- the child's whole process group.
+def kill_tree(pid: int, root: "Path | None" = None,
+              orphans_at_spawn: "set[int] | None" = None) -> None:
+    """SIGTERM, wait, SIGKILL -- this build's descendants, and its group;
+    then sweep what the kill orphaned inside `root`.
 
-    **The group, not a pattern match on the process table.**  This used to end
-    with `pkill -TERM -f poly` as a safety net for orphaned Poly/ML, and the
-    net worked: what it also did was signal every process on the machine whose
+    **Neither a pattern match on the process table.**  This used to end with
+    `pkill -TERM -f poly` as a safety net for orphaned Poly/ML, and the net
+    worked: what it also did was signal every process on the machine whose
     command line contained "poly".  A profiling run of this project's own test
     suite killed three builds of an unrelated project mid-proof -- recorded as
     `fail` with no Isabelle error, at a duty cycle over a whole core -- and
@@ -495,23 +610,34 @@ def kill_tree(pid: int) -> None:
     fault in their own theories.  One machine hosting several Isabelle
     projects is the ordinary case, not a corner.
 
-    The net is reachable without the pattern.  **Orphaning changes a process's
-    parent, not its process group**, so the escapees `get_descendants` cannot
-    see -- it walks `pgrep -P`, which is parentage -- are still in the group
-    the child leads.  `start_new_session=True` at the spawn makes the child a
-    group leader, and one `killpg` then reaps exactly this build's tree,
-    orphans included, and nothing else.
+    **Both nets, because they miss different escapees.**  Doing the group
+    instead of the walk was tried, in 0.6.1, and leaked a looping Poly/ML that
+    was still burning a core five minutes after the build was killed.
+    Isabelle's process launcher calls `setsid()` on every bash process it
+    starts -- `contrib/bash_process-*/bash_process.c`, whose opening comment
+    is literally *"Bash process with separate process group id"* -- so its ML
+    is never in our group in the first place.  What still binds it is
+    **parentage**, through the JVM, which the walk follows and the group does
+    not.  Conversely a process orphaned into our group is invisible to the
+    walk and caught by the group.  Neither is a superset of the other:
 
-    The per-pid walk survives as the fallback for a child that is somehow not
-    a group leader.  That is the pre-existing behaviour minus the pattern
-    match: precise, and blind to orphans, which is strictly better than
-    precise and blind to orphans *plus* signalling the machine.
+        setsid'd, parent alive    -> walk finds it, group does not
+        orphaned, never setsid'd  -> group finds it, walk does not
+
+    **Enumerate before signalling anything.**  `get_descendants` follows
+    parent links, and the first kill starts breaking them -- so a walk
+    interleaved with the killing would lose the tail of its own tree.
+
+    The case neither net reaches is a process that has *both* left the group
+    and lost its parent -- Isabelle's ML outliving a JVM that died first, and
+    also anything orphaned by this very kill in the moment between the walk's
+    enumeration and the signals.  `pkill -f poly` covered that by signalling
+    every Isabelle build on the machine.  `orphans_under` covers it by asking
+    where a process is working rather than what it is called, and only about
+    orphans that appeared since this build started -- so it runs last, in the
+    position `pkill` used to hold, and for the same reason: this kill is what
+    creates most of them.  Passing no `root` skips the sweep entirely.
     """
-    if signal_group(pid, signal.SIGTERM):
-        time.sleep(2)
-        signal_group(pid, signal.SIGKILL)
-        return
-
     all_pids = [pid] + get_descendants(pid)
 
     for p in all_pids:
@@ -519,6 +645,7 @@ def kill_tree(pid: int) -> None:
             os.kill(p, signal.SIGTERM)
         except ProcessLookupError:
             pass
+    signal_group(pid, signal.SIGTERM)
 
     time.sleep(2)
 
@@ -526,6 +653,21 @@ def kill_tree(pid: int) -> None:
         try:
             os.kill(p, signal.SIGKILL)
         except ProcessLookupError:
+            pass
+    signal_group(pid, signal.SIGKILL)
+
+    if root is None:
+        return
+    # Let the reparenting the SIGKILL above just caused actually land: a child
+    # becomes init's only once its parent has been reaped, which is not
+    # instant.  Sweeping first would find nothing and report success.
+    time.sleep(0.5)
+    # SIGTERM, not SIGKILL -- what `pkill -TERM` used, and enough for Poly/ML,
+    # which then gets to remove its own temporary files.
+    for p in orphans_under(root, orphans_at_spawn or set()):
+        try:
+            os.kill(p, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
             pass
 
 
@@ -779,10 +921,20 @@ def main() -> int:
     # bufsize=0: the read loop below polls the pipe with select() and reads it
     # with os.read(), so nothing may sit in a userspace buffer where select()
     # cannot see it.  See the read loop for what that cost.
-    # start_new_session: the child leads its own process group, which is what
-    # lets `kill_tree` reap orphaned Poly/ML by group instead of by a
-    # machine-wide `pkill -f poly` (see there).  Orphaning changes a process's
-    # parent, not its group, so the escapees stay reachable.
+    # Two things `kill_tree` needs, and both have to be taken *before* the
+    # child exists (see there).  The orphan set is the baseline the final
+    # sweep subtracts, so that only processes parentless since this build
+    # began are candidates; `sweep_root` is where the operator is standing,
+    # which is what Isabelle's ML works inside and another project's does not.
+    orphans_at_spawn = orphaned_pids()
+    try:
+        sweep_root: "Path | None" = Path.cwd()
+    except OSError:
+        sweep_root = None
+
+    # start_new_session: the child leads its own process group, so `kill_tree`
+    # can signal the group as well as walking the descendants.  The two catch
+    # different escapees and neither is a superset of the other -- see there.
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -1075,7 +1227,7 @@ def main() -> int:
     db_error = ""
     err_lines = lines
     if timeout_reason:
-        kill_tree(proc.pid)
+        kill_tree(proc.pid, sweep_root, orphans_at_spawn)
         proc.wait()
         exit_code = 124
         outcome = "timeout"
