@@ -454,8 +454,64 @@ def contention(duty: "float | None", cap: float) -> "tuple[str, float]":
     return "starved", min(cap, 1.0 / duty)
 
 
+def leads_own_group(pid: int) -> bool:
+    """Is `pid` its own process-group leader — i.e. was it spawned with
+    `start_new_session=True`, so that signalling its group signals only it and
+    its descendants?
+
+    Checked rather than assumed, because being wrong here is not a failed kill
+    but a catastrophic one: `os.killpg` on a pid that is *not* a group leader
+    signals whatever group it happens to be in, which for a child spawned the
+    ordinary way is **ours** -- the watchdog, and the shell that ran it.
+    """
+    try:
+        return os.getpgid(pid) == pid
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+
+
+def signal_group(pid: int, sig: int) -> bool:
+    """Send `sig` to `pid`'s process group.  False if that is not safe or the
+    group has already gone."""
+    if not leads_own_group(pid):
+        return False
+    try:
+        os.killpg(pid, sig)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return True
+
+
 def kill_tree(pid: int) -> None:
-    """SIGTERM, wait, SIGKILL the process tree, then pkill poly."""
+    """SIGTERM, wait, SIGKILL -- the child's whole process group.
+
+    **The group, not a pattern match on the process table.**  This used to end
+    with `pkill -TERM -f poly` as a safety net for orphaned Poly/ML, and the
+    net worked: what it also did was signal every process on the machine whose
+    command line contained "poly".  A profiling run of this project's own test
+    suite killed three builds of an unrelated project mid-proof -- recorded as
+    `fail` with no Isabelle error, at a duty cycle over a whole core -- and
+    cost their operator two further attempts diagnosing the interference as a
+    fault in their own theories.  One machine hosting several Isabelle
+    projects is the ordinary case, not a corner.
+
+    The net is reachable without the pattern.  **Orphaning changes a process's
+    parent, not its process group**, so the escapees `get_descendants` cannot
+    see -- it walks `pgrep -P`, which is parentage -- are still in the group
+    the child leads.  `start_new_session=True` at the spawn makes the child a
+    group leader, and one `killpg` then reaps exactly this build's tree,
+    orphans included, and nothing else.
+
+    The per-pid walk survives as the fallback for a child that is somehow not
+    a group leader.  That is the pre-existing behaviour minus the pattern
+    match: precise, and blind to orphans, which is strictly better than
+    precise and blind to orphans *plus* signalling the machine.
+    """
+    if signal_group(pid, signal.SIGTERM):
+        time.sleep(2)
+        signal_group(pid, signal.SIGKILL)
+        return
+
     all_pids = [pid] + get_descendants(pid)
 
     for p in all_pids:
@@ -471,12 +527,6 @@ def kill_tree(pid: int) -> None:
             os.kill(p, signal.SIGKILL)
         except ProcessLookupError:
             pass
-
-    # Safety net for orphaned poly processes
-    subprocess.run(
-        ["pkill", "-TERM", "-f", "poly"],
-        capture_output=True,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -729,12 +779,38 @@ def main() -> int:
     # bufsize=0: the read loop below polls the pipe with select() and reads it
     # with os.read(), so nothing may sit in a userspace buffer where select()
     # cannot see it.  See the read loop for what that cost.
+    # start_new_session: the child leads its own process group, which is what
+    # lets `kill_tree` reap orphaned Poly/ML by group instead of by a
+    # machine-wide `pkill -f poly` (see there).  Orphaning changes a process's
+    # parent, not its group, so the escapees stay reachable.
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         bufsize=0,
+        start_new_session=True,
     )
+
+    # A new session has no controlling terminal, so Ctrl-C no longer reaches
+    # the child on its own -- the terminal signals the *foreground* group,
+    # which is now this process's, not the child's.  Forward it, so the
+    # keystroke does what it always did.
+    #
+    # SIGINT rather than SIGTERM, and no exit here: this reproduces exactly
+    # what the terminal used to deliver, and then the ordinary path takes
+    # over.  The child dies, the pipe reaches EOF, the read loop ends, and the
+    # attempt is recorded with whatever the child exited as.  Killing the
+    # interpreter from the handler instead would lose the record -- an
+    # abandoned build is still an attempt, and the note written for it is the
+    # part that cannot be reconstructed.
+    def _forward_sigint(_sig, _frame) -> None:
+        signal_group(proc.pid, signal.SIGINT)
+
+    try:
+        signal.signal(signal.SIGINT, _forward_sigint)
+    except ValueError:
+        # Not the main thread -- nothing installed a handler before either.
+        pass
 
     # --- Collection state ---
     lines: list[str] = []  # all stripped lines
@@ -1669,6 +1745,17 @@ def _print_summary_timeout(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Ignore SIGINT in parent — let the child handle it, we clean up after
+    # Ignore SIGINT until there is a child to forward it to.  `main` installs
+    # a real handler as soon as it has spawned one (see `_forward_sigint`);
+    # this only covers the seconds before that, where a Ctrl-C would otherwise
+    # print a traceback out of argument parsing or corpus resolution.
+    #
+    # It used to be the whole story, on the reasoning that the child shared
+    # this process group and so received the keystroke directly.  It no longer
+    # does -- `start_new_session` is what makes killing by group possible --
+    # so leaving this as the only handler would have made a build
+    # uninterruptible.  Both entry points matter: `build.py` reaches the
+    # watchdog through `python -m`, which runs this block, while the console
+    # script does not run it at all and relies on `main` alone.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     sys.exit(main())

@@ -731,6 +731,88 @@ def test_a_run_too_short_to_sample_claims_no_cpu_time(watchdog, stub_bin):
     assert c["verdict"] == "unknown"
 
 
+# --------------------------------------------------------- the blast radius
+#
+# `kill_tree` used to end with `pkill -TERM -f poly`, a safety net for orphaned
+# Poly/ML that also signalled every process on the machine matching that
+# string.  One machine hosting several Isabelle projects is the ordinary case,
+# and a profiling run of this suite killed three builds of another project
+# mid-proof.  The net is now the child's process group, which reaches orphans
+# without reaching anyone else.
+
+def test_an_unrelated_process_named_poly_is_left_alone(watchdog):
+    """The regression test for real damage, not a hypothetical.
+
+    The decoy is a plain `sleep` whose *command line* contains "poly", which is
+    all `pkill -f` ever matched on -- so it stands in for a stranger's
+    `isabelle build` without needing Isabelle, or a stranger.
+    """
+    decoy = subprocess.Popen(["/bin/sh", "-c", ": poly decoy; exec sleep 30"])
+    try:
+        run = watchdog("sh", "-c", STARTED + "sleep 20",
+                       WALL_TIMEOUT=3, WATCHDOG_TIMEOUT=30)
+        assert run.code == 124, run          # the tree really was killed
+        time.sleep(0.5)
+        assert decoy.poll() is None, "an unrelated process was signalled"
+    finally:
+        decoy.kill()
+        decoy.wait()
+
+
+def test_an_orphan_is_still_reaped(watchdog):
+    """What the pattern match was *for*, kept without it.
+
+    The inner `sh` exits immediately, so its `sleep` is reparented to init and
+    `get_descendants` -- which walks `pgrep -P`, i.e. parentage -- can no
+    longer see it.  It stays in the process group the supervised child leads,
+    because orphaning changes a parent and not a group, and that is the whole
+    of why killing by group is a strict improvement.
+    """
+    marker = "orphan-probe-marker"
+    run = watchdog("sh", "-c",
+                   STARTED + f'sh -c "exec sleep 37 #{marker}" & sleep 20',
+                   WALL_TIMEOUT=3, WATCHDOG_TIMEOUT=30)
+    assert run.code == 124, run
+    time.sleep(1.0)
+    left = subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True)
+    assert not left.stdout.strip(), f"orphan survived: {left.stdout!r}"
+
+
+def test_only_a_group_leader_may_be_signalled_by_group():
+    """The guard that keeps a bug here from being catastrophic rather than
+    merely wrong.
+
+    `os.killpg` on a pid that is *not* a group leader signals whatever group
+    it is in -- for an ordinarily-spawned child, ours: the watchdog, and the
+    shell that ran it.  So `signal_group` establishes the precondition and
+    refuses otherwise, and `kill_tree` falls back to the per-pid walk.
+    """
+    leader = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    ordinary = subprocess.Popen(["sleep", "30"])
+    try:
+        assert W.leads_own_group(leader.pid)
+        assert not W.leads_own_group(ordinary.pid), "shares this test's group"
+        # The refusal is the point: no signal is sent at all.
+        assert W.signal_group(ordinary.pid, signal.SIGTERM) is False
+        time.sleep(0.3)
+        assert ordinary.poll() is None
+        # And the leader's group really is signallable.
+        assert W.signal_group(leader.pid, signal.SIGTERM) is True
+    finally:
+        for p in (leader, ordinary):
+            p.kill()
+            p.wait()
+
+
+def test_a_pid_that_has_gone_is_not_an_error():
+    """`kill_tree` races the tree exiting on its own -- a build that finished
+    between the budget check and the kill.  Reported as "nothing to signal",
+    not raised, and above all not retried against a recycled pid."""
+    gone = subprocess.Popen(["true"], start_new_session=True)
+    gone.wait()
+    assert W.signal_group(gone.pid, signal.SIGTERM) is False
+
+
 def test_a_worker_that_exits_cannot_take_its_cpu_back():
     """The defect behind #6, against a real tree and a real `ps`.
 

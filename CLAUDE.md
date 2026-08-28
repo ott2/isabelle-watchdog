@@ -392,6 +392,38 @@ kill condition silently unenforceable:
   line a second kept the pipe permanently ready and was never measured against
   the wall clock at all.
 
+**A kill reaches one process group, never a pattern.** `kill_tree` used to
+close with `pkill -TERM -f poly`, a safety net for orphaned Poly/ML — and one
+that signalled every process on the machine whose command line contained
+"poly". One machine hosting several Isabelle projects is the ordinary case,
+and this project's own test suite killed three builds of another mid-proof;
+see *Tests* for what that cost.
+
+The net was reachable without the pattern all along. **Orphaning changes a
+process's parent, not its process group**, so the escapees `get_descendants`
+cannot see — it walks `pgrep -P`, which is parentage — are still in the group
+the child leads. The child is spawned `start_new_session=True`, and one
+`os.killpg` then reaps this build's tree, orphans included, and nothing else.
+
+Two things that had to come with it:
+
+- **`signal_group` establishes that the pid leads its group, and refuses
+  otherwise.** `os.killpg` on a non-leader signals whatever group it is in,
+  which for an ordinarily-spawned child is *ours* — the watchdog and the shell
+  that ran it. Being wrong here is not a failed kill but a catastrophic one,
+  so `kill_tree` checks and falls back to the per-pid walk: the old behaviour
+  minus the pattern match, which is precise and orphan-blind rather than
+  precise, orphan-blind *and* machine-wide.
+- **Ctrl-C has to be forwarded now.** A new session has no controlling
+  terminal, so the keystroke signals the foreground group — this process's,
+  not the child's. `main` installs a handler that passes SIGINT to the child's
+  group and then does nothing else, reproducing exactly what the terminal used
+  to deliver: the child dies, the pipe EOFs, and the attempt is *recorded*.
+  Exiting from the handler would lose it, and an abandoned build is still an
+  attempt whose note is the part that cannot be reconstructed. Both entry
+  points needed covering — `build.py` goes through `python -m`, which runs the
+  `__main__` guard, while the console script never does.
+
 Exit codes: `0` success, `124` watchdog kill, otherwise the child's.
 
 ### 2. `record.py` — trajectory capture
@@ -1190,25 +1222,25 @@ Fixtures worth knowing about, all in `tests/conftest.py`:
   and put a fake `pmset` on `PATH` (the only way to reach the battery branch —
   no environment variable does).
 
-**Do not run the slow suite while a real Isabelle build is in progress on the
-same machine.** Any test exercising a timeout runs `kill_tree`, which ends
-with `pkill -TERM -f poly` as a safety net for orphaned Poly/ML — and `-f
-poly` matches every process on the machine whose command line contains that
-string. It is the tool's production behaviour, not something the tests add,
-but a full `-m slow` run fires it fifteen times over a quarter of an hour.
+**Tests exercising a timeout run `kill_tree`, which is now group-scoped and
+safe beside other work on the same machine.** Before 0.6.1 it ended with
+`pkill -TERM -f poly` — the tool's production behaviour, not something the
+tests added — and a full `-m slow` run fired that fifteen times over a quarter
+of an hour, matching every process on the machine whose command line contained
+"poly".
 
-This is not hypothetical any more. A profiling run on 2026-08-28 held the
-machine from 00:07 to 00:23 and killed three ndtht builds: exit 143
-(128+SIGTERM) at 00:15:35 and 00:17:29, and a 127 with `Session startup
-failed: standard_output terminated` at 00:19:27. They are the only three
-externally-signalled records in that corpus's history, all three inside one
-window. Both 143s carry `error_head: null` and a `contention.verdict` of
-`running` at over a full core — builds that were working, shot from outside,
-recorded as `fail`. The expensive part was not the three records: the
-operator's notes show the next two attempts diagnosing the interference as an
-ndtht fault (*"ML process died 5s into Machine_Relabelling, no watchdog
-timeout"*). Checking `pgrep -fl poly` first is necessary and not sufficient —
-a build that starts mid-run is exactly what happened.
+That is why it changed. A profiling run on 2026-08-28 held the machine from
+00:07 to 00:23 and killed three ndtht builds: exit 143 (128+SIGTERM) at
+00:15:35 and 00:17:29, and a 127 with `Session startup failed: standard_output
+terminated` at 00:19:27 — the only three externally-signalled records in that
+corpus's history, all inside one window. Both 143s carry `error_head: null`
+and a `contention.verdict` of `running` at over a full core: builds that were
+working, shot from outside, recorded as `fail`. The expensive part was not the
+three records but the two attempts their operator then spent diagnosing the
+interference as an ndtht fault (*"ML process died 5s into Machine_Relabelling,
+no watchdog timeout"*). Checking `pgrep -fl poly` beforehand would not have
+saved it — a build that starts mid-run is exactly what happened, which is why
+the fix had to be in `kill_tree` rather than in a habit.
 
 ### Verifying a change
 
@@ -1249,20 +1281,6 @@ backup and sharing story from the tools.
 
 ## Known follow-up work
 
-- **`kill_tree`'s blast radius is the whole machine, and it should be one
-  process group.** `pkill -TERM -f poly` is a safety net for *orphaned*
-  Poly/ML, and orphaning changes a process's **parent**, not its **process
-  group** — so the net is reachable without a machine-wide pattern match.
-  Spawn with `start_new_session=True`, which makes the child its own group
-  leader, and `os.killpg(proc.pid, SIGTERM)` then reaps escapees and nothing
-  else; `pkill` goes entirely. The one real cost is that a new session
-  detaches the child from the controlling terminal, so Ctrl-C stops reaching
-  it and the parent must forward SIGINT — and *both* entry paths need it, the
-  console script (which never runs the `__main__` guard that installs
-  `SIG_IGN` today) and `python -m`, which `build.py` uses. That is a change to
-  production kill semantics in a tool whose contract is never to break a
-  build, which is why it is written down rather than done. It has already cost
-  three ndtht builds; see *Tests*.
 - **No CI test matrix.** `.github/workflows/` holds `release.yml` and nothing
   else, so the suite has never been executed by anything but a developer's
   machine — currently Python 3.14 only. `requires-python = ">=3.10"` is
