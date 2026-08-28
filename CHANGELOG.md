@@ -9,7 +9,47 @@ that changes what a record contains says so here explicitly, and
 `trajectory check` will tell you whether a corpus written by an older version
 still regenerates.
 
-## [Unreleased]
+## [0.6.1] — 2026-08-28
+
+A patch bump, and the contrast with 0.6.0 is the point: the record schema only
+*gains* a key here. No existing field changed shape or meaning, and every
+reader that uses `.get` is unaffected, so records either side of this release
+stay directly comparable — which is exactly what was not true of 0.6.0, and
+why that one took a minor bump.
+
+### Fixed
+
+**A watchdog kill no longer signals every Poly/ML on the machine**
+
+`kill_tree` ended with `pkill -TERM -f poly`, a safety net for *orphaned*
+Poly/ML that also matched every process on the machine whose command line
+contained "poly". One machine hosting several Isabelle projects is the
+ordinary case, and this project's own test suite killed three builds of
+another mid-proof — recorded as `fail`, with no Isabelle error, at a duty
+cycle over a whole core. The expensive part was not the three records but the
+two attempts their operator then spent diagnosing the interference as a fault
+in their own theories.
+
+The net was reachable without the pattern all along. **Orphaning changes a
+process's parent, not its process group**, so the escapees the tree walk
+cannot see — it follows `pgrep -P`, which is parentage — are still in the
+group the child leads. The supervised command is now spawned with
+`start_new_session=True`, and one `os.killpg` reaps this build's tree, orphans
+included, and nothing else. `pkill` is gone.
+
+Two consequences worth knowing about:
+
+- `signal_group` verifies the pid leads its own group before signalling, and
+  falls back to the per-pid walk otherwise. `os.killpg` on a non-leader
+  signals whatever group it is in — for an ordinarily-spawned child, the
+  watchdog's own — so being wrong there is catastrophic rather than merely
+  ineffective.
+- **Ctrl-C is now forwarded explicitly.** A new session has no controlling
+  terminal, so the keystroke reaches the watchdog rather than the child. It
+  is passed to the child's group and nothing else happens, which reproduces
+  the old behaviour exactly: the build dies, and the attempt is still
+  recorded. An abandoned build is still an attempt, and its note is the part
+  that cannot be reconstructed.
 
 ### Added
 
