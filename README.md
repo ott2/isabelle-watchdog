@@ -2,7 +2,7 @@
 
 A build watchdog for Isabelle, and the build-trajectory corpus it records.
 
-Two things that ship together because one calls the other:
+Two jobs, done in one pass over a build:
 
 - **The watchdog** supervises an `isabelle build` and kills it on a stalled
   stdout, a wall-clock budget, or a tactic looping on a single line — and in
@@ -14,6 +14,10 @@ Two things that ship together because one calls the other:
   record of how a proof was actually found, as opposed to how it reads once
   finished.
 
+The recorder runs *inside* the watchdog, so those are not two things to choose
+between: everything supervised is recorded unless you say otherwise, and
+nothing is recorded that was not supervised.
+
 ```sh
 pip install isabelle-watchdog
 ```
@@ -21,12 +25,12 @@ pip install isabelle-watchdog
 ## Use
 
 ```sh
-# supervise a build and record the attempt
+# the ordinary way: build what this project declares, recording the reasoning
 BUILD_SESSION=MySession isabelle-build -m 'diagnosis: the induction is too weak;
                                            change: generalise over the tape index;
                                            expect: ok'
 
-# or call the watchdog directly around any command
+# one layer down: supervise an argv you supply, deriving nothing
 isabelle-watchdog isabelle build -d t MySession
 
 # read the corpus
@@ -39,6 +43,22 @@ trajectory audit           # do these readers' own statistics hold up?
 # every command takes -V/--version and -h/--help
 trajectory --version
 ```
+
+**Three commands, one stack.** `isabelle-build` works out what to build and
+carries the note; it hands an argv to `isabelle-watchdog`, which enforces the
+budgets and writes the record; `trajectory` reads what was written and never
+writes.
+
+Which means the middle one is not the un-recorded option. Called directly it
+still records — with `note: null`, and with the session spelled out by hand
+rather than derived from the project's ROOT files. It takes any command, so it
+is also the answer for a session this project does not declare. To supervise
+without recording, say so: `--no-record`, on either command.
+
+Running `isabelle build` yourself is the one path that loses an attempt. The
+edits are not lost — diffs are cumulative, so they arrive with the next
+recorded build — but that attempt's outcome, timing and error loci are gone,
+and no later build can reconstruct them.
 
 ## Why record a build at all
 
@@ -224,8 +244,11 @@ Alpha. The record schema is still moving; `trajectory check` will tell you if a
 corpus written by an older version has drifted, and
 [`CHANGELOG.md`](CHANGELOG.md) says explicitly which releases changed it.
 
-The design is documented at length in [`docs/logging-design.md`](docs/logging-design.md),
-which the code comments cite by section number.
+[`docs/logging-design.md`](docs/logging-design.md) is the design *record* the
+code cites by section number — written before most of this existed, and kept
+for the reasoning behind the trajectory axis rather than as a description of
+it. Its preamble says which parts the code has since overtaken; the record
+format is not one to read there.
 
 ## Development
 

@@ -18,6 +18,13 @@ word on belongs to the command, so an option meant for `isabelle build` is
 never eaten here.  A leading `-word` this wrapper does not know is an error,
 not a command name -- use `--` for a program actually named that way.
 
+`isabelle-build` is the usual front door: it derives the session from the
+project's ROOT files, carries a note into the record, and then runs this.
+Capture happens *here* either way, so calling this directly records the
+attempt too -- with no note, and with the session spelled out by hand.  Reach
+for it when the argv is not one this project declares, or is not `isabelle
+build` at all.
+
 Options:
     --no-record / --record    Turn trajectory capture off / on for this run,
                               overriding $BUILD_RECORD.  Capture is on by
@@ -1328,7 +1335,7 @@ def main() -> int:
 
 def _first_error(lines: list[str]) -> str:
     """First one or two non-empty `***` error lines, joined — the error
-    head folded into the attempt record (logging-design.md §12.3.2)."""
+    head folded into the attempt record (logging-design.md §12.3)."""
     heads: list[str] = []
     for l in lines:
         m = ERROR_RE.match(l)

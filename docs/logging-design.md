@@ -1,5 +1,33 @@
 # Build-record design: cost + trajectory logging
 
+> **A design record, not documentation, and not maintained against the code.**
+> Written 2026-05-18 and last substantively revised 2026-06-19 — before most
+> of what it describes existed.
+>
+> It is kept because the code cites it. Comments in `record.py`,
+> `attempts.py`, `corpus.py`, `watchdog.py` and the audits point at §§12, 13
+> and 16 for reasoning that cannot be recovered from the code itself: why an
+> episode ends at a success rather than a commit, why tracked-only capture was
+> a data-quality failure rather than a preference, why a corpus federates by
+> file union. That is what this document is for.
+>
+> **Where it disagrees with the code, or with a real record, it loses.** Two
+> parts are known to be overtaken, checked 2026-09-02:
+>
+> - **§5's schema is superseded.** Three of its twenty-one fields still exist.
+>   It does not mention `diff` — the payload the whole design now rests on —
+>   nor `note`, `instance_id`, `error_loci`, `limits`, `contention`,
+>   `sessions` or `writer_version`; and it spells a `timeout_reason` as
+>   `"repetition"` where the code emits `"loop_progress"`. For the record
+>   format, read a line of a real `builds.jsonl`, or the design commitments at
+>   the top of `record.py`.
+> - **§§2–11 design a cost axis that was never built.** `build-stats.py` and
+>   `t/logs2/ml-commands.jsonl` appear here and nowhere in the package.
+>
+> Section *numbers* are load-bearing even where the prose is not, since the
+> code cites them; `tests/test_docs.py` checks that every citation still
+> resolves. Renumber nothing.
+
 **Status:** Trajectory-axis MVP implemented 2026-05-27 as a prototype
 (`bin/build_record.py` + the `bin/isabelle-watchdog.py` hook, read by
 `bin/attempts.py`); see §14.  The prototype proved the value of capture

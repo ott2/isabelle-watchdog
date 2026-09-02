@@ -20,7 +20,8 @@ prose belongs in it.
         export.py  legacy_convert.py
         audits/                validation suite for the readers' statistics
     tests/                     pytest; conftest.py holds the fixtures
-    docs/logging-design.md     the design doc the code cites by section
+    docs/logging-design.md     the design record the code cites by section
+                               (its preamble scopes what is still true)
     docs/working-on-the-tooling.md   validating against a real project safely
 
 Consolidated from the two application projects that grew it, with history —

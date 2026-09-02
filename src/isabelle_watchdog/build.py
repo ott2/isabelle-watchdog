@@ -300,6 +300,19 @@ what gets built:
     session: SPSlowdown
     dir: isabelle
 
+what this runs:
+  `isabelle-watchdog isabelle build -d DIR -v ... SESSION`, in a subprocess.
+  This command answers "what should be built, and why this attempt"; the
+  watchdog answers "how long may it run", and is also where the record is
+  written.  So a build supervised any other way is recorded too -- it just
+  arrives with no note and no derived session.
+
+  Running `isabelle build` yourself is the one way to lose an attempt: the
+  sources reach the next recorded build, since diffs are cumulative, but that
+  attempt's outcome, timing and error loci do not.
+
+  `isabelle-watchdog --help` documents the supervision side in full.
+
 environment:
   BUILD_SESSION / BUILD_SESSION_DIR   session to build, and where its ROOT is
   BUILD_NOTE / BUILD_NOTE_FILE        note text / pending-note path
@@ -307,8 +320,6 @@ environment:
   BUILD_SOURCE_PATHSPECS              what counts as source (*.thy *ROOT *ROOTS)
   WATCHDOG_TIMEOUT / WALL_TIMEOUT     the kill budgets, in seconds
   BATTERY_FACTOR                      scales the budgets on battery (1.0 = off)
-
-  `isabelle-watchdog --help` documents the supervision side in full.
 """
 
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -461,6 +462,43 @@ def test_the_marker_and_the_switch_are_both_in_the_help(build_module, repo):
     build = build_module()
     assert ".isabelle-watchdog" in build.EPILOG
     assert "BUILD_RECORD" in build.EPILOG
+
+
+def test_each_surface_names_the_layer_beside_it(build_module):
+    """Where the record is written was documented once, in a docstring `-h`
+    truncates away.
+
+    `SYNOPSIS` keeps the first two paragraphs of this module's docstring, and
+    the paragraph saying that capture happens in the *watchdog* sits below
+    them.  That truncation is right -- forty lines of rationale in `-h` bury
+    what a new project needs -- but it left the only correct statement of how
+    these two commands relate on a surface no user reads.  The README then
+    split the package into "the watchdog" and "the recorder", which reads as
+    a split between the two commands and is not one: `isabelle-watchdog`
+    called directly records the attempt too.
+
+    Cross-references and one claim, not sentences, so a rewording does not
+    fail this.  What it can see is a surface that stops naming the layer
+    beside it, which is how the gap opened; what it cannot see is a surface
+    that names it and describes it wrongly, which is how the gap survived.
+    """
+    from isabelle_watchdog import watchdog
+
+    build = build_module()
+    assert "isabelle-watchdog" in build.EPILOG
+    assert "isabelle-build" in (watchdog.__doc__ or "")
+
+    readme = Path(__file__).resolve().parent.parent / "README.md"
+    if not readme.exists():
+        pytest.skip("no README beside the tests")   # installed from a wheel
+    text = readme.read_text()
+    for name in ("isabelle-build", "isabelle-watchdog", "trajectory"):
+        assert name in text, f"the README never names {name}"
+    # The one path that is genuinely unrecoverable, and the one the README
+    # went a year without mentioning.
+    assert re.search(r"los(e|es|ing) an attempt", text), (
+        "the README no longer says that running `isabelle build` directly "
+        "loses the attempt")
 
 
 def test_help_shows_the_synopsis_not_the_rationale(build_module):

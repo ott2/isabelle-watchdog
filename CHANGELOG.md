@@ -9,6 +9,69 @@ that changes what a record contains says so here explicitly, and
 `trajectory check` will tell you whether a corpus written by an older version
 still regenerates.
 
+## [Unreleased]
+
+### Changed
+
+**The docs said what the package does, not which command does which part.**
+
+The README opened by dividing it into "the watchdog" and "the recorder" — an
+accurate split of the *work*, and a misleading one for the *commands*, since
+the recorder runs inside the watchdog. The usage block then offered the two as
+alternatives ("or call the watchdog directly") with nothing said about what
+the second one costs, which invites the reading that it skips capture. What it
+actually skips is the note and the derived session; it records either way.
+
+That layering was stated correctly in exactly one place — `build.py`'s module
+docstring — and `SYNOPSIS` truncates the docstring to its first two paragraphs
+before argparse sees it. Rightly so: forty lines of rationale in `-h` buries
+what a new project needs to find. But it meant the one correct statement of
+how the commands relate reached no user-facing surface at all.
+
+It is now in three, worded to agree: the README (*Three commands, one stack*),
+a `what this runs:` section in `isabelle-build --help`, and the top of
+`isabelle-watchdog --help`, which held the only previous mention — "records
+the attempt to a build-trajectory corpus", in the help text of the command a
+new adopter reads second. All three also name the one path that genuinely
+loses an attempt, which the README had never mentioned: running `isabelle
+build` yourself. The sources reach the next recorded build, since diffs are
+cumulative; the outcome, timing and error loci do not.
+
+Documentation only — no behaviour changed.
+
+**`docs/logging-design.md` now says what it is.**
+
+It is cited by section number from `record.py`, `attempts.py`, `corpus.py`,
+`watchdog.py` and three of the audits, for reasoning the code cannot state
+itself — why an episode ends at a success rather than a commit, why
+tracked-only capture was a data-quality failure. That half earns its keep.
+
+The other half is a plan from before the implementation, and one section of it
+had gone from stale to wrong. §5 presents a `builds.jsonl` schema; three of its
+twenty-one fields still exist, `timeout_reason` is spelled `"repetition"` where
+the code emits `"loop_progress"`, and it never mentions `diff` — the payload
+the entire design now rests on. Someone writing a reader from it would produce
+one that parses nothing. §§2–11 design a cost axis that was never built:
+`build-stats.py` appears there six times and nowhere in the package.
+
+The repair is to scope the claim rather than to split the document, since
+deciding today which sections are live is the inventory-beside-the-thing-it-
+inventories failure this project has already replaced twice. A dated preamble
+now states that the document is a design record, not documentation, and that
+where it disagrees with the code or with a real record it loses. The README's
+pointer said "the design is documented at length", which sent a new adopter to
+a plan; it now says what the file is for.
+
+**Section numbers are load-bearing, and now checked.** `tests/test_docs.py`
+asserts that every `§N` the package cites resolves to a heading. It found one
+already: `watchdog.py` cited §12.3.2 for the error head, where §12.3 has no
+numbered sub-subsections — the `.2` was a list item within it. The passage was
+real and the coordinates were not, which is the worse of the two failures,
+because a reader who cannot find §12.3.2 concludes the reasoning was never
+written down. Nothing checks the reverse, that every section is cited: half
+the document is superseded plan, and a test demanding otherwise would be an
+argument for deleting the history the document exists to hold.
+
 ## [0.6.2] — 2026-08-28
 
 ### Fixed
