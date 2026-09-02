@@ -9,7 +9,7 @@ that changes what a record contains says so here explicitly, and
 `trajectory check` will tell you whether a corpus written by an older version
 still regenerates.
 
-## [Unreleased]
+## [0.6.3] — 2026-09-02
 
 ### Changed
 
